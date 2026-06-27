@@ -24,6 +24,18 @@ _Avoid_: Build phase, parse phase
 A dependency declared by an ECMAScript module import or re-export whose specifier is known before code execution.
 _Avoid_: Runtime import, CommonJS dependency
 
+**Dynamic Import Dependency**:
+A dependency declared by an ECMAScript `import()` expression whose specifier is known before code execution.
+_Avoid_: Lazy import, runtime import
+
+**Async Split Point**:
+A module graph edge introduced by a dynamic import dependency where the target module should belong to asynchronously loaded bundle output.
+_Avoid_: Lazy boundary, chunk trigger
+
+**Context Module**:
+The bundler concept for a set of possible modules selected by a runtime expression rather than by one static dependency specifier.
+_Avoid_: Dynamic import dependency, wildcard import
+
 **Compiler**:
 The long-lived bundler object that owns configuration and creates compilations.
 _Avoid_: Builder, runner

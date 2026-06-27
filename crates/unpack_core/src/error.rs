@@ -19,6 +19,9 @@ pub enum Error {
     #[error("failed to parse {path}: {message}")]
     Parse { path: PathBuf, message: String },
 
+    #[error("unsupported dynamic import in {path}: {message}")]
+    UnsupportedDynamicImport { path: PathBuf, message: String },
+
     #[error("parser task failed for {path}: {message}")]
     ParseTask { path: PathBuf, message: String },
 

@@ -18,4 +18,5 @@ pub enum DependencyKind {
     Entry,
     StaticImport,
     StaticExport,
+    DynamicImport,
 }

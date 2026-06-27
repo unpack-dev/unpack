@@ -5,7 +5,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
     CompilerOptions, Dependency, DependencyKind, Error, ModuleGraph, ModuleId, ModuleIdentity,
-    Result, UnpackResolver, parser::parse_static_esm_dependencies,
+    Result, UnpackResolver, parser::parse_module_dependencies,
 };
 
 #[derive(Debug, Default)]
@@ -120,7 +120,7 @@ async fn process_request(
         .await
         .map_err(|error| Error::read(&resource, error))?;
     let source_len = source.len();
-    let dependencies = parse_static_esm_dependencies(resource.clone(), source).await?;
+    let dependencies = parse_module_dependencies(resource.clone(), source).await?;
     let issuer_context = resource
         .parent()
         .ok_or(Error::MissingModuleDirectory(add_result.module_id))?

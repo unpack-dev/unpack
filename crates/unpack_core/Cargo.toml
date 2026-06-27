@@ -15,4 +15,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+divan = { workspace = true }
 tempfile = { workspace = true }
+
+[[bench]]
+name = "make_phase"
+harness = false

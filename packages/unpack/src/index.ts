@@ -1,0 +1,309 @@
+import { createRequire } from "node:module";
+import { isAbsolute, resolve } from "node:path";
+
+export interface UnpackOptions {
+  context?: string;
+  entry: string | Record<string, string>;
+  output?: {
+    path?: string;
+  };
+}
+
+export interface StatsError {
+  message: string;
+  path?: string;
+  request?: string;
+  issuer?: string;
+  stack?: string;
+}
+
+export interface StatsAsset {
+  name: string;
+  size: number;
+}
+
+export interface StatsJson {
+  errors: StatsError[];
+  warnings: StatsError[];
+  assets: StatsAsset[];
+  outputPath: string;
+}
+
+export interface Stats {
+  hasErrors(): boolean;
+  toJson(): StatsJson;
+}
+
+export interface Compiler {
+  run(callback: RunCallback): void;
+  close(callback: CloseCallback): void;
+}
+
+export type RunCallback = (err: Error | null, stats?: Stats) => void;
+export type CloseCallback = (err: Error | null) => void;
+
+interface NormalizedEntry {
+  name: string;
+  request: string;
+}
+
+interface NormalizedOptions {
+  context: string;
+  entries: NormalizedEntry[];
+  outputPath: string;
+}
+
+interface NativeStatsJson {
+  errors: StatsError[];
+  warnings?: StatsError[];
+  assets: StatsAsset[];
+  outputPath?: string;
+  output_path?: string;
+}
+
+interface NativeRunResult {
+  error?: {
+    name: string;
+    message: string;
+  } | null;
+  stats?: NativeStatsJson | null;
+}
+
+interface NativeBinding {
+  runCompiler(options: NormalizedOptions): Promise<NativeRunResult>;
+}
+
+const require = createRequire(import.meta.url);
+const native = require("./unpack_node.node") as NativeBinding;
+
+class CompilerImpl implements Compiler {
+  #closed = false;
+  #running = false;
+
+  constructor(private readonly options: NormalizedOptions) {}
+
+  run(callback: RunCallback): void {
+    assertFunction(callback, "callback");
+
+    if (this.#closed) {
+      defer(() => callback(namedError("CompilerClosedError", "compiler is closed")));
+      return;
+    }
+
+    if (this.#running) {
+      defer(() =>
+        callback(namedError("ConcurrentRunError", "compiler is already running"))
+      );
+      return;
+    }
+
+    this.#running = true;
+    let run: Promise<NativeRunResult>;
+    try {
+      run = native.runCompiler(this.options);
+    } catch (error) {
+      this.#running = false;
+      defer(() => callback(toError(error, "InfrastructureError")));
+      return;
+    }
+
+    run.then(
+      (result) => {
+        this.#running = false;
+        if (result.error) {
+          callback(namedError(result.error.name, result.error.message));
+          return;
+        }
+
+        callback(null, new StatsImpl(normalizeNativeStats(result.stats)));
+      },
+      (error: unknown) => {
+        this.#running = false;
+        callback(toError(error, "InfrastructureError"));
+      }
+    );
+  }
+
+  close(callback: CloseCallback): void {
+    assertFunction(callback, "callback");
+
+    if (this.#running) {
+      defer(() =>
+        callback(
+          namedError("CompilerRunningError", "compiler cannot close while running")
+        )
+      );
+      return;
+    }
+
+    this.#closed = true;
+    defer(() => callback(null));
+  }
+}
+
+class StatsImpl implements Stats {
+  constructor(private readonly json: StatsJson) {}
+
+  hasErrors(): boolean {
+    return this.json.errors.length > 0;
+  }
+
+  toJson(): StatsJson {
+    return {
+      errors: this.json.errors.map(cloneStatsError),
+      warnings: this.json.warnings.map(cloneStatsError),
+      assets: this.json.assets.map((asset) => ({ ...asset })),
+      outputPath: this.json.outputPath
+    };
+  }
+}
+
+export default function unpack(
+  options: UnpackOptions,
+  callback?: RunCallback
+): Compiler {
+  if (callback !== undefined) {
+    assertFunction(callback, "callback");
+  }
+
+  const compiler = new CompilerImpl(normalizeOptions(options));
+  if (callback) {
+    compiler.run((runErr, stats) => {
+      compiler.close((closeErr) => {
+        callback(runErr ?? closeErr, stats);
+      });
+    });
+  }
+  return compiler;
+}
+
+function normalizeOptions(options: UnpackOptions): NormalizedOptions {
+  assertPlainObject(options, "options");
+  assertKnownKeys(options, ["context", "entry", "output"], "options");
+
+  const context =
+    options.context === undefined
+      ? process.cwd()
+      : assertString(options.context, "options.context");
+  const normalizedContext = resolve(process.cwd(), context);
+  const output = options.output ?? {};
+  assertPlainObject(output, "options.output");
+  assertKnownKeys(output, ["path"], "options.output");
+
+  const outputPathValue =
+    output.path === undefined
+      ? "dist"
+      : assertString(output.path, "options.output.path");
+  const outputPath = isAbsolute(outputPathValue)
+    ? outputPathValue
+    : resolve(normalizedContext, outputPathValue);
+
+  return {
+    context: normalizedContext,
+    entries: normalizeEntry(options.entry),
+    outputPath
+  };
+}
+
+function normalizeEntry(entry: UnpackOptions["entry"]): NormalizedEntry[] {
+  if (typeof entry === "string") {
+    assertNonEmptyString(entry, "options.entry");
+    return [{ name: "main", request: entry }];
+  }
+
+  assertPlainObject(entry, "options.entry");
+  const entries = Object.entries(entry).map(([name, request]) => {
+    assertNonEmptyString(name, "entry name");
+    assertNonEmptyString(request, `options.entry.${name}`);
+    return { name, request };
+  });
+
+  if (entries.length === 0) {
+    throw new TypeError("options.entry must define at least one entry");
+  }
+
+  return entries;
+}
+
+function normalizeNativeStats(stats: NativeStatsJson | null | undefined): StatsJson {
+  if (!stats) {
+    return { errors: [], warnings: [], assets: [], outputPath: "" };
+  }
+  return {
+    errors: stats.errors.map(cloneStatsError),
+    warnings: (stats.warnings ?? []).map(cloneStatsError),
+    assets: stats.assets.map((asset) => ({ ...asset })),
+    outputPath: stats.outputPath ?? stats.output_path ?? ""
+  };
+}
+
+function cloneStatsError(error: StatsError): StatsError {
+  return {
+    message: error.message,
+    ...(error.path === undefined ? {} : { path: error.path }),
+    ...(error.request === undefined ? {} : { request: error.request }),
+    ...(error.issuer === undefined ? {} : { issuer: error.issuer }),
+    ...(error.stack === undefined ? {} : { stack: error.stack })
+  };
+}
+
+function assertKnownKeys(
+  value: Record<string, unknown>,
+  keys: string[],
+  name: string
+): void {
+  const allowed = new Set(keys);
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new TypeError(`${name} contains unknown option '${unknown[0]}'`);
+  }
+}
+
+function assertPlainObject(value: unknown, name: string): asserts value is Record<string, unknown> {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value)
+  ) {
+    throw new TypeError(`${name} must be an object`);
+  }
+}
+
+function assertString(value: unknown, name: string): string {
+  if (typeof value !== "string") {
+    throw new TypeError(`${name} must be a string`);
+  }
+  return value;
+}
+
+function assertNonEmptyString(value: unknown, name: string): string {
+  const string = assertString(value, name);
+  if (string.length === 0) {
+    throw new TypeError(`${name} must not be empty`);
+  }
+  return string;
+}
+
+function assertFunction(value: unknown, name: string): asserts value is Function {
+  if (typeof value !== "function") {
+    throw new TypeError(`${name} must be a function`);
+  }
+}
+
+function defer(callback: () => void): void {
+  queueMicrotask(callback);
+}
+
+function namedError(name: string, message: string): Error {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
+function toError(error: unknown, name: string): Error {
+  if (error instanceof Error) {
+    error.name = error.name === "Error" ? name : error.name;
+    return error;
+  }
+  return namedError(name, String(error));
+}

@@ -303,13 +303,23 @@ async fn make_records_parse_errors() -> Result<(), Box<dyn std::error::Error>> {
         temp.path(),
         vec![Entry::new("main", "./index")],
     ));
-    let mut compilation = compiler.create_compilation();
+    let compilation = compiler.run().await?;
 
-    let error = compilation.make().await.expect_err("make should fail");
-
-    assert!(matches!(error, Error::Parse { .. }));
     assert_eq!(compilation.errors().len(), 1);
     assert!(matches!(compilation.errors()[0], Error::Parse { .. }));
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .any(|asset| asset.filename == "main.js")
+    );
+
+    let main = compilation
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "main.js")
+        .expect("main asset should exist");
+    assert!(main.source.contains("throw new Error"));
 
     Ok(())
 }
@@ -329,19 +339,44 @@ async fn make_rejects_context_module_dynamic_imports() -> Result<(), Box<dyn std
         temp.path(),
         vec![Entry::new("main", "./index")],
     ));
-    let mut compilation = compiler.create_compilation();
+    let compilation = compiler.run().await?;
 
-    let error = compilation
-        .make()
-        .await
-        .expect_err("context module dynamic import should fail");
-
-    assert!(matches!(error, Error::UnsupportedDynamicImport { .. }));
     assert_eq!(compilation.errors().len(), 1);
     assert!(matches!(
         compilation.errors()[0],
         Error::UnsupportedDynamicImport { .. }
     ));
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .any(|asset| asset.filename == "main.js")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn make_records_resolve_errors_as_failed_modules() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(temp.path().join("index.js"), r#"import "./missing";"#)?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./index")],
+    ));
+    let compilation = compiler.run().await?;
+
+    assert_eq!(compilation.errors().len(), 1);
+    assert!(matches!(compilation.errors()[0], Error::Resolve { .. }));
+
+    let main = compilation
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "main.js")
+        .expect("main asset should exist");
+    assert!(main.source.contains("failed to resolve"));
+    assert!(main.source.contains("throw new Error"));
 
     Ok(())
 }

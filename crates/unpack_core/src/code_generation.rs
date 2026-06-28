@@ -7,10 +7,10 @@ use rspack_sources::{
 
 use crate::{
     AsyncBlockOrigin, Chunk, ChunkGraph, ChunkGroupKind, CompilerOptions, ConstDependency,
-    Dependency, ExportsInfo, HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
-    HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
-    HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Module,
-    ModuleGraph, ModuleId, SourceRange,
+    Dependency, Error, ExportsInfo, HarmonyExportExpressionDependency,
+    HarmonyExportHeaderDependency, HarmonyExportImportedSpecifierDependency,
+    HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
+    HarmonyImportSpecifierDependency, ImportDependency, Module, ModuleGraph, ModuleId, SourceRange,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +314,10 @@ fn render_module_factory(
     module: &Module,
     module_render_ids: &HashMap<ModuleId, String>,
 ) -> ConcatSource {
+    if let Some(error) = module.build_error() {
+        return render_failed_module_factory(error);
+    }
+
     let module_id = module.id();
     let module_render_id = &module_render_ids[&module_id];
     let mut source = ReplaceSource::new(OriginalSource::new(
@@ -371,6 +375,15 @@ fn render_module_factory(
     )));
     factory.add(source);
     factory.add(RawStringSource::from("\n})".to_string()));
+    factory
+}
+
+fn render_failed_module_factory(error: &Error) -> ConcatSource {
+    let mut factory = ConcatSource::default();
+    factory.add(RawStringSource::from(format!(
+        "((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {{\n\"use strict\";\nthrow new Error({});\n}})",
+        json_string(&error.to_string())
+    )));
     factory
 }
 

@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": ["ES2024"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist-test",
+    "paths": {
+      "@unpack-js/core": ["./src/index.ts"]
+    },
+    "rootDir": ".",
+    "strict": true,
+    "target": "ES2024",
+    "types": ["node"]
+  },
+  "include": ["test/**/*.ts"]
+}

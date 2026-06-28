@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/unpack_core"]
+members = ["crates/unpack_core", "crates/unpack_node"]
 
 [workspace.package]
 edition = "2024"
@@ -10,6 +10,9 @@ repository = "https://github.com/unpack-dev/unpack"
 [workspace.dependencies]
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 futures = "0.3.31"
+napi = "3.9.4"
+napi-build = "2.3.2"
+napi-derive = "3.5.7"
 rspack_resolver = { version = "0.9.3", default-features = false }
 rspack_sources = "0.101.1"
 swc_experimental_allocator = "0.11.0"

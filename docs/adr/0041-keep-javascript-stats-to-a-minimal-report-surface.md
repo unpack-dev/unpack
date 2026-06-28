@@ -1,0 +1,3 @@
+# Keep JavaScript Stats to a minimal report surface
+
+The first JavaScript `Stats` object will expose `hasErrors()` and `toJson()`, with `toJson()` returning a fresh plain-object snapshot that reports webpack-like diagnostic objects, an empty `warnings` array, emitted asset metadata, and the output path. Stats errors will use `message` plus contextual fields such as `path`, `request`, `issuer`, and `stack` rather than a stable public error-code enum. Stats will not expose `hasWarnings()` until Unpack has warning producers, and it will not expose the mutable `Compilation`, graph objects, module lists, chunk lists, or asset source, so JavaScript tests validate generated files through `output.path` and use `Stats` for diagnostics and emitted-asset reporting.

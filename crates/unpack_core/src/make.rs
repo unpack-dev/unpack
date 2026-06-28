@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -107,10 +107,27 @@ async fn process_request(
     services: MakeServices,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<Vec<MakeRequest>> {
-    let factorized = services
+    let factorized = match services
         .factory
         .factorize(&request.context, &request.dependency)
-        .await?;
+        .await
+    {
+        Ok(factorized) => factorized,
+        Err(error) if error.is_compilation_error() => {
+            let identity = failed_module_identity(&request.context, &request.dependency);
+            let mut state = state.lock().await;
+            let add_result = state.add_or_connect(
+                request.origin_module,
+                request.entry_index,
+                request.origin_block,
+                request.dependency,
+                identity,
+            );
+            state.fail_module(add_result.module_id, error, String::new())?;
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error),
+    };
     let identity = factorized.identity;
     let resource = factorized.resource;
 
@@ -128,10 +145,28 @@ async fn process_request(
         return Ok(Vec::new());
     }
 
-    let source = tokio::fs::read_to_string(&resource)
-        .await
-        .map_err(|error| Error::read(&resource, error))?;
-    let parsed = parse_module_dependencies(resource.clone(), source.clone()).await?;
+    let source = match tokio::fs::read_to_string(&resource).await {
+        Ok(source) => source,
+        Err(error) => {
+            let error = Error::read(&resource, error);
+            state
+                .lock()
+                .await
+                .fail_module(add_result.module_id, error, String::new())?;
+            return Ok(Vec::new());
+        }
+    };
+    let parsed = match parse_module_dependencies(resource.clone(), source.clone()).await {
+        Ok(parsed) => parsed,
+        Err(error) if error.is_compilation_error() => {
+            state
+                .lock()
+                .await
+                .fail_module(add_result.module_id, error, source)?;
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error),
+    };
     let issuer_context = resource
         .parent()
         .ok_or(Error::MissingModuleDirectory(add_result.module_id))?
@@ -174,6 +209,16 @@ async fn process_request(
         .finish_build(add_result.module_id, parsed, source)?;
 
     Ok(children)
+}
+
+fn failed_module_identity(context: &Path, dependency: &Dependency) -> ModuleIdentity {
+    let request = dependency.request().unwrap_or("<unknown>");
+    let resource = if Path::new(request).is_absolute() {
+        PathBuf::from(request)
+    } else {
+        context.join(request)
+    };
+    ModuleIdentity::new(resource)
 }
 
 impl MakeState {
@@ -219,6 +264,16 @@ impl MakeState {
             parsed.presentational_dependencies,
             source,
         );
+        Ok(())
+    }
+
+    fn fail_module(&mut self, module_id: ModuleId, error: Error, source: String) -> Result<()> {
+        let module = self
+            .module_graph
+            .module_mut(module_id)
+            .ok_or(Error::MissingModule(module_id))?;
+        module.fail_build(error.clone(), source);
+        self.errors.push(error);
         Ok(())
     }
 }

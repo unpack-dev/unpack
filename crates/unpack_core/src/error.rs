@@ -33,6 +33,16 @@ pub enum Error {
 }
 
 impl Error {
+    pub fn is_compilation_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Resolve { .. }
+                | Self::Read { .. }
+                | Self::Parse { .. }
+                | Self::UnsupportedDynamicImport { .. }
+        )
+    }
+
     pub(crate) fn resolve(
         issuer: impl Into<PathBuf>,
         request: impl Into<String>,

@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "test": "cargo test --workspace && pnpm --filter @unpack-js/core test"
+  }
+}

@@ -1,1 +1,5 @@
 /target/
+node_modules/
+packages/*/dist/
+packages/*/dist-test/
+packages/*/node_modules/

@@ -1,0 +1,3 @@
+# Reject close while a compiler run is active
+
+The JavaScript `Compiler.close(callback)` API will be asynchronous and will reject closing while the same compiler has an active run by reporting an infrastructure error. Callers should close after the run callback; after a compiler has closed, later `run` calls will fail with a closed-compiler infrastructure error. `unpack(options, callback)` will automatically close after its internally started run completes and returns a compiler that is no longer reusable after that callback-entry lifecycle finishes. This keeps lifecycle ownership explicit and prevents native resources from being closed during active compilation work.

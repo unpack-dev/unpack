@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{AsyncDependenciesBlock, Dependency, ExportsInfo};
+use crate::{AsyncDependenciesBlock, Dependency, Error, ExportsInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(usize);
@@ -25,6 +25,7 @@ pub struct Module {
     exports_info: ExportsInfo,
     source: String,
     source_len: usize,
+    build_error: Option<Error>,
 }
 
 impl Module {
@@ -38,6 +39,7 @@ impl Module {
             exports_info: ExportsInfo::default(),
             source: String::new(),
             source_len: 0,
+            build_error: None,
         }
     }
 
@@ -73,6 +75,10 @@ impl Module {
         self.source_len
     }
 
+    pub fn build_error(&self) -> Option<&Error> {
+        self.build_error.as_ref()
+    }
+
     pub(crate) fn finish_build(
         &mut self,
         dependencies: Vec<Dependency>,
@@ -86,6 +92,17 @@ impl Module {
         self.dependencies = dependencies;
         self.blocks = blocks;
         self.presentational_dependencies = presentational_dependencies;
+        self.build_error = None;
+    }
+
+    pub(crate) fn fail_build(&mut self, error: Error, source: String) {
+        self.exports_info = ExportsInfo::default();
+        self.source_len = source.len();
+        self.source = source;
+        self.dependencies.clear();
+        self.blocks.clear();
+        self.presentational_dependencies.clear();
+        self.build_error = Some(error);
     }
 }
 

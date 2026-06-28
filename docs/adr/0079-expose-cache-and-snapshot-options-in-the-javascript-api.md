@@ -1,0 +1,5 @@
+# Expose cache and snapshot options in the JavaScript API
+
+The JavaScript API will accept cache options and snapshot options in addition to `context`, `entry`, `output`, and watch options. The TypeScript wrapper remains responsible for strict validation, defaulting, and normalization before passing a narrow native shape across N-API; `cache` may be disabled, memory-backed, or filesystem-backed, while `snapshot` configures module and build-dependency validation strategies. This supersedes the earlier first-wrapper option surface that accepted only `context`, `entry`, and `output`.
+
+The initial public cache shape is `cache?: boolean | { type?: "memory" | "filesystem"; cacheDirectory?: string; cacheLocation?: string; name?: string; version?: string; buildDependencies?: Record<string, string[]>; maxMemoryGenerations?: number; idleTimeout?: number }`. The initial public snapshot shape is `snapshot?: { module?: { timestamp?: boolean; hash?: boolean }; buildDependencies?: { timestamp?: boolean; hash?: boolean } }`. Unknown keys continue to throw synchronous `TypeError`s.

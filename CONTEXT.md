@@ -136,6 +136,26 @@ _Avoid_: Build run, compiler instance
 A long-lived compiler lifecycle that observes input changes and triggers compilations from compiler-owned state.
 _Avoid_: Watch mode, dev server loop
 
+**Watching**:
+The JavaScript API handle returned from starting a watch session.
+_Avoid_: Watch session, watcher instance
+
+**Watch Options**:
+The JavaScript API options that control file watching and rebuild coalescing for a watch session.
+_Avoid_: Compiler options, cache options
+
+**Watch Dependency Set**:
+The compilation-reported filesystem inputs that a watch session uses to subscribe to future changes.
+_Avoid_: Module dependency, import dependency
+
+**Cache Options**:
+The JavaScript API options that enable, disable, and configure build cache layers.
+_Avoid_: Watch options, output options
+
+**Snapshot Options**:
+The JavaScript API options that configure snapshot strategies by snapshot category.
+_Avoid_: Cache options, watch options
+
 **Build Cache**:
 Compiler-owned reusable build information that can be validated and reused across compilations.
 _Avoid_: Compilation cache, module graph reuse
@@ -187,6 +207,10 @@ _Avoid_: Build error, compilation error, fatal error
 **Concurrent Run Error**:
 An infrastructure error reported when a JavaScript API caller starts a compiler run while the same compiler instance is already running.
 _Avoid_: Compilation error, duplicate build warning
+
+**Compiler Running Error**:
+An infrastructure error reported when a JavaScript API caller tries to close a compiler while it owns active run or watch work.
+_Avoid_: Close error, watcher close error
 
 **Compilation Error**:
 A problem found while processing application modules during a completed compiler run.

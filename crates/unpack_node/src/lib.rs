@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use napi::{Env, Result, Task, bindgen_prelude::AsyncTask};
@@ -57,13 +58,54 @@ pub struct NativeRunResult {
     pub stats: Option<NativeStatsJson>,
 }
 
-#[napi(js_name = "runCompiler")]
-pub fn run_compiler(options: NativeCompilerOptions) -> AsyncTask<RunCompilerTask> {
-    AsyncTask::new(RunCompilerTask { options })
+#[napi(js_name = "createCompiler")]
+pub fn create_compiler(options: NativeCompilerOptions) -> NativeCompiler {
+    NativeCompiler::new(options)
+}
+
+#[napi]
+pub struct NativeCompiler {
+    compiler: Option<Arc<Compiler>>,
+    output_path: PathBuf,
+}
+
+#[napi]
+impl NativeCompiler {
+    #[napi]
+    pub fn run(&self) -> AsyncTask<RunCompilerTask> {
+        AsyncTask::new(RunCompilerTask {
+            compiler: self.compiler.clone(),
+            output_path: self.output_path.clone(),
+        })
+    }
+
+    #[napi]
+    pub fn close(&mut self) {
+        self.compiler = None;
+    }
+}
+
+impl NativeCompiler {
+    fn new(options: NativeCompilerOptions) -> Self {
+        let context = PathBuf::from(&options.context);
+        let output_path = PathBuf::from(&options.output_path);
+        let entries = options
+            .entries
+            .into_iter()
+            .map(|entry| Entry::new(entry.name, entry.request))
+            .collect::<Vec<_>>();
+        let compiler = Compiler::new(CompilerOptions::new(context, entries));
+
+        Self {
+            compiler: Some(Arc::new(compiler)),
+            output_path,
+        }
+    }
 }
 
 pub struct RunCompilerTask {
-    options: NativeCompilerOptions,
+    compiler: Option<Arc<Compiler>>,
+    output_path: PathBuf,
 }
 
 impl Task for RunCompilerTask {
@@ -71,7 +113,10 @@ impl Task for RunCompilerTask {
     type JsValue = NativeRunResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        Ok(run_compiler_inner(&self.options))
+        Ok(run_compiler_inner(
+            self.compiler.as_deref(),
+            &self.output_path,
+        ))
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -79,16 +124,10 @@ impl Task for RunCompilerTask {
     }
 }
 
-fn run_compiler_inner(options: &NativeCompilerOptions) -> NativeRunResult {
-    let context = PathBuf::from(&options.context);
-    let output_path = PathBuf::from(&options.output_path);
-    let entries = options
-        .entries
-        .iter()
-        .map(|entry| Entry::new(entry.name.clone(), entry.request.clone()))
-        .collect::<Vec<_>>();
-    let compiler = Compiler::new(CompilerOptions::new(context, entries));
-
+fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> NativeRunResult {
+    let Some(compiler) = compiler else {
+        return infrastructure_error("CompilerClosedError", "compiler is closed");
+    };
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -106,7 +145,7 @@ fn run_compiler_inner(options: &NativeCompilerOptions) -> NativeRunResult {
         }
     };
 
-    if let Err(error) = emit_assets(&output_path, compilation.assets()) {
+    if let Err(error) = emit_assets(output_path, compilation.assets()) {
         return infrastructure_error("OutputWriteError", error);
     }
 

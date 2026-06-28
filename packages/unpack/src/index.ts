@@ -69,8 +69,13 @@ interface NativeRunResult {
   stats?: NativeStatsJson | null;
 }
 
+interface NativeCompiler {
+  run(): Promise<NativeRunResult>;
+  close(): void;
+}
+
 interface NativeBinding {
-  runCompiler(options: NormalizedOptions): Promise<NativeRunResult>;
+  createCompiler(options: NormalizedOptions): NativeCompiler;
 }
 
 const require = createRequire(import.meta.url);
@@ -79,8 +84,11 @@ const native = require("./unpack_node.node") as NativeBinding;
 class CompilerImpl implements Compiler {
   #closed = false;
   #running = false;
+  readonly #nativeCompiler: NativeCompiler;
 
-  constructor(private readonly options: NormalizedOptions) {}
+  constructor(options: NormalizedOptions) {
+    this.#nativeCompiler = native.createCompiler(options);
+  }
 
   run(callback: RunCallback): void {
     assertFunction(callback, "callback");
@@ -100,7 +108,7 @@ class CompilerImpl implements Compiler {
     this.#running = true;
     let run: Promise<NativeRunResult>;
     try {
-      run = native.runCompiler(this.options);
+      run = this.#nativeCompiler.run();
     } catch (error) {
       this.#running = false;
       defer(() => callback(toError(error, "InfrastructureError")));
@@ -136,8 +144,13 @@ class CompilerImpl implements Compiler {
       return;
     }
 
-    this.#closed = true;
-    defer(() => callback(null));
+    try {
+      this.#nativeCompiler.close();
+      this.#closed = true;
+      defer(() => callback(null));
+    } catch (error) {
+      defer(() => callback(toError(error, "InfrastructureError")));
+    }
   }
 }
 

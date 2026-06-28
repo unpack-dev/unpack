@@ -49,13 +49,23 @@ async fn make_constructs_static_esm_module_graph() -> Result<(), Box<dyn std::er
     assert!(resources.contains("src/star.ts"));
     assert!(resources.contains("src/side-effect.jsx"));
 
+    let dep_module = graph
+        .modules()
+        .iter()
+        .find(|module| module.identity().resource.ends_with("dep.ts"))
+        .expect("dep module should exist");
+    assert!(dep_module.exports_info().is_export_provided("value"));
+
     let entry = compilation.entries()[0];
     let outgoing = graph
         .outgoing_connections(entry)
         .map(|connection| {
             (
-                connection.dependency.kind,
-                connection.dependency.request.as_str(),
+                connection.dependency.kind(),
+                connection
+                    .dependency
+                    .request()
+                    .expect("dependency should have request"),
             )
         })
         .collect::<HashSet<_>>();
@@ -65,6 +75,8 @@ async fn make_constructs_static_esm_module_graph() -> Result<(), Box<dyn std::er
         HashSet::from([
             (DependencyKind::StaticImport, "./side-effect"),
             (DependencyKind::StaticImport, "./dep"),
+            (DependencyKind::StaticImport, "./reexport"),
+            (DependencyKind::StaticImport, "./star"),
             (DependencyKind::StaticExport, "./reexport"),
             (DependencyKind::StaticExport, "./star"),
         ])
@@ -126,8 +138,11 @@ async fn make_records_dynamic_import_split_points() -> Result<(), Box<dyn std::e
         .outgoing_connections(entry)
         .map(|connection| {
             (
-                connection.dependency.kind,
-                connection.dependency.request.as_str(),
+                connection.dependency.kind(),
+                connection
+                    .dependency
+                    .request()
+                    .expect("dependency should have request"),
             )
         })
         .collect::<HashSet<_>>();
@@ -151,8 +166,11 @@ async fn make_records_dynamic_import_split_points() -> Result<(), Box<dyn std::e
         .outgoing_connections(feature)
         .map(|connection| {
             (
-                connection.dependency.kind,
-                connection.dependency.request.as_str(),
+                connection.dependency.kind(),
+                connection
+                    .dependency
+                    .request()
+                    .expect("dependency should have request"),
             )
         })
         .collect::<HashSet<_>>();
@@ -229,13 +247,48 @@ async fn make_deduplicates_mixed_import_identity() -> Result<(), Box<dyn std::er
         .id();
     let incoming = graph
         .incoming_connections(feature)
-        .map(|connection| connection.dependency.kind)
+        .map(|connection| connection.dependency.kind())
         .collect::<HashSet<_>>();
 
     assert_eq!(graph.modules().len(), 2);
     assert_eq!(
         incoming,
         HashSet::from([DependencyKind::StaticImport, DependencyKind::DynamicImport])
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn chunk_split_rewires_chunk_groups() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(temp.path().join("index.js"), r#"import "./dep";"#)?;
+    write(temp.path().join("dep.js"), "export const dep = true;")?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./index")],
+    ));
+    let compilation = compiler.run().await?;
+    let mut chunk_graph = compilation.chunk_graph().clone();
+
+    let entry_group = chunk_graph.entrypoints()[0];
+    let original_chunk = chunk_graph.chunk_groups()[entry_group.index()].chunks()[0];
+    let split_chunk = chunk_graph
+        .split_chunk(original_chunk, "split", "split.js")
+        .expect("chunk should split");
+
+    assert!(
+        chunk_graph.chunk_groups()[entry_group.index()]
+            .chunks()
+            .contains(&split_chunk)
+    );
+    assert!(
+        chunk_graph
+            .chunk(split_chunk)
+            .expect("split chunk should exist")
+            .groups()
+            .contains(&entry_group)
     );
 
     Ok(())

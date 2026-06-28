@@ -1,0 +1,3 @@
+# First code splitting uses chunk groups and excludes parent initial modules
+
+Unpack's first chunk graph implementation will create entrypoint chunk groups from each entry's statically reachable modules and async chunk groups from `AsyncDependenciesBlock` targets. Async chunk collection will exclude modules already present in the parent entrypoint's initial chunk, but it will not implement split-chunks extraction, cache groups, min-size rules, min-chunks rules, max-request rules, or shared module extraction across entries or async chunks. `ChunkGroup` is introduced in the first implementation because planned split-chunks support needs a loading relationship separate from individual output chunks.

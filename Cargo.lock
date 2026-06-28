@@ -717,6 +717,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rspack_sources"
+version = "0.101.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e54320b0b5a35911376714c25ebdc5b82504b34601cab124ce52c9054f1095ed"
+dependencies = [
+ "memchr",
+ "rustc-hash",
+ "serde",
+ "simd-json",
+ "simd-utf16-len",
+ "static_assertions",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -816,6 +830,12 @@ dependencies = [
  "simdutf8",
  "value-trait",
 ]
+
+[[package]]
+name = "simd-utf16-len"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c17a83ac53a3ccce2d4fec2031c22b539d12dc95498e75935a6da589b7b4372"
 
 [[package]]
 name = "simdutf8"
@@ -1077,6 +1097,7 @@ dependencies = [
  "codspeed-divan-compat",
  "futures",
  "rspack_resolver",
+ "rspack_sources",
  "swc_experimental_allocator",
  "swc_experimental_ecma_ast",
  "swc_experimental_ecma_parser",

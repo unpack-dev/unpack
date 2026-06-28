@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::Dependency;
+use crate::{AsyncDependenciesBlock, Dependency, ExportsInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(usize);
@@ -20,6 +20,10 @@ pub struct Module {
     id: ModuleId,
     identity: ModuleIdentity,
     dependencies: Vec<Dependency>,
+    blocks: Vec<AsyncDependenciesBlock>,
+    presentational_dependencies: Vec<Dependency>,
+    exports_info: ExportsInfo,
+    source: String,
     source_len: usize,
 }
 
@@ -29,6 +33,10 @@ impl Module {
             id,
             identity,
             dependencies: Vec::new(),
+            blocks: Vec::new(),
+            presentational_dependencies: Vec::new(),
+            exports_info: ExportsInfo::default(),
+            source: String::new(),
             source_len: 0,
         }
     }
@@ -45,13 +53,39 @@ impl Module {
         &self.dependencies
     }
 
+    pub fn blocks(&self) -> &[AsyncDependenciesBlock] {
+        &self.blocks
+    }
+
+    pub fn presentational_dependencies(&self) -> &[Dependency] {
+        &self.presentational_dependencies
+    }
+
+    pub fn exports_info(&self) -> &ExportsInfo {
+        &self.exports_info
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
     pub fn source_len(&self) -> usize {
         self.source_len
     }
 
-    pub(crate) fn finish_build(&mut self, dependencies: Vec<Dependency>, source_len: usize) {
+    pub(crate) fn finish_build(
+        &mut self,
+        dependencies: Vec<Dependency>,
+        blocks: Vec<AsyncDependenciesBlock>,
+        presentational_dependencies: Vec<Dependency>,
+        source: String,
+    ) {
+        self.exports_info = ExportsInfo::from_dependencies(&dependencies);
+        self.source_len = source.len();
+        self.source = source;
         self.dependencies = dependencies;
-        self.source_len = source_len;
+        self.blocks = blocks;
+        self.presentational_dependencies = presentational_dependencies;
     }
 }
 

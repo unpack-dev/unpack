@@ -11,6 +11,7 @@ repository = "https://github.com/unpack-dev/unpack"
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 futures = "0.3.31"
 rspack_resolver = { version = "0.9.3", default-features = false }
+rspack_sources = "0.101.1"
 swc_experimental_allocator = "0.11.0"
 swc_experimental_ecma_ast = "0.11.0"
 swc_experimental_ecma_parser = "0.11.0"

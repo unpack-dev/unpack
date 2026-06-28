@@ -61,6 +61,8 @@ impl Compiler {
     pub async fn run(&self) -> Result<Compilation> {
         let mut compilation = self.create_compilation();
         compilation.make().await?;
+        compilation.build_chunk_graph();
+        compilation.create_assets();
         Ok(compilation)
     }
 }

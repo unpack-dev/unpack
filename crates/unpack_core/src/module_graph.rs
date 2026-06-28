@@ -24,12 +24,14 @@ impl ModuleGraph {
     pub(crate) fn connect(
         &mut self,
         origin_module: Option<ModuleId>,
+        origin_block: Option<usize>,
         dependency: Dependency,
         module: ModuleId,
     ) {
         let connection_id = self.connections.len();
         self.connections.push(ModuleGraphConnection {
             origin_module,
+            origin_block,
             dependency,
             module,
         });
@@ -68,11 +70,25 @@ impl ModuleGraph {
             .iter()
             .map(|connection_id| &self.connections[*connection_id])
     }
+
+    pub fn module_for_dependency(
+        &self,
+        origin_module: ModuleId,
+        origin_block: Option<usize>,
+        dependency: &Dependency,
+    ) -> Option<ModuleId> {
+        self.outgoing_connections(origin_module)
+            .find(|connection| {
+                connection.origin_block == origin_block && &connection.dependency == dependency
+            })
+            .map(|connection| connection.module)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleGraphConnection {
     pub origin_module: Option<ModuleId>,
+    pub origin_block: Option<usize>,
     pub dependency: Dependency,
     pub module: ModuleId,
 }

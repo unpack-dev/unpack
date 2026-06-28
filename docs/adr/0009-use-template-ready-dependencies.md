@@ -1,0 +1,3 @@
+# Use webpack-like dependency taxonomy
+
+Unpack will model dependencies with webpack-aligned names and responsibilities instead of inventing a new dependency taxonomy. `ModuleDependency`-style records will represent requests that participate in module graph resolution, `ConstDependency`-style records will represent source replacements that do not create module graph edges, and dependency templates will apply those records to `rspack_sources` sources during code generation. This keeps source-preserving code generation and future persistent-cache boundaries close to webpack and Rspack while preserving Unpack's Rust implementation and non-compatible public API boundary.

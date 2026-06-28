@@ -1,30 +1,37 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
     CompilerOptions, Dependency, DependencyKind, Error, ModuleGraph, ModuleId, ModuleIdentity,
-    Result, UnpackResolver, parser::parse_module_dependencies,
+    NormalModuleFactory, Result, UnpackResolver,
+    parser::{ParsedModule, parse_module_dependencies},
 };
 
 #[derive(Debug, Default)]
 pub(crate) struct MakeState {
     pub module_graph: ModuleGraph,
-    pub entries: Vec<ModuleId>,
+    pub entries: BTreeMap<usize, ModuleId>,
     pub errors: Vec<Error>,
     modules_by_identity: HashMap<ModuleIdentity, ModuleId>,
 }
 
 #[derive(Debug, Clone)]
 struct MakeServices {
-    resolver: UnpackResolver,
+    factory: NormalModuleFactory,
     semaphore: Arc<Semaphore>,
 }
 
 #[derive(Debug, Clone)]
 struct MakeRequest {
+    entry_index: Option<usize>,
     origin_module: Option<ModuleId>,
+    origin_block: Option<usize>,
     context: PathBuf,
     dependency: Dependency,
 }
@@ -41,15 +48,17 @@ pub(crate) async fn run(
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
     let services = MakeServices {
-        resolver,
+        factory: NormalModuleFactory::new(resolver),
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
 
     let mut queue = FuturesUnordered::new();
-    for entry in &options.entries {
+    for (entry_index, entry) in options.entries.iter().enumerate() {
         queue.push(make_task(
             MakeRequest {
+                entry_index: Some(entry_index),
                 origin_module: None,
+                origin_block: None,
                 context: options.context.clone(),
                 dependency: Dependency::new(DependencyKind::Entry, entry.request.clone()),
             },
@@ -98,18 +107,21 @@ async fn process_request(
     services: MakeServices,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<Vec<MakeRequest>> {
-    let resolved = services
-        .resolver
-        .resolve(&request.context, &request.dependency.request)
+    let factorized = services
+        .factory
+        .factorize(&request.context, &request.dependency)
         .await?;
-    let identity = ModuleIdentity::from(resolved);
-    let resource = identity.resource.clone();
+    let identity = factorized.identity;
+    let resource = factorized.resource;
 
     let add_result = {
-        state
-            .lock()
-            .await
-            .add_or_connect(request.origin_module, request.dependency, identity)
+        state.lock().await.add_or_connect(
+            request.origin_module,
+            request.entry_index,
+            request.origin_block,
+            request.dependency,
+            identity,
+        )
     };
 
     if !add_result.is_new {
@@ -119,27 +131,47 @@ async fn process_request(
     let source = tokio::fs::read_to_string(&resource)
         .await
         .map_err(|error| Error::read(&resource, error))?;
-    let source_len = source.len();
-    let dependencies = parse_module_dependencies(resource.clone(), source).await?;
+    let parsed = parse_module_dependencies(resource.clone(), source.clone()).await?;
     let issuer_context = resource
         .parent()
         .ok_or(Error::MissingModuleDirectory(add_result.module_id))?
         .to_path_buf();
 
-    let children = dependencies
+    let mut children = parsed
+        .dependencies
         .iter()
+        .filter(|dependency| dependency.is_module_dependency())
         .cloned()
         .map(|dependency| MakeRequest {
+            entry_index: None,
             origin_module: Some(add_result.module_id),
+            origin_block: None,
             context: issuer_context.clone(),
             dependency,
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    for (block_index, block) in parsed.blocks.iter().enumerate() {
+        children.extend(
+            block
+                .dependencies()
+                .iter()
+                .filter(|dependency| dependency.is_module_dependency())
+                .cloned()
+                .map(|dependency| MakeRequest {
+                    entry_index: None,
+                    origin_module: Some(add_result.module_id),
+                    origin_block: Some(block_index),
+                    context: issuer_context.clone(),
+                    dependency,
+                }),
+        );
+    }
 
     state
         .lock()
         .await
-        .finish_build(add_result.module_id, dependencies, source_len)?;
+        .finish_build(add_result.module_id, parsed, source)?;
 
     Ok(children)
 }
@@ -148,6 +180,8 @@ impl MakeState {
     fn add_or_connect(
         &mut self,
         origin_module: Option<ModuleId>,
+        entry_index: Option<usize>,
+        origin_block: Option<usize>,
         dependency: Dependency,
         identity: ModuleIdentity,
     ) -> AddModuleResult {
@@ -160,11 +194,11 @@ impl MakeState {
                 (module_id, true)
             };
 
-        if origin_module.is_none() && !self.entries.contains(&module_id) {
-            self.entries.push(module_id);
+        if let Some(entry_index) = entry_index {
+            self.entries.insert(entry_index, module_id);
         }
         self.module_graph
-            .connect(origin_module, dependency, module_id);
+            .connect(origin_module, origin_block, dependency, module_id);
 
         AddModuleResult { module_id, is_new }
     }
@@ -172,14 +206,19 @@ impl MakeState {
     fn finish_build(
         &mut self,
         module_id: ModuleId,
-        dependencies: Vec<Dependency>,
-        source_len: usize,
+        parsed: ParsedModule,
+        source: String,
     ) -> Result<()> {
         let module = self
             .module_graph
             .module_mut(module_id)
             .ok_or(Error::MissingModule(module_id))?;
-        module.finish_build(dependencies, source_len);
+        module.finish_build(
+            parsed.dependencies,
+            parsed.blocks,
+            parsed.presentational_dependencies,
+            source,
+        );
         Ok(())
     }
 }

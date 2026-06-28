@@ -1,0 +1,3 @@
+# Use webpack-like require chunk loading
+
+Unpack async chunk loading will initially follow webpack's node target with CommonJS `require` chunk loading rather than browser JSONP script loading. Initial assets will define the ensure-chunk handler shape around `__webpack_require__.f.require`, `__webpack_require__.e`, `__webpack_require__.u`, and `installedChunks`; async chunk assets will export chunk payload objects containing chunk ids, module factories, and optional runtime. This keeps dynamic import promise semantics while aligning the first runtime target with webpack's `target: "node"` and `chunkLoading: "require"` behavior.

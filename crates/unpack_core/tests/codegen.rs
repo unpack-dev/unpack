@@ -1,0 +1,337 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use unpack_core::{ChunkGroupKind, Compiler, CompilerOptions, Entry};
+
+#[tokio::test]
+async fn emits_node_require_chunks_for_dynamic_import() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            import { eager } from "./eager";
+
+            export async function loadFeature() {
+                const mod = await import("./feature");
+                return [eager, mod.feature, mod.shared, mod.alpha, mod.beta];
+            }
+        "#,
+    )?;
+    write(
+        temp.path().join("src/eager.js"),
+        r#"export const eager = "eager";"#,
+    )?;
+    write(
+        temp.path().join("src/feature.js"),
+        r#"
+            import { shared } from "./shared";
+            export const feature = "feature";
+            export { shared };
+            export * from "./extra";
+            export const alpha = "feature-alpha";
+        "#,
+    )?;
+    write(
+        temp.path().join("src/shared.js"),
+        r#"export const shared = "shared";"#,
+    )?;
+    write(
+        temp.path().join("src/extra.js"),
+        r#"
+            export const alpha = "alpha";
+            export const beta = "beta";
+        "#,
+    )?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ));
+    let compilation = compiler.run().await?;
+
+    assert_eq!(compilation.errors(), []);
+    assert_eq!(compilation.assets().len(), 4);
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .any(|asset| asset.filename == "main.js")
+    );
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .any(|asset| asset.filename == "src_feature_js.js")
+    );
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .any(|asset| asset.filename == "main.js.map")
+    );
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .any(|asset| asset.filename == "src_feature_js.js.map")
+    );
+
+    let chunk_graph = compilation.chunk_graph();
+    assert_eq!(chunk_graph.entrypoints().len(), 1);
+    assert!(chunk_graph.chunk_groups().iter().any(|group| {
+        matches!(group.kind(), ChunkGroupKind::Async) && group.parents().len() == 1
+    }));
+
+    let main = compilation
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "main.js")
+        .expect("main asset should exist");
+    assert!(main.source.contains("__webpack_require__.e"));
+    assert!(main.source.contains("__webpack_require__.f.require"));
+    assert!(main.source.contains("__webpack_require__.u"));
+    assert!(main.source.contains("__webpack_require__.d"));
+    assert!(main.source.contains("__webpack_require__.r"));
+    assert!(main.source.contains("./src/index.js"));
+    assert!(main.source.contains("//# sourceMappingURL=main.js.map"));
+
+    let main_map = compilation
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "main.js.map")
+        .expect("main sourcemap should exist");
+    assert!(main_map.source.contains(r#""file":"main.js""#));
+    assert!(main_map.source.contains("./src/index.js"));
+    assert!(main_map.source.contains("sourcesContent"));
+
+    if !node_available() {
+        return Ok(());
+    }
+
+    let out_dir = temp.path().join("dist");
+    fs::create_dir_all(&out_dir)?;
+    write_assets(&out_dir, compilation.assets())?;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(
+            r#"
+            const entry = require("./main.js");
+            entry.loadFeature()
+              .then(value => {
+                console.log(JSON.stringify(value));
+              })
+              .catch(error => {
+                console.error(error && error.stack || error);
+                process.exit(1);
+              });
+        "#,
+        )
+        .current_dir(&out_dir)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "node failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)?.trim(),
+        r#"["eager","feature","shared","feature-alpha","beta"]"#
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn preserves_import_live_bindings() -> Result<(), Box<dyn std::error::Error>> {
+    if !node_available() {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            import { value, setValue } from "./dep";
+
+            export function read() {
+                return value;
+            }
+
+            export function object() {
+                return { value };
+            }
+
+            export function property(obj) {
+                return obj.value;
+            }
+
+            export function computed(obj) {
+                return obj[value];
+            }
+
+            export function write(next) {
+                setValue(next);
+            }
+        "#,
+    )?;
+    write(
+        temp.path().join("src/dep.js"),
+        r#"
+            export let value = 1;
+            export function setValue(next) {
+                value = next;
+            }
+        "#,
+    )?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ));
+    let compilation = compiler.run().await?;
+    let out_dir = temp.path().join("dist");
+    fs::create_dir_all(&out_dir)?;
+    write_assets(&out_dir, compilation.assets())?;
+
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(
+            r#"
+            const entry = require("./main.js");
+            const before = entry.read();
+            const objectBefore = entry.object().value;
+            entry.write(42);
+            const after = entry.read();
+            const objectAfter = entry.object().value;
+            const member = entry.property({ value: "member" });
+            const computed = entry.computed({ 42: "computed" });
+            console.log(JSON.stringify([before, objectBefore, after, objectAfter, member, computed]));
+        "#,
+        )
+        .current_dir(&out_dir)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "node failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)?.trim(),
+        r#"[1,1,42,42,"member","computed"]"#
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reused_async_chunk_contains_modules_needed_by_each_entry()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !node_available() {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/a.js"),
+        r#"
+            import { shared } from "./shared";
+
+            export async function load() {
+                const mod = await import("./feature");
+                return [shared, mod.feature, mod.shared];
+            }
+        "#,
+    )?;
+    write(
+        temp.path().join("src/b.js"),
+        r#"
+            export async function load() {
+                const mod = await import("./feature");
+                return [mod.feature, mod.shared];
+            }
+        "#,
+    )?;
+    write(
+        temp.path().join("src/feature.js"),
+        r#"
+            import { shared } from "./shared";
+            export const feature = "feature";
+            export { shared };
+        "#,
+    )?;
+    write(
+        temp.path().join("src/shared.js"),
+        r#"export const shared = "shared";"#,
+    )?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("a", "./src/a"), Entry::new("b", "./src/b")],
+    ));
+    let compilation = compiler.run().await?;
+    let out_dir = temp.path().join("dist");
+    fs::create_dir_all(&out_dir)?;
+    write_assets(&out_dir, compilation.assets())?;
+
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(
+            r#"
+            Promise.all([
+              require("./a.js").load(),
+              require("./b.js").load()
+            ])
+              .then(value => {
+                console.log(JSON.stringify(value));
+              })
+              .catch(error => {
+                console.error(error && error.stack || error);
+                process.exit(1);
+              });
+        "#,
+        )
+        .current_dir(&out_dir)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "node failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)?.trim(),
+        r#"[["shared","feature","shared"],["feature","shared"]]"#
+    );
+
+    Ok(())
+}
+
+fn write(path: PathBuf, source: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, source)
+}
+
+fn write_assets(out_dir: &Path, assets: &[unpack_core::Asset]) -> std::io::Result<()> {
+    for asset in assets {
+        write(out_dir.join(&asset.filename), &asset.source)?;
+    }
+    Ok(())
+}
+
+fn node_available() -> bool {
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use crate::{Compilation, ResolveOptions, Result, UnpackResolver, build_cache::BuildCache};
+use crate::{
+    Compilation, ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+};
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx"];
 
@@ -24,6 +26,7 @@ pub struct CompilerOptions {
     pub context: PathBuf,
     pub entries: Vec<Entry>,
     pub resolve: ResolveOptions,
+    pub snapshot: SnapshotOptions,
     pub parallelism: usize,
 }
 
@@ -33,6 +36,7 @@ impl CompilerOptions {
             context: normalize_context(context.into()),
             entries,
             resolve: default_resolve_options(),
+            snapshot: SnapshotOptions::default(),
             parallelism: 100,
         }
     }
@@ -97,7 +101,7 @@ fn normalize_context(context: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::PathBuf};
+    use std::{collections::BTreeMap, fs, path::Path};
 
     use super::*;
 
@@ -143,7 +147,40 @@ mod tests {
         Ok(())
     }
 
-    fn write(path: PathBuf, source: &str) -> std::io::Result<()> {
+    #[tokio::test]
+    async fn hash_module_snapshot_strategy_invalidates_changed_source()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let entry = temp.path().join("index.js");
+        write(&entry, "export const value = 'before';")?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.snapshot.module = crate::SnapshotStrategy::hash();
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        assert!(
+            asset_sources(&first)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("before")
+        );
+
+        write(&entry, "export const value = 'after';")?;
+
+        let second = compiler.run().await?;
+        assert!(
+            asset_sources(&second)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("after")
+        );
+
+        Ok(())
+    }
+
+    fn write(path: impl AsRef<Path>, source: &str) -> std::io::Result<()> {
+        let path = path.as_ref();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }

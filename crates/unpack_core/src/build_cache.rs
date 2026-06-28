@@ -1,9 +1,10 @@
 use std::{
     collections::HashMap,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
-use crate::{ModuleIdentity, parser::ParsedModule};
+use crate::{ModuleIdentity, SnapshotStrategy, parser::ParsedModule, snapshot::FileSnapshot};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BuildCache {
@@ -21,11 +22,16 @@ struct BuildCacheInner {
 pub(crate) struct ModuleBuildRecord {
     parsed: ParsedModule,
     source: String,
+    snapshot: FileSnapshot,
 }
 
 impl ModuleBuildRecord {
-    pub(crate) fn new(parsed: ParsedModule, source: String) -> Self {
-        Self { parsed, source }
+    pub(crate) fn new(parsed: ParsedModule, source: String, snapshot: FileSnapshot) -> Self {
+        Self {
+            parsed,
+            source,
+            snapshot,
+        }
     }
 
     pub(crate) fn parsed(&self) -> &ParsedModule {
@@ -34,6 +40,10 @@ impl ModuleBuildRecord {
 
     pub(crate) fn into_parts(self) -> (ParsedModule, String) {
         (self.parsed, self.source)
+    }
+
+    pub(crate) async fn is_valid(&self, path: &Path, strategy: SnapshotStrategy) -> bool {
+        self.snapshot.is_valid(path, strategy).await
     }
 }
 

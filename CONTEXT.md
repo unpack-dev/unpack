@@ -16,6 +16,10 @@ _Avoid_: Pack, build output
 A named output item produced by a compilation, such as a generated JavaScript file, before it is written to disk.
 _Avoid_: File output, artifact
 
+**Output Path**:
+The filesystem directory where a compiler run writes emitted assets for JavaScript API users.
+_Avoid_: Dist directory, build folder
+
 **Webpack-shaped Output**:
 Bundle output whose file structure and runtime semantics resemble webpack output, including concepts such as module tables, module cache, entry bundles, and asynchronous chunk loading, without promising byte-for-byte output matching or webpack API compatibility.
 _Avoid_: Webpack-compatible output, snapshot-compatible webpack output
@@ -23,6 +27,10 @@ _Avoid_: Webpack-compatible output, snapshot-compatible webpack output
 **JavaScript API**:
 The Node.js-facing programmable API for configuring and running Unpack from JavaScript.
 _Avoid_: Rust API, webpack-compatible API
+
+**JavaScript API Test**:
+A test authored from the JavaScript side that exercises Unpack through the public JavaScript API boundary.
+_Avoid_: Rust core test, internal facade test
 
 **Module Graph**:
 The connected set of modules reachable from one or more entry points.
@@ -88,6 +96,10 @@ _Avoid_: Lazy import, runtime import
 A module graph edge introduced by a dynamic import dependency where the target module should belong to asynchronously loaded bundle output.
 _Avoid_: Lazy boundary, chunk trigger
 
+**Nested Async Split Point**:
+An async split point encountered within code that is itself loaded asynchronously.
+_Avoid_: Second-level dynamic import, nested lazy import
+
 **Async Dependencies Block**:
 A dependency block created for asynchronously loaded dependencies, such as a static-string dynamic import, that acts as the chunk graph's split-point input.
 _Avoid_: Dynamic import dependency marker, lazy import group
@@ -112,9 +124,57 @@ _Avoid_: Dynamic import dependency, wildcard import
 The long-lived bundler object that owns configuration and creates compilations.
 _Avoid_: Builder, runner
 
+**Compiler Close**:
+The JavaScript API lifecycle operation that releases resources owned by a compiler instance after callers are finished running it.
+_Avoid_: Dispose, destroy
+
 **Compilation**:
 A single bundling attempt with its own module graph and build-time state.
 _Avoid_: Build run, compiler instance
+
+**Watch Session**:
+A long-lived compiler lifecycle that observes input changes and triggers compilations from compiler-owned state.
+_Avoid_: Watch mode, dev server loop
+
+**Build Cache**:
+Compiler-owned reusable build information that can be validated and reused across compilations.
+_Avoid_: Compilation cache, module graph reuse
+
+**Cache Item**:
+A named unit of reusable build information stored in the build cache with its own validation data.
+_Avoid_: Cache blob, cached compilation part
+
+**Module Build Record**:
+A cache item that represents the validated result of building one module for reuse across compilations.
+_Avoid_: Cached module, parsed module cache
+
+**File Snapshot**:
+A recorded view of filesystem inputs used to decide whether cached build information is still valid.
+_Avoid_: Watch event, mtime check
+
+**Snapshot Strategy**:
+The configured validation method for a file snapshot, such as timestamp validation, content-hash validation, or a combination of both.
+_Avoid_: Cache mode, watcher policy
+
+**Snapshot Category**:
+A class of filesystem inputs that can use its own snapshot strategy, such as module resources or build dependencies.
+_Avoid_: Cache namespace, watcher group
+
+**Build Dependency**:
+A toolchain or configuration input whose change can invalidate persistent build cache entries.
+_Avoid_: Application dependency, module dependency
+
+**Persistent Cache**:
+A build cache stored outside the process so later compiler instances can reuse validated build information.
+_Avoid_: Disk cache, offline cache
+
+**Cache Pack**:
+A grouped persistent cache storage unit that holds multiple cache items plus metadata needed to find and validate them.
+_Avoid_: Module cache file, cache blob
+
+**Cache Idle Flush**:
+The lifecycle step that writes pending persistent cache updates after a compiler has no active compilation work.
+_Avoid_: Immediate disk write, cache sync
 
 **Stats**:
 The JavaScript API report object returned after a compiler run, exposing build results without exposing the compilation's mutable build-time state.
@@ -122,11 +182,19 @@ _Avoid_: Compilation result, build report
 
 **Infrastructure Error**:
 An error that prevents a compiler run from completing as a bundling attempt.
-_Avoid_: Build error, compilation error
+_Avoid_: Build error, compilation error, fatal error
+
+**Concurrent Run Error**:
+An infrastructure error reported when a JavaScript API caller starts a compiler run while the same compiler instance is already running.
+_Avoid_: Compilation error, duplicate build warning
 
 **Compilation Error**:
 A problem found while processing application modules during a completed compiler run.
 _Avoid_: Infrastructure error, thrown error
+
+**Failed Module**:
+A module that remains in the module graph after module processing reports a compilation error, so emitted output can throw if runtime execution reaches that module.
+_Avoid_: Missing module, skipped module
 
 **Module Identity**:
 The canonical key used during the make phase to decide whether two resolved module requests refer to the same module instance.

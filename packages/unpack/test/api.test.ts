@@ -91,7 +91,8 @@ test("unpack options callback closes the returned compiler", async () => {
 
 test("manual compiler remains reusable until close", async () => {
   const fixture = await createFixture({
-    "src/index.js": "export const value = 1;"
+    "src/index.js": "import './dep'; export const value = 1;",
+    "src/dep.js": "globalThis.__unpackDep = true;"
   });
 
   try {
@@ -102,8 +103,12 @@ test("manual compiler remains reusable until close", async () => {
       }
     );
 
-    assert.equal((await runExistingCompiler(compiler)).err, null);
-    assert.equal((await runExistingCompiler(compiler)).err, null);
+    const first = await runExistingCompiler(compiler);
+    const second = await runExistingCompiler(compiler);
+    assert.equal(first.err, null);
+    assert.equal(second.err, null);
+    assert.deepEqual(second.stats?.toJson(), first.stats?.toJson());
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /__unpackDep/);
     await closeCompiler(compiler);
     assert.equal((await runExistingCompiler(compiler)).err?.name, "CompilerClosedError");
   } finally {

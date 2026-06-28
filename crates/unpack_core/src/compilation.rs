@@ -4,6 +4,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, ModuleGraph, ModuleId, Result, UnpackResolver,
+    build_cache::BuildCache,
     code_generation,
     make::{self, MakeState},
 };
@@ -12,6 +13,7 @@ use crate::{
 pub struct Compilation {
     options: CompilerOptions,
     resolver: UnpackResolver,
+    build_cache: BuildCache,
     module_graph: ModuleGraph,
     chunk_graph: ChunkGraph,
     assets: Vec<Asset>,
@@ -20,10 +22,15 @@ pub struct Compilation {
 }
 
 impl Compilation {
-    pub(crate) fn new(options: CompilerOptions, resolver: UnpackResolver) -> Self {
+    pub(crate) fn new(
+        options: CompilerOptions,
+        resolver: UnpackResolver,
+        build_cache: BuildCache,
+    ) -> Self {
         Self {
             options,
             resolver,
+            build_cache,
             module_graph: ModuleGraph::default(),
             chunk_graph: ChunkGraph::default(),
             assets: Vec::new(),
@@ -58,7 +65,13 @@ impl Compilation {
 
     pub async fn make(&mut self) -> Result<()> {
         let state = Arc::new(Mutex::new(MakeState::default()));
-        let result = make::run(&self.options, self.resolver.clone(), Arc::clone(&state)).await;
+        let result = make::run(
+            &self.options,
+            self.resolver.clone(),
+            self.build_cache.clone(),
+            Arc::clone(&state),
+        )
+        .await;
 
         let mut state = state.lock().await;
         self.module_graph = std::mem::take(&mut state.module_graph);

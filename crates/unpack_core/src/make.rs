@@ -10,6 +10,7 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::{
     CompilerOptions, Dependency, DependencyKind, Error, ModuleGraph, ModuleId, ModuleIdentity,
     NormalModuleFactory, Result, UnpackResolver,
+    build_cache::{BuildCache, ModuleBuildRecord},
     parser::{ParsedModule, parse_module_dependencies},
 };
 
@@ -24,6 +25,7 @@ pub(crate) struct MakeState {
 #[derive(Debug, Clone)]
 struct MakeServices {
     factory: NormalModuleFactory,
+    build_cache: BuildCache,
     semaphore: Arc<Semaphore>,
 }
 
@@ -45,10 +47,12 @@ struct AddModuleResult {
 pub(crate) async fn run(
     options: &CompilerOptions,
     resolver: UnpackResolver,
+    build_cache: BuildCache,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
     let services = MakeServices {
         factory: NormalModuleFactory::new(resolver),
+        build_cache,
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
 
@@ -137,12 +141,28 @@ async fn process_request(
             request.entry_index,
             request.origin_block,
             request.dependency,
-            identity,
+            identity.clone(),
         )
     };
 
     if !add_result.is_new {
         return Ok(Vec::new());
+    }
+
+    let issuer_context = resource
+        .parent()
+        .ok_or(Error::MissingModuleDirectory(add_result.module_id))?
+        .to_path_buf();
+
+    if let Some(record) = services.build_cache.get_module_build(&identity) {
+        let children =
+            module_build_children(add_result.module_id, &issuer_context, record.parsed());
+        let (parsed, source) = record.into_parts();
+        state
+            .lock()
+            .await
+            .finish_build(add_result.module_id, parsed, source)?;
+        return Ok(children);
     }
 
     let source = match tokio::fs::read_to_string(&resource).await {
@@ -167,11 +187,24 @@ async fn process_request(
         }
         Err(error) => return Err(error),
     };
-    let issuer_context = resource
-        .parent()
-        .ok_or(Error::MissingModuleDirectory(add_result.module_id))?
-        .to_path_buf();
+    let children = module_build_children(add_result.module_id, &issuer_context, &parsed);
+    let record = ModuleBuildRecord::new(parsed.clone(), source.clone());
 
+    state
+        .lock()
+        .await
+        .finish_build(add_result.module_id, parsed, source)?;
+    services.build_cache.store_module_build(identity, record);
+
+    Ok(children)
+}
+
+fn module_build_children(
+    module_id: ModuleId,
+    issuer_context: &Path,
+    parsed: &ParsedModule,
+) -> Vec<MakeRequest> {
+    let issuer_context = issuer_context.to_path_buf();
     let mut children = parsed
         .dependencies
         .iter()
@@ -179,7 +212,7 @@ async fn process_request(
         .cloned()
         .map(|dependency| MakeRequest {
             entry_index: None,
-            origin_module: Some(add_result.module_id),
+            origin_module: Some(module_id),
             origin_block: None,
             context: issuer_context.clone(),
             dependency,
@@ -195,7 +228,7 @@ async fn process_request(
                 .cloned()
                 .map(|dependency| MakeRequest {
                     entry_index: None,
-                    origin_module: Some(add_result.module_id),
+                    origin_module: Some(module_id),
                     origin_block: Some(block_index),
                     context: issuer_context.clone(),
                     dependency,
@@ -203,12 +236,7 @@ async fn process_request(
         );
     }
 
-    state
-        .lock()
-        .await
-        .finish_build(add_result.module_id, parsed, source)?;
-
-    Ok(children)
+    children
 }
 
 fn failed_module_identity(context: &Path, dependency: &Dependency) -> ModuleIdentity {

@@ -1,0 +1,3 @@
+# Reject run, watch, and close conflicts per compiler
+
+A JavaScript `Compiler` will allow only one active run or watch session at a time. Calling `run` or `watch` while the same compiler is running or watching reports an asynchronous concurrent-run infrastructure error; calling `compiler.close` while a run or watch session is active reports a compiler-running infrastructure error and requires callers to close the `Watching` handle first. Closing a `Watching` handle stops that watch lifecycle without closing the compiler, so the compiler may be reused for later `run` or `watch` calls until `compiler.close` is called.

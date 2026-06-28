@@ -6,7 +6,10 @@ use std::{
 
 use napi::{Env, Result, Task, bindgen_prelude::AsyncTask};
 use napi_derive::napi;
-use unpack_core::{Asset, Compiler, CompilerOptions, Entry, Error as CoreError};
+use unpack_core::{
+    Asset, BuildDependency, CacheOptions, Compiler, CompilerOptions, Entry, Error as CoreError,
+    SnapshotOptions, SnapshotStrategy,
+};
 
 #[napi(object)]
 pub struct NativeEntry {
@@ -20,6 +23,45 @@ pub struct NativeCompilerOptions {
     pub entries: Vec<NativeEntry>,
     #[napi(js_name = "outputPath")]
     pub output_path: String,
+    pub cache: NativeCacheOptions,
+    pub snapshot: NativeSnapshotOptions,
+}
+
+#[napi(object)]
+pub struct NativeCacheOptions {
+    #[napi(js_name = "type")]
+    pub cache_type: String,
+    #[napi(js_name = "cacheDirectory")]
+    pub cache_directory: Option<String>,
+    #[napi(js_name = "cacheLocation")]
+    pub cache_location: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    #[napi(js_name = "buildDependencies")]
+    pub build_dependencies: Vec<NativeBuildDependency>,
+    #[napi(js_name = "maxMemoryGenerations")]
+    pub max_memory_generations: Option<u32>,
+    #[napi(js_name = "idleTimeout")]
+    pub idle_timeout: Option<u32>,
+}
+
+#[napi(object)]
+pub struct NativeBuildDependency {
+    pub name: String,
+    pub files: Vec<String>,
+}
+
+#[napi(object)]
+pub struct NativeSnapshotOptions {
+    pub module: NativeSnapshotStrategy,
+    #[napi(js_name = "buildDependencies")]
+    pub build_dependencies: NativeSnapshotStrategy,
+}
+
+#[napi(object)]
+pub struct NativeSnapshotStrategy {
+    pub timestamp: bool,
+    pub hash: bool,
 }
 
 #[napi(object)]
@@ -94,12 +136,52 @@ impl NativeCompiler {
             .into_iter()
             .map(|entry| Entry::new(entry.name, entry.request))
             .collect::<Vec<_>>();
-        let compiler = Compiler::new(CompilerOptions::new(context, entries));
+        let mut compiler_options = CompilerOptions::new(context, entries);
+        compiler_options.cache = cache_options_from_native(options.cache);
+        compiler_options.snapshot = snapshot_options_from_native(options.snapshot);
+        let compiler = Compiler::new(compiler_options);
 
         Self {
             compiler: Some(Arc::new(compiler)),
             output_path,
         }
+    }
+}
+
+fn cache_options_from_native(options: NativeCacheOptions) -> CacheOptions {
+    let mut cache = match options.cache_type.as_str() {
+        "disabled" => CacheOptions::disabled(),
+        "filesystem" => CacheOptions::filesystem(),
+        _ => CacheOptions::memory(),
+    };
+    cache.cache_directory = options.cache_directory.map(PathBuf::from);
+    cache.cache_location = options.cache_location.map(PathBuf::from);
+    cache.name = options.name;
+    cache.version = options.version;
+    cache.build_dependencies = options
+        .build_dependencies
+        .into_iter()
+        .map(|dependency| BuildDependency {
+            name: dependency.name,
+            files: dependency.files.into_iter().map(PathBuf::from).collect(),
+        })
+        .collect();
+    cache.max_memory_generations = options.max_memory_generations;
+    cache.idle_timeout = options.idle_timeout;
+    cache
+}
+
+fn snapshot_options_from_native(options: NativeSnapshotOptions) -> SnapshotOptions {
+    SnapshotOptions {
+        module: snapshot_strategy_from_native(options.module),
+        build_dependencies: snapshot_strategy_from_native(options.build_dependencies),
+    }
+}
+
+fn snapshot_strategy_from_native(strategy: NativeSnapshotStrategy) -> SnapshotStrategy {
+    SnapshotStrategy {
+        timestamp: strategy.timestamp,
+        hash: strategy.hash,
     }
 }
 

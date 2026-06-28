@@ -5,12 +5,14 @@ use crate::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotOptions {
     pub module: SnapshotStrategy,
+    pub build_dependencies: SnapshotStrategy,
 }
 
 impl Default for SnapshotOptions {
     fn default() -> Self {
         Self {
             module: SnapshotStrategy::timestamp(),
+            build_dependencies: SnapshotStrategy::timestamp_and_hash(),
         }
     }
 }

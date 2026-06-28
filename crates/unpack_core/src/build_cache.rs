@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -8,7 +8,80 @@ use crate::{ModuleIdentity, SnapshotStrategy, parser::ParsedModule, snapshot::Fi
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BuildCache {
+    options: CacheOptions,
     inner: Arc<Mutex<BuildCacheInner>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheOptions {
+    pub kind: CacheKind,
+    pub cache_directory: Option<PathBuf>,
+    pub cache_location: Option<PathBuf>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub build_dependencies: Vec<BuildDependency>,
+    pub max_memory_generations: Option<u32>,
+    pub idle_timeout: Option<u32>,
+}
+
+impl Default for CacheOptions {
+    fn default() -> Self {
+        Self::memory()
+    }
+}
+
+impl CacheOptions {
+    pub fn disabled() -> Self {
+        Self {
+            kind: CacheKind::Disabled,
+            cache_directory: None,
+            cache_location: None,
+            name: None,
+            version: None,
+            build_dependencies: Vec::new(),
+            max_memory_generations: None,
+            idle_timeout: None,
+        }
+    }
+
+    pub fn memory() -> Self {
+        Self {
+            kind: CacheKind::Memory,
+            cache_directory: None,
+            cache_location: None,
+            name: None,
+            version: None,
+            build_dependencies: Vec::new(),
+            max_memory_generations: None,
+            idle_timeout: None,
+        }
+    }
+
+    pub fn filesystem() -> Self {
+        Self {
+            kind: CacheKind::Filesystem,
+            cache_directory: None,
+            cache_location: None,
+            name: None,
+            version: None,
+            build_dependencies: Vec::new(),
+            max_memory_generations: None,
+            idle_timeout: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheKind {
+    Disabled,
+    Memory,
+    Filesystem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildDependency {
+    pub name: String,
+    pub files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -48,7 +121,18 @@ impl ModuleBuildRecord {
 }
 
 impl BuildCache {
+    pub(crate) fn new(options: CacheOptions) -> Self {
+        Self {
+            options,
+            inner: Arc::new(Mutex::new(BuildCacheInner::default())),
+        }
+    }
+
     pub(crate) fn get_module_build(&self, identity: &ModuleIdentity) -> Option<ModuleBuildRecord> {
+        if self.options.kind == CacheKind::Disabled {
+            return None;
+        }
+
         let mut inner = self
             .inner
             .lock()
@@ -63,6 +147,10 @@ impl BuildCache {
     }
 
     pub(crate) fn store_module_build(&self, identity: ModuleIdentity, record: ModuleBuildRecord) {
+        if self.options.kind == CacheKind::Disabled {
+            return;
+        }
+
         self.inner
             .lock()
             .expect("build cache mutex should not be poisoned")

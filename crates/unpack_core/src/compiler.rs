@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use crate::{
-    Compilation, ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+    CacheOptions, Compilation, ResolveOptions, Result, SnapshotOptions, UnpackResolver,
+    build_cache::BuildCache,
 };
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx"];
@@ -25,6 +26,7 @@ impl Entry {
 pub struct CompilerOptions {
     pub context: PathBuf,
     pub entries: Vec<Entry>,
+    pub cache: CacheOptions,
     pub resolve: ResolveOptions,
     pub snapshot: SnapshotOptions,
     pub parallelism: usize,
@@ -35,6 +37,7 @@ impl CompilerOptions {
         Self {
             context: normalize_context(context.into()),
             entries,
+            cache: CacheOptions::default(),
             resolve: default_resolve_options(),
             snapshot: SnapshotOptions::default(),
             parallelism: 100,
@@ -52,10 +55,11 @@ pub struct Compiler {
 impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
         let resolver = UnpackResolver::new(options.resolve.clone());
+        let build_cache = BuildCache::new(options.cache.clone());
         Self {
             options,
             resolver,
-            build_cache: BuildCache::default(),
+            build_cache,
         }
     }
 

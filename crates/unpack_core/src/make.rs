@@ -9,9 +9,10 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
     CompilerOptions, Dependency, DependencyKind, Error, ModuleGraph, ModuleId, ModuleIdentity,
-    NormalModuleFactory, Result, UnpackResolver,
+    NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildRecord},
     parser::{ParsedModule, parse_module_dependencies},
+    snapshot::FileSnapshot,
 };
 
 #[derive(Debug, Default)]
@@ -26,6 +27,7 @@ pub(crate) struct MakeState {
 struct MakeServices {
     factory: NormalModuleFactory,
     build_cache: BuildCache,
+    module_snapshot_strategy: SnapshotStrategy,
     semaphore: Arc<Semaphore>,
 }
 
@@ -53,6 +55,7 @@ pub(crate) async fn run(
     let services = MakeServices {
         factory: NormalModuleFactory::new(resolver),
         build_cache,
+        module_snapshot_strategy: options.snapshot.module,
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
 
@@ -155,14 +158,19 @@ async fn process_request(
         .to_path_buf();
 
     if let Some(record) = services.build_cache.get_module_build(&identity) {
-        let children =
-            module_build_children(add_result.module_id, &issuer_context, record.parsed());
-        let (parsed, source) = record.into_parts();
-        state
-            .lock()
+        if record
+            .is_valid(&resource, services.module_snapshot_strategy)
             .await
-            .finish_build(add_result.module_id, parsed, source)?;
-        return Ok(children);
+        {
+            let children =
+                module_build_children(add_result.module_id, &issuer_context, record.parsed());
+            let (parsed, source) = record.into_parts();
+            state
+                .lock()
+                .await
+                .finish_build(add_result.module_id, parsed, source)?;
+            return Ok(children);
+        }
     }
 
     let source = match tokio::fs::read_to_string(&resource).await {
@@ -188,7 +196,9 @@ async fn process_request(
         Err(error) => return Err(error),
     };
     let children = module_build_children(add_result.module_id, &issuer_context, &parsed);
-    let record = ModuleBuildRecord::new(parsed.clone(), source.clone());
+    let snapshot =
+        FileSnapshot::create(&resource, &source, services.module_snapshot_strategy).await?;
+    let record = ModuleBuildRecord::new(parsed.clone(), source.clone(), snapshot);
 
     state
         .lock()

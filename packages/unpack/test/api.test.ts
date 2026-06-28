@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -112,6 +112,31 @@ test("manual compiler remains reusable until close", async () => {
     await closeCompiler(compiler);
     assert.equal((await runExistingCompiler(compiler)).err?.name, "CompilerClosedError");
   } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("manual compiler rerun emits source edits", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const entry = join(fixture, "src/index.js");
+
+  try {
+    const first = await runExistingCompiler(compiler);
+    assert.equal(first.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(entry, changedTime, changedTime);
+
+    const second = await runExistingCompiler(compiler);
+    assert.equal(second.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+  } finally {
+    await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
   }
 });

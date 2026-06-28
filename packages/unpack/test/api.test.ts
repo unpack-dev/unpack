@@ -141,6 +141,104 @@ test("manual compiler rerun emits source edits", async () => {
   }
 });
 
+test("cache false disables module build cache reuse", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const entry = join(fixture, "src/index.js");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(entry, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: false
+  });
+
+  try {
+    const first = await runExistingCompiler(compiler);
+    assert.equal(first.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    await utimes(entry, stableTime, stableTime);
+
+    const second = await runExistingCompiler(compiler);
+    assert.equal(second.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("snapshot module hash detects same-timestamp source edits", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const entry = join(fixture, "src/index.js");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(entry, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      module: { timestamp: false, hash: true },
+      buildDependencies: { timestamp: true, hash: true }
+    }
+  });
+
+  try {
+    const first = await runExistingCompiler(compiler);
+    assert.equal(first.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    await utimes(entry, stableTime, stableTime);
+
+    const second = await runExistingCompiler(compiler);
+    assert.equal(second.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("accepts filesystem cache option shape", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;",
+    "config/build.js": "export default {};"
+  });
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      cache: {
+        type: "filesystem",
+        cacheDirectory: ".cache/unpack",
+        name: "test-cache",
+        version: "v1",
+        buildDependencies: {
+          config: ["./config/build.js"]
+        },
+        maxMemoryGenerations: 2,
+        idleTimeout: 10
+      },
+      snapshot: {
+        module: { timestamp: true, hash: false },
+        buildDependencies: { timestamp: true, hash: true }
+      }
+    });
+
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("run callback is asynchronous", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"
@@ -218,6 +316,54 @@ test("top-level option validation throws synchronously", () => {
         null
       ),
     /options must be an object/
+  );
+});
+
+test("cache and snapshot option validation throws synchronously", () => {
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        // @ts-expect-error intentionally testing runtime validation
+        cache: "memory"
+      }),
+    /options.cache must be a boolean or an object/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        cache: {
+          type: "memory",
+          // @ts-expect-error intentionally testing runtime validation
+          unknown: true
+        }
+      }),
+    /options.cache contains unknown option 'unknown'/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          // @ts-expect-error intentionally testing runtime validation
+          resolve: {}
+        }
+      }),
+    /options.snapshot contains unknown option 'resolve'/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          module: {
+            // @ts-expect-error intentionally testing runtime validation
+            timestamp: "yes"
+          }
+        }
+      }),
+    /options.snapshot.module.timestamp must be a boolean/
   );
 });
 

@@ -14,6 +14,7 @@ mod parser;
 mod resolver;
 mod snapshot;
 
+pub use build_cache::{BuildDependency, CacheKind, CacheOptions};
 pub use chunk_graph::{
     AsyncBlockOrigin, Chunk, ChunkGraph, ChunkGroup, ChunkGroupId, ChunkGroupKind, ChunkId,
 };

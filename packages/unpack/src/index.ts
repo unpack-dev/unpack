@@ -34,12 +34,17 @@ export interface SnapshotOptions {
   resolve?: SnapshotStrategyOptions;
   buildDependencies?: SnapshotStrategyOptions;
   resolveBuildDependencies?: SnapshotStrategyOptions;
+  managedPaths?: SnapshotPathPattern[];
+  immutablePaths?: SnapshotPathPattern[];
+  unmanagedPaths?: SnapshotPathPattern[];
 }
 
 export interface SnapshotStrategyOptions {
   timestamp?: boolean;
   hash?: boolean;
 }
+
+export type SnapshotPathPattern = string | RegExp;
 
 export interface InfrastructureLoggingOptions {
   level?: InfrastructureLoggingLevel;
@@ -143,12 +148,29 @@ interface NormalizedSnapshotOptions {
   resolve: NormalizedSnapshotStrategy;
   buildDependencies: NormalizedSnapshotStrategy;
   resolveBuildDependencies: NormalizedSnapshotStrategy;
+  managedPaths: NormalizedSnapshotPathPattern[];
+  immutablePaths: NormalizedSnapshotPathPattern[];
+  unmanagedPaths: NormalizedSnapshotPathPattern[];
 }
 
 interface NormalizedSnapshotStrategy {
   timestamp: boolean;
   hash: boolean;
 }
+
+type NormalizedSnapshotPathPattern =
+  | {
+      type: "path";
+      path: string;
+    }
+  | {
+      type: "regexp";
+      source: string;
+      flags: "" | "i";
+    }
+  | {
+      type: "nodeModules";
+    };
 
 interface NormalizedInfrastructureLoggingOptions {
   level: InfrastructureLoggingLevel;
@@ -587,6 +609,8 @@ class WatchingImpl implements Watching {
       return;
     }
 
+    this.#clearRebuildTimer();
+    this.#closeWatchers();
     this.#running = true;
     let latestStats: Stats | undefined;
     await this.#runCompilation((err, stats) => {
@@ -598,7 +622,8 @@ class WatchingImpl implements Watching {
     this.#running = false;
 
     if (!this.#closed && latestStats) {
-      this.#replaceWatchers(latestStats.toJson().watchDependencies);
+      const latestJson = latestStats.toJson();
+      this.#replaceWatchers(latestJson.watchDependencies, latestJson.outputPath);
     }
 
     if (this.#closed) {
@@ -621,7 +646,7 @@ class WatchingImpl implements Watching {
     }
   }
 
-  #replaceWatchers(dependencies: WatchDependencySets): void {
+  #replaceWatchers(dependencies: WatchDependencySets, outputPath: string): void {
     this.#closeWatchers();
     const targets = watchTargets(dependencies).filter(
       (target) => !isIgnoredWatchPath(target.path, this.#watchOptions.ignored)
@@ -634,16 +659,49 @@ class WatchingImpl implements Watching {
       return;
     }
 
+    const directlyWatchedPaths = new Set(
+      targets
+        .filter((target) => target.kind !== "context")
+        .map((target) => target.path)
+    );
+    const contextWatchedPaths = new Set(
+      targets
+        .filter((target) => target.kind === "context")
+        .map((target) => target.path)
+    );
+    const targetSnapshots = new Map(
+      targets.map((target) => [target.path, pollSnapshot(target.path)])
+    );
     for (const target of targets) {
       try {
         this.#watchers.push(
           watchFileSystem(target.path, { persistent: false }, (_eventType, filename) => {
+            if (target.kind === "context" && !filename && this.#watchOptions.ignored.length > 0) {
+              return;
+            }
             const changedPath =
               target.kind === "context" && filename
                 ? resolve(target.path, filename.toString())
                 : target.path;
+            if (isOutputWatchPath(changedPath, outputPath)) {
+              return;
+            }
+            if (target.kind === "context" && contextWatchedPaths.has(changedPath)) {
+              return;
+            }
+            if (target.kind === "context" && directlyWatchedPaths.has(changedPath)) {
+              return;
+            }
             if (isIgnoredWatchPath(changedPath, this.#watchOptions.ignored)) {
               return;
+            }
+            if (target.kind !== "context") {
+              const previous = targetSnapshots.get(target.path);
+              const next = pollSnapshot(target.path);
+              targetSnapshots.set(target.path, next);
+              if (previous && pollSnapshotsEqual(previous, next)) {
+                return;
+              }
             }
             this.#queueRebuild();
           })
@@ -915,14 +973,25 @@ function normalizeSnapshotOptions(
       module: { ...moduleAndResolveDefaults },
       resolve: { ...moduleAndResolveDefaults },
       buildDependencies: { timestamp: true, hash: true },
-      resolveBuildDependencies: { timestamp: true, hash: true }
+      resolveBuildDependencies: { timestamp: true, hash: true },
+      managedPaths: defaultManagedPaths(),
+      immutablePaths: [],
+      unmanagedPaths: []
     };
   }
 
   assertPlainObject(snapshot, "options.snapshot");
   assertKnownKeys(
     snapshot,
-    ["module", "resolve", "buildDependencies", "resolveBuildDependencies"],
+    [
+      "module",
+      "resolve",
+      "buildDependencies",
+      "resolveBuildDependencies",
+      "managedPaths",
+      "immutablePaths",
+      "unmanagedPaths"
+    ],
     "options.snapshot"
   );
 
@@ -952,8 +1021,27 @@ function normalizeSnapshotOptions(
         timestamp: true,
         hash: true
       }
+    ),
+    managedPaths: normalizeSnapshotPathPatterns(
+      snapshot.managedPaths,
+      "options.snapshot.managedPaths",
+      defaultManagedPaths()
+    ),
+    immutablePaths: normalizeSnapshotPathPatterns(
+      snapshot.immutablePaths,
+      "options.snapshot.immutablePaths",
+      []
+    ),
+    unmanagedPaths: normalizeSnapshotPathPatterns(
+      snapshot.unmanagedPaths,
+      "options.snapshot.unmanagedPaths",
+      []
     )
   };
+}
+
+function defaultManagedPaths(): NormalizedSnapshotPathPattern[] {
+  return [{ type: "nodeModules" }];
 }
 
 function defaultModuleAndResolveSnapshotStrategy(mode: Mode): NormalizedSnapshotStrategy {
@@ -984,6 +1072,43 @@ function normalizeSnapshotStrategy(
     throw new TypeError(`${name} must enable timestamp or hash validation`);
   }
   return normalized;
+}
+
+function normalizeSnapshotPathPatterns(
+  patterns: unknown,
+  name: string,
+  defaults: NormalizedSnapshotPathPattern[]
+): NormalizedSnapshotPathPattern[] {
+  if (patterns === undefined) {
+    return defaults.map((pattern) => ({ ...pattern }));
+  }
+
+  if (!Array.isArray(patterns)) {
+    throw new TypeError(`${name} must be an array`);
+  }
+
+  return patterns.map((pattern, index) => normalizeSnapshotPathPattern(pattern, `${name}[${index}]`));
+}
+
+function normalizeSnapshotPathPattern(
+  pattern: unknown,
+  name: string
+): NormalizedSnapshotPathPattern {
+  if (typeof pattern === "string") {
+    if (!isAbsolute(pattern)) {
+      throw new TypeError(`${name} must be an absolute path`);
+    }
+    return { type: "path", path: pattern };
+  }
+
+  if (pattern instanceof RegExp) {
+    if (pattern.flags !== "" && pattern.flags !== "i") {
+      throw new TypeError(`${name} RegExp flags must be empty or 'i'`);
+    }
+    return { type: "regexp", source: pattern.source, flags: pattern.flags as "" | "i" };
+  }
+
+  throw new TypeError(`${name} must be a string or RegExp`);
 }
 
 function normalizeInfrastructureLoggingOptions(
@@ -1219,8 +1344,20 @@ function isIgnoredWatchPath(path: string, ignored: WatchIgnoredMatcher[]): boole
   });
 }
 
+function isOutputWatchPath(path: string, outputPath: string): boolean {
+  const normalizedPath = normalizeWatchMatchPath(path);
+  const normalizedOutputPath = normalizeWatchMatchPath(outputPath);
+  return (
+    normalizedPath === normalizedOutputPath ||
+    normalizedPath.startsWith(`${normalizedOutputPath}/`)
+  );
+}
+
 function normalizeWatchMatchPath(path: string): string {
-  return path.replaceAll("\\", "/");
+  const normalizedPath = path.replaceAll("\\", "/");
+  return normalizedPath.startsWith("/private/var/")
+    ? normalizedPath.replace(/^\/private\/var\//, "/var/")
+    : normalizedPath;
 }
 
 function pollSnapshot(path: string): PollSnapshot {

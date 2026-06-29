@@ -298,6 +298,9 @@ impl AddTask {
                         .file_dependencies
                         .extend(factorized.file_dependencies.iter().cloned());
                     state
+                        .context_dependencies
+                        .extend(factorized.context_dependencies.iter().cloned());
+                    state
                         .missing_dependencies
                         .extend(factorized.missing_dependencies.iter().cloned());
                     state.file_dependencies.insert(resource.clone());
@@ -646,11 +649,7 @@ mod tests {
 
         let options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
         let resolver = UnpackResolver::new(options.resolve.clone());
-        let build_cache = BuildCache::new(
-            options.cache.clone(),
-            options.snapshot.build_dependencies,
-            options.snapshot.resolve_build_dependencies,
-        );
+        let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
         let state = Arc::new(Mutex::new(MakeState::default()));
 
         run(

@@ -646,11 +646,7 @@ mod tests {
 
         let options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
         let resolver = UnpackResolver::new(options.resolve.clone());
-        let build_cache = BuildCache::new(
-            options.cache.clone(),
-            options.snapshot.build_dependencies,
-            options.snapshot.resolve_build_dependencies,
-        );
+        let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
         let state = Arc::new(Mutex::new(MakeState::default()));
 
         run(

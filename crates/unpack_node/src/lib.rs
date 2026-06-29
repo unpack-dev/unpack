@@ -418,6 +418,13 @@ fn stats_error(error: &CoreError) -> NativeStatsError {
             issuer: None,
             stack: None,
         },
+        CoreError::MakeTask { message } => NativeStatsError {
+            message: error.to_string(),
+            path: None,
+            request: None,
+            issuer: None,
+            stack: Some(message.clone()),
+        },
     }
 }
 

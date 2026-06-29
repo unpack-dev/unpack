@@ -86,6 +86,15 @@ pub struct NativeStatsJson {
     pub assets: Vec<NativeAsset>,
     #[napi(js_name = "outputPath")]
     pub output_path: String,
+    #[napi(js_name = "watchDependencies")]
+    pub watch_dependencies: NativeWatchDependencies,
+}
+
+#[napi(object)]
+pub struct NativeWatchDependencies {
+    pub files: Vec<String>,
+    pub contexts: Vec<String>,
+    pub missing: Vec<String>,
 }
 
 #[napi(object)]
@@ -284,6 +293,7 @@ fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> Native
             warnings: Vec::new(),
             assets: compilation.assets().iter().map(asset_stats).collect(),
             output_path: output_path.to_string_lossy().into_owned(),
+            watch_dependencies: watch_dependencies(compilation.watch_dependencies()),
         }),
     }
 }
@@ -367,5 +377,25 @@ fn asset_stats(asset: &Asset) -> NativeAsset {
     NativeAsset {
         name: asset.filename.clone(),
         size: asset.source.len().try_into().unwrap_or(u32::MAX),
+    }
+}
+
+fn watch_dependencies(dependencies: &unpack_core::WatchDependencies) -> NativeWatchDependencies {
+    NativeWatchDependencies {
+        files: dependencies
+            .files()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        contexts: dependencies
+            .contexts()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        missing: dependencies
+            .missing()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
     }
 }

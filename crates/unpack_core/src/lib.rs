@@ -19,7 +19,7 @@ pub use chunk_graph::{
     AsyncBlockOrigin, Chunk, ChunkGraph, ChunkGroup, ChunkGroupId, ChunkGroupKind, ChunkId,
 };
 pub use code_generation::{Asset, RuntimeRequirement, RuntimeRequirements};
-pub use compilation::Compilation;
+pub use compilation::{Compilation, WatchDependencies};
 pub use compiler::{Compiler, CompilerOptions, DEFAULT_EXTENSIONS, Entry};
 pub use dependency::{
     AsyncDependenciesBlock, ConstDependency, Dependency, DependencyKind, EntryDependency,

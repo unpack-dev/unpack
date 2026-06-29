@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -20,6 +20,9 @@ pub(crate) struct MakeState {
     pub module_graph: ModuleGraph,
     pub entries: BTreeMap<usize, ModuleId>,
     pub errors: Vec<Error>,
+    pub file_dependencies: BTreeSet<PathBuf>,
+    pub context_dependencies: BTreeSet<PathBuf>,
+    pub missing_dependencies: BTreeSet<PathBuf>,
     modules_by_identity: HashMap<ModuleIdentity, ModuleId>,
 }
 
@@ -123,6 +126,7 @@ async fn process_request(
         Err(error) if error.is_compilation_error() => {
             let identity = failed_module_identity(&request.context, &request.dependency);
             let mut state = state.lock().await;
+            state.missing_dependencies.insert(identity.resource.clone());
             let add_result = state.add_or_connect(
                 request.origin_module,
                 request.entry_index,
@@ -139,7 +143,9 @@ async fn process_request(
     let resource = factorized.resource;
 
     let add_result = {
-        state.lock().await.add_or_connect(
+        let mut state = state.lock().await;
+        state.file_dependencies.insert(resource.clone());
+        state.add_or_connect(
             request.origin_module,
             request.entry_index,
             request.origin_block,
@@ -256,7 +262,19 @@ fn failed_module_identity(context: &Path, dependency: &Dependency) -> ModuleIden
     } else {
         context.join(request)
     };
-    ModuleIdentity::new(resource)
+    ModuleIdentity::new(normalize_missing_resource(resource))
+}
+
+fn normalize_missing_resource(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir if normalized.pop() => {}
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 impl MakeState {

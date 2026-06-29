@@ -60,6 +60,32 @@ test("supports object entries", async () => {
   }
 });
 
+test("can disable sourcemap emission", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 42;"
+  });
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      sourcemap: false
+    });
+
+    assert.equal(err, null);
+    assert.ok(stats);
+    assert.deepEqual(
+      stats.toJson().assets.map((asset) => asset.name).sort(),
+      ["main.js"]
+    );
+    const main = await readFile(join(fixture, "dist/main.js"), "utf8");
+    await assert.rejects(readFile(join(fixture, "dist/main.js.map"), "utf8"));
+    assert.doesNotMatch(main, /sourceMappingURL/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("unpack options callback closes the returned compiler", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"
@@ -952,6 +978,15 @@ test("top-level option validation throws synchronously", () => {
         mode: "staging"
       }),
     /options.mode must be 'development', 'production', or 'none'/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        // @ts-expect-error intentionally testing runtime validation
+        sourcemap: "hidden"
+      }),
+    /options.sourcemap must be a boolean/
   );
   assert.throws(
     () =>

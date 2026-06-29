@@ -20,6 +20,7 @@ export const adapters = {
         context: fixture.context,
         entry: fixture.entry,
         output: { path: outputDir },
+        sourcemap: false,
         cache: persistentCache
           ? {
               type: "filesystem",

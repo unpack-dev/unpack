@@ -37,6 +37,7 @@ pub struct NativeCompilerOptions {
     pub snapshot: NativeSnapshotOptions,
     #[napi(js_name = "infrastructureLogging")]
     pub infrastructure_logging: NativeInfrastructureLoggingOptions,
+    pub sourcemap: bool,
 }
 
 #[napi(object)]
@@ -205,6 +206,7 @@ impl NativeCompiler {
         compiler_options.snapshot = snapshot_options_from_native(options.snapshot)?;
         compiler_options.infrastructure_logging =
             infrastructure_logging_options_from_native(options.infrastructure_logging);
+        compiler_options.sourcemap = options.sourcemap;
         let compiler = Compiler::new(compiler_options);
 
         Ok(Self {

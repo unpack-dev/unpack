@@ -52,7 +52,7 @@ export async function runBenchmark(options = {}) {
   }
 
   return {
-    schema_version: 1,
+    schema_version: 2,
     generated_at: new Date().toISOString(),
     results
   };
@@ -60,8 +60,8 @@ export async function runBenchmark(options = {}) {
 
 export function toSummaryMarkdown(report) {
   const lines = [
-    "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | output_bytes | status |",
-    "| --- | --- | --- | ---: | ---: | ---: | --- |"
+    "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | no_cache_build_ms | output_bytes | status |",
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"
   ];
 
   for (const result of report.results) {
@@ -72,6 +72,7 @@ export function toSummaryMarkdown(report) {
         result.version_source ?? "",
         formatNumber(result.cold_build_ms),
         formatNumber(result.warm_build_ms),
+        formatNumber(result.no_cache_build_ms),
         formatNumber(result.output_bytes, 0),
         result.status
       ].join(" | ").replace(/^/, "| ").replace(/$/, " |")
@@ -88,6 +89,11 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     ? adapter.outputDir({ fixture, baseDir, options })
     : join(baseDir, "output");
   const cacheDir = join(baseDir, "cache");
+  const noCacheBaseDir = join(baseDir, "no-cache");
+  const noCacheOutputDir = adapter?.outputDir
+    ? adapter.outputDir({ fixture, baseDir: noCacheBaseDir, options })
+    : join(noCacheBaseDir, "output");
+  const noCacheCacheDir = join(noCacheBaseDir, "cache");
 
   if (!adapter) {
     return emptyResult({
@@ -117,6 +123,7 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     fixture,
     outputDir,
     cacheDir,
+    persistentCache: true,
     options
   });
   if (cold.status !== "success") {
@@ -129,14 +136,37 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     fixture,
     outputDir,
     cacheDir,
+    persistentCache: true,
     options
   });
 
-  return resultFromPhases({ fixture, bundler, versionSource, cold, warm });
+  if (warm.status !== "success") {
+    return resultFromPhases({ fixture, bundler, versionSource, cold, warm });
+  }
+
+  const noCache = await timedBuild({
+    adapter,
+    phase: "no-cache",
+    fixture,
+    outputDir: noCacheOutputDir,
+    cacheDir: noCacheCacheDir,
+    persistentCache: false,
+    options
+  });
+
+  return resultFromPhases({ fixture, bundler, versionSource, cold, warm, noCache });
 }
 
-async function timedBuild({ adapter, phase, fixture, outputDir, cacheDir, options }) {
-  if (phase === "cold") {
+async function timedBuild({
+  adapter,
+  phase,
+  fixture,
+  outputDir,
+  cacheDir,
+  persistentCache,
+  options
+}) {
+  if (phase === "cold" || phase === "no-cache") {
     await rm(outputDir, { recursive: true, force: true });
     await rm(cacheDir, { recursive: true, force: true });
   }
@@ -151,6 +181,7 @@ async function timedBuild({ adapter, phase, fixture, outputDir, cacheDir, option
       outputDir,
       cacheDir,
       phase,
+      persistentCache,
       options
     });
   } catch (error) {
@@ -221,15 +252,23 @@ async function verifyBundle({ entryFile, outputDir, expectedChecksum }) {
   }
 }
 
-function resultFromPhases({ fixture, bundler, versionSource, cold, warm }) {
+function resultFromPhases({ fixture, bundler, versionSource, cold, warm, noCache }) {
   const status =
     cold.status !== "success"
       ? cold.status
       : warm && warm.status !== "success"
         ? `warm_${warm.status}`
+        : noCache && noCache.status !== "success"
+          ? `no_cache_${noCache.status}`
         : "success";
   const message =
-    cold.status !== "success" ? cold.message : warm?.status !== "success" ? warm.message : null;
+    cold.status !== "success"
+      ? cold.message
+      : warm?.status !== "success"
+        ? warm.message
+        : noCache?.status !== "success"
+          ? noCache.message
+          : null;
 
   return {
     fixture: fixture.name,
@@ -237,13 +276,19 @@ function resultFromPhases({ fixture, bundler, versionSource, cold, warm }) {
     version_source: versionSource,
     cold_build_ms: cold.status === "success" ? cold.build_ms : null,
     warm_build_ms: warm?.status === "success" ? warm.build_ms : null,
-    output_bytes: warm?.output_bytes ?? cold.output_bytes,
+    no_cache_build_ms: noCache?.status === "success" ? noCache.build_ms : null,
+    output_bytes: warm?.output_bytes ?? noCache?.output_bytes ?? cold.output_bytes,
     cold_status: cold.status,
     warm_status: warm?.status ?? "not_run",
+    no_cache_status: noCache?.status ?? "not_run",
     verify_status:
-      cold.status === "runtime_failed" || warm?.status === "runtime_failed"
+      cold.status === "runtime_failed" ||
+      warm?.status === "runtime_failed" ||
+      noCache?.status === "runtime_failed"
         ? "runtime_failed"
-        : cold.status === "success" && (!warm || warm.status === "success")
+        : cold.status === "success" &&
+            (!warm || warm.status === "success") &&
+            (!noCache || noCache.status === "success")
           ? "success"
           : "not_run",
     status,
@@ -258,9 +303,11 @@ function emptyResult({ fixture, bundler, versionSource, status, message }) {
     version_source: versionSource,
     cold_build_ms: null,
     warm_build_ms: null,
+    no_cache_build_ms: null,
     output_bytes: null,
     cold_status: "not_run",
     warm_status: "not_run",
+    no_cache_status: "not_run",
     verify_status: "not_run",
     status,
     error: message

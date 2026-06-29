@@ -11,8 +11,9 @@ import { runBenchmark, toSummaryMarkdown } from "../src/runner.mjs";
 
 const execFileAsync = promisify(execFile);
 
-test("runner emits cold and warm measurements for a verified bundle", async () => {
+test("runner emits persistent-cache and no-cache measurements for a verified bundle", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+  const calls = [];
 
   try {
     const report = await runBenchmark({
@@ -20,22 +21,34 @@ test("runner emits cold and warm measurements for a verified bundle", async () =
       fixtures: ["small"],
       bundlers: ["fake"],
       adapters: {
-        fake: fakeAdapter()
+        fake: fakeAdapter({ calls })
       }
     });
 
-    assert.equal(report.schema_version, 1);
+    assert.equal(report.schema_version, 2);
     assert.equal(report.results.length, 1);
     assert.equal(report.results[0].fixture, "small");
     assert.equal(report.results[0].bundler, "fake");
     assert.equal(report.results[0].status, "success");
     assert.equal(report.results[0].cold_status, "success");
     assert.equal(report.results[0].warm_status, "success");
+    assert.equal(report.results[0].no_cache_status, "success");
     assert.equal(report.results[0].verify_status, "success");
     assert.equal(typeof report.results[0].cold_build_ms, "number");
     assert.equal(typeof report.results[0].warm_build_ms, "number");
+    assert.equal(typeof report.results[0].no_cache_build_ms, "number");
     assert.ok(report.results[0].output_bytes > 0);
-    assert.match(toSummaryMarkdown(report), /\\| small \\| fake \\| fake@1\\.0\\.0 \\|/);
+    assert.deepEqual(
+      calls.map(({ phase, persistentCache }) => ({ phase, persistentCache })),
+      [
+        { phase: "cold", persistentCache: true },
+        { phase: "warm", persistentCache: true },
+        { phase: "no-cache", persistentCache: false }
+      ]
+    );
+    const summary = toSummaryMarkdown(report);
+    assert.match(summary, /no_cache_build_ms/);
+    assert.match(summary, /\\| small \\| fake \\| fake@1\\.0\\.0 \\|/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -57,7 +70,9 @@ test("runner marks a built bundle with the wrong checksum as runtime_failed", as
     assert.equal(report.results[0].status, "runtime_failed");
     assert.equal(report.results[0].cold_status, "runtime_failed");
     assert.equal(report.results[0].warm_status, "not_run");
+    assert.equal(report.results[0].no_cache_status, "not_run");
     assert.equal(report.results[0].warm_build_ms, null);
+    assert.equal(report.results[0].no_cache_build_ms, null);
     assert.match(report.results[0].error, /expected bundle checksum/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
@@ -82,6 +97,7 @@ test("runner reports unsupported adapters explicitly", async () => {
     assert.equal(report.results[0].status, "unsupported");
     assert.equal(report.results[0].cold_build_ms, null);
     assert.equal(report.results[0].warm_build_ms, null);
+    assert.equal(report.results[0].no_cache_build_ms, null);
     assert.match(report.results[0].error, /not available/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
@@ -209,11 +225,12 @@ test("turbopack prepare patches build shutdown to flush persistent cache", async
   }
 });
 
-function fakeAdapter({ checksumOffset = 0, error } = {}) {
+function fakeAdapter({ checksumOffset = 0, error, calls } = {}) {
   return {
     name: "fake",
     versionSource: () => "fake@1.0.0",
-    async build({ fixture, outputDir }) {
+    async build({ fixture, outputDir, phase, persistentCache }) {
+      calls?.push({ phase, persistentCache });
       if (error) {
         throw error;
       }

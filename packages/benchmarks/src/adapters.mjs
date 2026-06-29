@@ -14,17 +14,19 @@ export const adapters = {
   unpack: {
     name: "unpack",
     versionSource: () => `@unpack-js/core@${packageVersion("@unpack-js/core")}`,
-    async build({ fixture, outputDir, cacheDir }) {
+    async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
       const { default: unpack } = await import("@unpack-js/core");
       const compiler = unpack({
         context: fixture.context,
         entry: fixture.entry,
         output: { path: outputDir },
-        cache: {
-          type: "filesystem",
-          cacheLocation: cacheDir,
-          idleTimeout: 0
-        }
+        cache: persistentCache
+          ? {
+              type: "filesystem",
+              cacheLocation: cacheDir,
+              idleTimeout: 0
+            }
+          : false
       });
 
       try {
@@ -47,15 +49,17 @@ export const adapters = {
   webpack: {
     name: "webpack",
     versionSource: () => `webpack@${packageVersion("webpack")}`,
-    async build({ fixture, outputDir, cacheDir }) {
+    async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
       const webpackModule = await import("webpack");
       const webpack = webpackModule.default ?? webpackModule;
       const compiler = webpack({
         ...webpackLikeConfig({ fixture, outputDir }),
-        cache: {
-          type: "filesystem",
-          cacheDirectory: cacheDir
-        }
+        cache: persistentCache
+          ? {
+              type: "filesystem",
+              cacheDirectory: cacheDir
+            }
+          : false
       });
 
       try {
@@ -72,18 +76,20 @@ export const adapters = {
   rspack: {
     name: "rspack",
     versionSource: () => `@rspack/core@${packageVersion("@rspack/core")}`,
-    async build({ fixture, outputDir, cacheDir }) {
+    async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
       const rspackModule = await import("@rspack/core");
       const rspack = rspackModule.rspack ?? rspackModule.default;
       const compiler = rspack({
         ...webpackLikeConfig({ fixture, outputDir }),
-        cache: {
-          type: "persistent",
-          storage: {
-            type: "filesystem",
-            directory: cacheDir
-          }
-        }
+        cache: persistentCache
+          ? {
+              type: "persistent",
+              storage: {
+                type: "filesystem",
+                directory: cacheDir
+              }
+            }
+          : false
       });
 
       try {
@@ -157,7 +163,7 @@ export const adapters = {
       });
       preparedTurbopackBuilds.add(prepareKey);
     },
-    async build({ fixture, cacheDir, options }) {
+    async build({ fixture, cacheDir, persistentCache = true, options }) {
       const repo = options.turbopackRepo;
       if (!repo) {
         throw unsupported("Turbopack requires --turbopack-repo pointing at a fixed Next.js checkout");
@@ -170,25 +176,26 @@ export const adapters = {
         profile === "dev" ? "debug" : profile,
         "turbopack-cli"
       );
+      const args = [
+        "build",
+        "--dir",
+        fixture.context,
+        "--root",
+        fixture.context,
+        "--target",
+        "node",
+        "--no-minify",
+        "--no-sourcemap",
+        "--no-scope-hoist"
+      ];
+      if (persistentCache) {
+        args.push("--persistent-caching", "--cache-dir", cacheDir);
+      }
+      args.push(fixture.entry);
 
       await execFile(
         binary,
-        [
-          "build",
-          "--dir",
-          fixture.context,
-          "--root",
-          fixture.context,
-          "--target",
-          "node",
-          "--no-minify",
-          "--no-sourcemap",
-          "--no-scope-hoist",
-          "--persistent-caching",
-          "--cache-dir",
-          cacheDir,
-          fixture.entry
-        ],
+        args,
         {
           cwd: repo,
           env: { ...process.env, CI: process.env.CI ?? "1" },

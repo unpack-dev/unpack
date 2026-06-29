@@ -40,11 +40,12 @@ The runner emits a Markdown summary and can write the raw JSON report with `--ou
 
 Important fields:
 
-- `cold_build_ms`: build time after clearing benchmark-owned output and cache state.
-- `warm_build_ms`: build time for the second run in the same job while preserving benchmark-owned cache state.
+- `cold_build_ms`: build time after clearing benchmark-owned output and persistent cache state.
+- `warm_build_ms`: build time for the second run in the same job while preserving benchmark-owned persistent cache state.
+- `no_cache_build_ms`: build time for an additional clean build with persistent cache disabled. Bundlers without a persistent-cache option run this as a separate clean one-shot build.
 - `output_bytes`: bytes emitted under the benchmark output path, excluding runner metadata.
 - `version_source`: the npm package version or fixed source commit used for the bundler.
-- `status`: `success`, `unsupported`, `setup_failed`, `build_failed`, `runtime_failed`, or a warm-build variant.
+- `status`: `success`, `unsupported`, `setup_failed`, `build_failed`, `runtime_failed`, or a warm/no-cache build variant.
 
 Runtime verification is separate from build timing. A Bundle that builds but does not export the expected checksum is marked `runtime_failed` and should not be treated as a valid performance result.
 

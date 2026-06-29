@@ -223,6 +223,7 @@ test("accepts filesystem cache option shape", async () => {
   };
   const snapshot = {
     module: { timestamp: true, hash: false },
+    resolve: { timestamp: true, hash: false },
     buildDependencies: { timestamp: true, hash: true }
   };
 
@@ -389,7 +390,8 @@ test("stats exposes watch dependency sets", async () => {
       join(sourceRoot, "index.js")
     ]);
     assert.deepEqual(json.watchDependencies.contexts, []);
-    assert.deepEqual(json.watchDependencies.missing, [join(sourceRoot, "missing")]);
+    assert.ok(json.watchDependencies.missing.includes(join(sourceRoot, "missing")));
+    assert.ok(json.watchDependencies.missing.includes(join(sourceRoot, "dep.ts")));
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
@@ -649,10 +651,23 @@ test("cache and snapshot option validation throws synchronously", () => {
         entry: "./src/index.js",
         snapshot: {
           // @ts-expect-error intentionally testing runtime validation
-          resolve: {}
+          unknown: {}
         }
       }),
-    /options.snapshot contains unknown option 'resolve'/
+    /options.snapshot contains unknown option 'unknown'/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          resolve: {
+            // @ts-expect-error intentionally testing runtime validation
+            hash: "yes"
+          }
+        }
+      }),
+    /options.snapshot.resolve.hash must be a boolean/
   );
   assert.throws(
     () =>

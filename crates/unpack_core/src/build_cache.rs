@@ -1,16 +1,20 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
-use crate::{ModuleIdentity, SnapshotStrategy, parser::ParsedModule, snapshot::FileSnapshot};
+use crate::{
+    ModuleIdentity, SnapshotStrategy,
+    parser::ParsedModule,
+    snapshot::{FileSetSnapshot, FileSnapshot},
+};
 use serde::{Deserialize, Serialize};
 
 const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
 const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
-const CACHE_SCHEMA_VERSION: u32 = 1;
+const CACHE_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
 const MANIFEST_FILE: &str = "container.json";
 
@@ -19,6 +23,16 @@ pub(crate) struct BuildCache {
     options: CacheOptions,
     build_dependency_snapshot_strategy: SnapshotStrategy,
     inner: Arc<Mutex<BuildCacheInner>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NormalModuleFactoryCache {
+    build_cache: BuildCache,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModuleBuildCache {
+    build_cache: BuildCache,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,10 +109,83 @@ pub struct BuildDependency {
 
 #[derive(Debug, Default)]
 struct BuildCacheInner {
+    resolve_records: HashMap<ResolveRequest, ResolveRecord>,
     module_builds: HashMap<ModuleIdentity, ModuleBuildRecord>,
     dirty: bool,
+    resolve_hits: usize,
+    resolve_misses: usize,
     module_hits: usize,
     module_misses: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct ResolveRequest {
+    context: PathBuf,
+    request: String,
+}
+
+impl ResolveRequest {
+    pub(crate) fn new(context: impl Into<PathBuf>, request: impl Into<String>) -> Self {
+        Self {
+            context: context.into(),
+            request: request.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ResolveRecord {
+    identity: ModuleIdentity,
+    resource: PathBuf,
+    file_dependencies: BTreeSet<PathBuf>,
+    missing_dependencies: BTreeSet<PathBuf>,
+    snapshot: FileSetSnapshot,
+}
+
+impl ResolveRecord {
+    pub(crate) async fn new(
+        identity: ModuleIdentity,
+        resource: PathBuf,
+        file_dependencies: BTreeSet<PathBuf>,
+        missing_dependencies: BTreeSet<PathBuf>,
+        strategy: SnapshotStrategy,
+    ) -> crate::Result<Self> {
+        let snapshot = FileSetSnapshot::create(
+            file_dependencies
+                .iter()
+                .chain(missing_dependencies.iter())
+                .cloned(),
+            strategy,
+        )
+        .await?;
+        Ok(Self {
+            identity,
+            resource,
+            file_dependencies,
+            missing_dependencies,
+            snapshot,
+        })
+    }
+
+    pub(crate) fn identity(&self) -> &ModuleIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn resource(&self) -> &Path {
+        &self.resource
+    }
+
+    pub(crate) fn file_dependencies(&self) -> &BTreeSet<PathBuf> {
+        &self.file_dependencies
+    }
+
+    pub(crate) fn missing_dependencies(&self) -> &BTreeSet<PathBuf> {
+        &self.missing_dependencies
+    }
+
+    pub(crate) async fn is_valid(&self, strategy: SnapshotStrategy) -> bool {
+        self.snapshot.is_valid(strategy).await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,38 +231,15 @@ impl BuildCache {
         cache
     }
 
-    pub(crate) fn get_module_build(&self, identity: &ModuleIdentity) -> Option<ModuleBuildRecord> {
-        if self.options.kind == CacheKind::Disabled {
-            return None;
+    pub(crate) fn normal_module_factory(&self) -> NormalModuleFactoryCache {
+        NormalModuleFactoryCache {
+            build_cache: self.clone(),
         }
-
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("build cache mutex should not be poisoned");
-        let record = inner.module_builds.get(identity).cloned();
-        if record.is_some() {
-            inner.module_hits += 1;
-        } else {
-            inner.module_misses += 1;
-        }
-        record
     }
 
-    pub(crate) fn store_module_build(&self, identity: ModuleIdentity, record: ModuleBuildRecord) {
-        if self.options.kind == CacheKind::Disabled {
-            return;
-        }
-
-        {
-            let mut inner = self
-                .inner
-                .lock()
-                .expect("build cache mutex should not be poisoned");
-            inner.module_builds.insert(identity, record);
-            if self.options.kind == CacheKind::Filesystem {
-                inner.dirty = true;
-            }
+    pub(crate) fn module_builds(&self) -> ModuleBuildCache {
+        ModuleBuildCache {
+            build_cache: self.clone(),
         }
     }
 
@@ -184,7 +248,7 @@ impl BuildCache {
             return Ok(());
         }
 
-        let module_builds = {
+        let (resolve_records, module_builds) = {
             let inner = self
                 .inner
                 .lock()
@@ -192,10 +256,10 @@ impl BuildCache {
             if !inner.dirty {
                 return Ok(());
             }
-            inner.module_builds.clone()
+            (inner.resolve_records.clone(), inner.module_builds.clone())
         };
 
-        self.write_filesystem_cache(&module_builds)?;
+        self.write_filesystem_cache(&resolve_records, &module_builds)?;
 
         self.inner
             .lock()
@@ -211,9 +275,86 @@ impl BuildCache {
             .lock()
             .expect("build cache mutex should not be poisoned");
         BuildCacheStats {
+            resolve_entries: inner.resolve_records.len(),
+            resolve_hits: inner.resolve_hits,
+            resolve_misses: inner.resolve_misses,
             module_entries: inner.module_builds.len(),
             module_hits: inner.module_hits,
             module_misses: inner.module_misses,
+        }
+    }
+}
+
+impl NormalModuleFactoryCache {
+    pub(crate) fn get_resolve_record(&self, request: &ResolveRequest) -> Option<ResolveRecord> {
+        if self.build_cache.options.kind == CacheKind::Disabled {
+            return None;
+        }
+
+        let mut inner = self
+            .build_cache
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        let record = inner.resolve_records.get(request).cloned();
+        if record.is_some() {
+            inner.resolve_hits += 1;
+        } else {
+            inner.resolve_misses += 1;
+        }
+        record
+    }
+
+    pub(crate) fn store_resolve_record(&self, request: ResolveRequest, record: ResolveRecord) {
+        if self.build_cache.options.kind == CacheKind::Disabled {
+            return;
+        }
+
+        let mut inner = self
+            .build_cache
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        inner.resolve_records.insert(request, record);
+        if self.build_cache.options.kind == CacheKind::Filesystem {
+            inner.dirty = true;
+        }
+    }
+}
+
+impl ModuleBuildCache {
+    pub(crate) fn get_module_build(&self, identity: &ModuleIdentity) -> Option<ModuleBuildRecord> {
+        if self.build_cache.options.kind == CacheKind::Disabled {
+            return None;
+        }
+
+        let mut inner = self
+            .build_cache
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        let record = inner.module_builds.get(identity).cloned();
+        if record.is_some() {
+            inner.module_hits += 1;
+        } else {
+            inner.module_misses += 1;
+        }
+        record
+    }
+
+    pub(crate) fn store_module_build(&self, identity: ModuleIdentity, record: ModuleBuildRecord) {
+        if self.build_cache.options.kind == CacheKind::Disabled {
+            return;
+        }
+
+        let mut inner = self
+            .build_cache
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        inner.module_builds.insert(identity, record);
+        if self.build_cache.options.kind == CacheKind::Filesystem {
+            inner.dirty = true;
         }
     }
 }
@@ -243,14 +384,17 @@ impl BuildCache {
             return;
         }
 
-        self.inner
+        let mut inner = self
+            .inner
             .lock()
-            .expect("build cache mutex should not be poisoned")
-            .module_builds = pack.module_builds.into_iter().collect();
+            .expect("build cache mutex should not be poisoned");
+        inner.resolve_records = pack.resolve_records.into_iter().collect();
+        inner.module_builds = pack.module_builds.into_iter().collect();
     }
 
     fn write_filesystem_cache(
         &self,
+        resolve_records: &HashMap<ResolveRequest, ResolveRecord>,
         module_builds: &HashMap<ModuleIdentity, ModuleBuildRecord>,
     ) -> io::Result<()> {
         let Some(cache_location) = &self.options.cache_location else {
@@ -268,6 +412,10 @@ impl BuildCache {
             magic: CACHE_MAGIC.to_string(),
             schema_version: CACHE_SCHEMA_VERSION,
             cache_version: cache_version.clone(),
+            resolve_records: resolve_records
+                .iter()
+                .map(|(request, record)| (request.clone(), record.clone()))
+                .collect(),
             module_builds: module_builds
                 .iter()
                 .map(|(identity, record)| (identity.clone(), record.clone()))
@@ -400,12 +548,16 @@ struct CachePackDto {
     magic: String,
     schema_version: u32,
     cache_version: String,
+    resolve_records: Vec<(ResolveRequest, ResolveRecord)>,
     module_builds: Vec<(ModuleIdentity, ModuleBuildRecord)>,
 }
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BuildCacheStats {
+    pub resolve_entries: usize,
+    pub resolve_hits: usize,
+    pub resolve_misses: usize,
     pub module_entries: usize,
     pub module_hits: usize,
     pub module_misses: usize,

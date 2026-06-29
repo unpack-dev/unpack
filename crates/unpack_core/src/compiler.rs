@@ -139,12 +139,18 @@ mod tests {
         assert_eq!(first_cache.module_entries, 2);
         assert_eq!(first_cache.module_hits, 0);
         assert_eq!(first_cache.module_misses, 2);
+        assert_eq!(first_cache.resolve_entries, 2);
+        assert_eq!(first_cache.resolve_hits, 0);
+        assert_eq!(first_cache.resolve_misses, 2);
 
         let second = compiler.run().await?;
         let second_cache = compiler.build_cache.stats();
         assert_eq!(second_cache.module_entries, 2);
         assert_eq!(second_cache.module_hits, 2);
         assert_eq!(second_cache.module_misses, 2);
+        assert_eq!(second_cache.resolve_entries, 2);
+        assert_eq!(second_cache.resolve_hits, 2);
+        assert_eq!(second_cache.resolve_misses, 2);
 
         assert_eq!(first.errors(), []);
         assert_eq!(second.errors(), []);
@@ -220,10 +226,12 @@ mod tests {
         assert!(manifest.contains("test-version"));
 
         let second_compiler = Compiler::new(options);
+        assert_eq!(second_compiler.build_cache.stats().resolve_entries, 2);
         assert_eq!(second_compiler.build_cache.stats().module_entries, 2);
 
         let second = second_compiler.run().await?;
         let second_cache = second_compiler.build_cache.stats();
+        assert_eq!(second_cache.resolve_hits, 2);
         assert_eq!(second_cache.module_hits, 2);
         assert_eq!(asset_sources(&first), asset_sources(&second));
 
@@ -260,6 +268,48 @@ mod tests {
 
         write(&config, "export default 'after';")?;
         assert_eq!(Compiler::new(options).build_cache.stats().module_entries, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filesystem_cache_rechecks_missing_resolve_candidates()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(
+            temp.path().join("index.js"),
+            r#"
+                import { value } from "./dep";
+                export const result = value;
+            "#,
+        )?;
+        write(temp.path().join("dep.js"), "export const value = 'js';")?;
+        let cache_location = temp.path().join(".cache/unpack/default");
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location);
+
+        let first_compiler = Compiler::new(options.clone());
+        let first = first_compiler.run().await?;
+        first_compiler.flush_cache()?;
+        assert!(
+            asset_sources(&first)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("'js'")
+        );
+
+        write(temp.path().join("dep.ts"), "export const value = 'ts';")?;
+
+        let second_compiler = Compiler::new(options);
+        let second = second_compiler.run().await?;
+        assert!(
+            asset_sources(&second)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("'ts'")
+        );
 
         Ok(())
     }

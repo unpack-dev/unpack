@@ -27,6 +27,7 @@ export type CacheOptions =
 
 export interface SnapshotOptions {
   module?: SnapshotStrategyOptions;
+  resolve?: SnapshotStrategyOptions;
   buildDependencies?: SnapshotStrategyOptions;
 }
 
@@ -121,6 +122,7 @@ interface NormalizedBuildDependency {
 
 interface NormalizedSnapshotOptions {
   module: NormalizedSnapshotStrategy;
+  resolve: NormalizedSnapshotStrategy;
   buildDependencies: NormalizedSnapshotStrategy;
 }
 
@@ -805,15 +807,20 @@ function normalizeSnapshotOptions(
   if (snapshot === undefined) {
     return {
       module: { timestamp: true, hash: false },
+      resolve: { timestamp: true, hash: false },
       buildDependencies: { timestamp: true, hash: true }
     };
   }
 
   assertPlainObject(snapshot, "options.snapshot");
-  assertKnownKeys(snapshot, ["module", "buildDependencies"], "options.snapshot");
+  assertKnownKeys(snapshot, ["module", "resolve", "buildDependencies"], "options.snapshot");
 
   return {
     module: normalizeSnapshotStrategy(snapshot.module, "options.snapshot.module", {
+      timestamp: true,
+      hash: false
+    }),
+    resolve: normalizeSnapshotStrategy(snapshot.resolve, "options.snapshot.resolve", {
       timestamp: true,
       hash: false
     }),

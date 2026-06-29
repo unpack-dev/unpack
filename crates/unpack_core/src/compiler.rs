@@ -55,7 +55,8 @@ pub struct Compiler {
 impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
         let resolver = UnpackResolver::new(options.resolve.clone());
-        let build_cache = BuildCache::new(options.cache.clone());
+        let build_cache =
+            BuildCache::new(options.cache.clone(), options.snapshot.build_dependencies);
         Self {
             options,
             resolver,
@@ -179,6 +180,77 @@ mod tests {
                 .expect("main asset should exist")
                 .contains("after")
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filesystem_cache_restores_module_build_records_for_later_compiler_instances()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(
+            temp.path().join("index.js"),
+            r#"
+                import "./dep";
+                export const result = "ok";
+            "#,
+        )?;
+        write(temp.path().join("dep.js"), "export const value = 1;")?;
+        let cache_location = temp.path().join(".cache/unpack/default");
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location.clone());
+        options.cache.version = Some("test-version".to_string());
+
+        let first_compiler = Compiler::new(options.clone());
+        let first = first_compiler.run().await?;
+        assert_eq!(first.errors(), []);
+        assert!(cache_location.join("container.json").exists());
+        assert!(cache_location.join("packs/modules.cbor").exists());
+        let manifest = fs::read_to_string(cache_location.join("container.json"))?;
+        assert!(manifest.contains("UNPACK_PERSISTENT_CACHE"));
+        assert!(manifest.contains("test-version"));
+
+        let second_compiler = Compiler::new(options);
+        assert_eq!(second_compiler.build_cache.stats().module_entries, 2);
+
+        let second = second_compiler.run().await?;
+        let second_cache = second_compiler.build_cache.stats();
+        assert_eq!(second_cache.module_hits, 2);
+        assert_eq!(asset_sources(&first), asset_sources(&second));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filesystem_cache_rejects_invalid_build_dependency_snapshots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(temp.path().join("index.js"), "export const value = 1;")?;
+        let config = temp.path().join("config.js");
+        write(&config, "export default 'before';")?;
+        let cache_location = temp.path().join(".cache/unpack/default");
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location);
+        options.cache.build_dependencies = vec![crate::BuildDependency {
+            name: "config".to_string(),
+            files: vec![config.clone()],
+        }];
+
+        Compiler::new(options.clone()).run().await?;
+        assert_eq!(
+            Compiler::new(options.clone())
+                .build_cache
+                .stats()
+                .module_entries,
+            1
+        );
+
+        write(&config, "export default 'after';")?;
+        assert_eq!(Compiler::new(options).build_cache.stats().module_entries, 0);
 
         Ok(())
     }

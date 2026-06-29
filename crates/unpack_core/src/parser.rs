@@ -9,6 +9,7 @@ use crate::{
     HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
     HarmonyImportSpecifierDependency, ImportDependency, Result, SourceRange,
 };
+use serde::{Deserialize, Serialize};
 use swc_experimental_allocator::Allocator;
 use swc_experimental_allocator::atom::Wtf8Atom;
 use swc_experimental_ecma_ast::{
@@ -21,7 +22,7 @@ use swc_experimental_ecma_parser::{EsSyntax, Syntax, parse_file_as_module};
 const UNSUPPORTED_DYNAMIC_IMPORT_MESSAGE: &str =
     "only static string specifiers are supported; context modules are not supported yet";
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ParsedModule {
     pub dependencies: Vec<Dependency>,
     pub blocks: Vec<AsyncDependenciesBlock>,

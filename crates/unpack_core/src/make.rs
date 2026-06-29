@@ -8,12 +8,14 @@ use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered}
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
-    CompilerOptions, Dependency, DependencyKind, Error, ModuleGraph, ModuleId, ModuleIdentity,
-    NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
+    CacheKind, CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, ModuleGraph,
+    ModuleId, ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     parser::{ParsedModule, parse_module_dependencies},
     snapshot::FileSnapshot,
 };
+
+const FACTORIZE_MEMO_MIN_MODULES: usize = 64;
 
 #[derive(Debug, Default)]
 pub(crate) struct MakeState {
@@ -24,6 +26,7 @@ pub(crate) struct MakeState {
     pub context_dependencies: BTreeSet<PathBuf>,
     pub missing_dependencies: BTreeSet<PathBuf>,
     modules_by_identity: HashMap<ModuleIdentity, ModuleId>,
+    factorized_modules: HashMap<FactorizeKey, FactorizedModule>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +34,7 @@ struct MakeServices {
     factory: NormalModuleFactory,
     module_build_cache: ModuleBuildCache,
     module_snapshot_strategy: SnapshotStrategy,
+    factorization_memo_enabled: bool,
     semaphore: Arc<Semaphore>,
 }
 
@@ -49,6 +53,24 @@ struct AddModuleResult {
     is_new: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FactorizeKey {
+    context: PathBuf,
+    request: String,
+}
+
+impl FactorizeKey {
+    fn new(context: &Path, dependency: &Dependency) -> Self {
+        Self {
+            context: context.to_path_buf(),
+            request: dependency
+                .request()
+                .expect("make requests should be module dependencies")
+                .to_string(),
+        }
+    }
+}
+
 pub(crate) async fn run(
     options: &CompilerOptions,
     resolver: UnpackResolver,
@@ -63,6 +85,7 @@ pub(crate) async fn run(
         ),
         module_build_cache: build_cache.module_builds(),
         module_snapshot_strategy: options.snapshot.module,
+        factorization_memo_enabled: options.cache.kind == CacheKind::Filesystem,
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
 
@@ -121,28 +144,68 @@ async fn process_request(
     services: MakeServices,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<Vec<MakeRequest>> {
-    let factorized = match services
-        .factory
-        .factorize(&request.context, &request.dependency)
-        .await
-    {
-        Ok(factorized) => factorized,
-        Err(error) if error.is_compilation_error() => {
-            let identity = failed_module_identity(&request.context, &request.dependency);
-            let mut state = state.lock().await;
-            state.missing_dependencies.insert(identity.resource.clone());
-            let add_result = state.add_or_connect(
-                request.origin_module,
-                request.entry_index,
-                request.origin_block,
-                request.dependency,
-                identity,
-            );
-            state.fail_module(add_result.module_id, error, String::new())?;
-            return Ok(Vec::new());
+    let (factorize_key, memoized_factorized) = if services.factorization_memo_enabled {
+        let state_guard = state.lock().await;
+        if state_guard.factorization_memo_enabled() {
+            let key = FactorizeKey::new(&request.context, &request.dependency);
+            if let Some(factorized) = state_guard.factorized_modules.get(&key).cloned() {
+                (None, Some(factorized))
+            } else {
+                (Some(key), None)
+            }
+        } else {
+            (None, None)
         }
-        Err(error) => return Err(error),
+    } else {
+        (None, None)
     };
+    if let Some(factorized) = memoized_factorized {
+        return connect_factorized_module(request, services, state, factorized).await;
+    }
+
+    let factorized = {
+        match services
+            .factory
+            .factorize(&request.context, &request.dependency)
+            .await
+        {
+            Ok(factorized) => {
+                if let Some(factorize_key) = factorize_key {
+                    state
+                        .lock()
+                        .await
+                        .factorized_modules
+                        .insert(factorize_key, factorized.clone());
+                }
+                factorized
+            }
+            Err(error) if error.is_compilation_error() => {
+                let identity = failed_module_identity(&request.context, &request.dependency);
+                let mut state = state.lock().await;
+                state.missing_dependencies.insert(identity.resource.clone());
+                let add_result = state.add_or_connect(
+                    request.origin_module,
+                    request.entry_index,
+                    request.origin_block,
+                    request.dependency,
+                    identity,
+                );
+                state.fail_module(add_result.module_id, error, String::new())?;
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        }
+    };
+
+    connect_factorized_module(request, services, state, factorized).await
+}
+
+async fn connect_factorized_module(
+    request: MakeRequest,
+    services: MakeServices,
+    state: Arc<Mutex<MakeState>>,
+    factorized: FactorizedModule,
+) -> Result<Vec<MakeRequest>> {
     let identity = factorized.identity;
     let resource = factorized.resource;
 
@@ -288,6 +351,11 @@ fn normalize_missing_resource(path: PathBuf) -> PathBuf {
 }
 
 impl MakeState {
+    fn factorization_memo_enabled(&self) -> bool {
+        !self.factorized_modules.is_empty()
+            || self.module_graph.modules().len() >= FACTORIZE_MEMO_MIN_MODULES
+    }
+
     fn add_or_connect(
         &mut self,
         origin_module: Option<ModuleId>,

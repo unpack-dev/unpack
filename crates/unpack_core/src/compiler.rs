@@ -174,6 +174,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_requests_reuse_factorized_modules_within_one_compilation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut entry_source = String::new();
+        for module in 0..70 {
+            entry_source.push_str(&format!("import \"./warmup{module}\";\n"));
+            write(
+                temp.path().join(format!("warmup{module}.js")),
+                "globalThis.warmup = true;",
+            )?;
+        }
+        entry_source.push_str(
+            r#"
+            import { a } from "./dep";
+            import { b } from "./dep";
+            export const result = a + b;
+            "#,
+        );
+        write(temp.path().join("index.js"), &entry_source)?;
+        write(
+            temp.path().join("dep.js"),
+            r#"
+                export const a = 1;
+                export const b = 2;
+            "#,
+        )?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(temp.path().join(".cache/unpack/default"));
+        options.parallelism = 1;
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        let first_cache = compiler.build_cache.stats();
+        assert_eq!(first.errors(), []);
+        assert_eq!(first_cache.resolve_entries, 72);
+        assert_eq!(first_cache.resolve_hits, 0);
+        assert_eq!(first_cache.resolve_misses, 72);
+
+        let second = compiler.run().await?;
+        let second_cache = compiler.build_cache.stats();
+        assert_eq!(second.errors(), []);
+        assert_eq!(second_cache.resolve_entries, 72);
+        assert_eq!(second_cache.resolve_hits, 72);
+        assert_eq!(second_cache.resolve_misses, 72);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn hash_module_snapshot_strategy_invalidates_changed_source()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

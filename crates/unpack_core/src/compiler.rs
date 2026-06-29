@@ -236,6 +236,13 @@ mod tests {
         let manifest = fs::read_to_string(cache_location.join("container.json"))?;
         assert!(manifest.contains("UNPACK_PERSISTENT_CACHE"));
         assert!(manifest.contains("test-version"));
+        let manifest_json: serde_json::Value = serde_json::from_str(&manifest)?;
+        assert!(manifest_json["build_dependencies"].get("files").is_some());
+        assert!(
+            manifest_json["resolve_build_dependencies"]
+                .get("files")
+                .is_some()
+        );
 
         let second_compiler = Compiler::new(options);
         assert_eq!(second_compiler.build_cache.stats().resolve_entries, 2);

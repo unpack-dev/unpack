@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
 const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
-const CACHE_SCHEMA_VERSION: u32 = 4;
+const CACHE_SCHEMA_VERSION: u32 = 5;
 const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
 const MANIFEST_FILE: &str = "container.json";
 
@@ -463,9 +463,9 @@ impl BuildCache {
             cache_version,
             pack_file: pack_file.to_string_lossy().replace('\\', "/"),
             build_dependencies: self
-                .build_dependency_snapshots(self.build_dependency_snapshot_strategy)?,
+                .build_dependency_snapshot(self.build_dependency_snapshot_strategy)?,
             resolve_build_dependencies: self
-                .build_dependency_snapshots(self.resolve_build_dependency_snapshot_strategy)?,
+                .build_dependency_snapshot(self.resolve_build_dependency_snapshot_strategy)?,
         };
         fs::create_dir_all(cache_location)?;
         let manifest_json = serde_json::to_vec_pretty(&manifest)
@@ -478,11 +478,11 @@ impl BuildCache {
         manifest.magic == CACHE_MAGIC
             && manifest.schema_version == CACHE_SCHEMA_VERSION
             && manifest.cache_version == self.cache_version()
-            && self.build_dependency_snapshots_are_valid(
+            && self.build_dependency_snapshot_is_valid(
                 &manifest.build_dependencies,
                 self.build_dependency_snapshot_strategy,
             )
-            && self.build_dependency_snapshots_are_valid(
+            && self.build_dependency_snapshot_is_valid(
                 &manifest.resolve_build_dependencies,
                 self.resolve_build_dependency_snapshot_strategy,
             )
@@ -492,54 +492,38 @@ impl BuildCache {
         self.options.version.clone().unwrap_or_default()
     }
 
-    fn build_dependency_snapshots(
-        &self,
-        strategy: SnapshotStrategy,
-    ) -> io::Result<Vec<PersistentBuildDependencySnapshot>> {
-        self.options
+    fn build_dependency_snapshot(&self, strategy: SnapshotStrategy) -> io::Result<Snapshot> {
+        let snapshots = self
+            .options
             .build_dependencies
             .iter()
             .map(|dependency| {
-                Ok(PersistentBuildDependencySnapshot {
-                    name: dependency.name.clone(),
-                    files: dependency.files.clone(),
-                    snapshot: self
-                        .file_system_info
-                        .create_snapshot_sync(dependency.files.clone(), strategy)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                })
+                self.file_system_info
+                    .create_snapshot_sync(dependency.files.clone(), strategy)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
             })
-            .collect()
+            .collect::<io::Result<Vec<_>>>()?;
+
+        Ok(self.file_system_info.merge_snapshots(snapshots.iter()))
     }
 
-    fn build_dependency_snapshots_are_valid(
+    fn build_dependency_snapshot_is_valid(
         &self,
-        snapshots: &[PersistentBuildDependencySnapshot],
+        snapshot: &Snapshot,
         strategy: SnapshotStrategy,
     ) -> bool {
-        if snapshots.len() != self.options.build_dependencies.len() {
-            return false;
-        }
+        snapshot.has_exact_paths(self.build_dependency_paths())
+            && self
+                .file_system_info
+                .is_snapshot_valid_sync(snapshot, strategy)
+    }
 
-        self.options.build_dependencies.iter().all(|dependency| {
-            let Some(snapshot) = snapshots
-                .iter()
-                .find(|snapshot| snapshot.name == dependency.name)
-            else {
-                return false;
-            };
-            if snapshot.files.len() != dependency.files.len() {
-                return false;
-            }
-
-            dependency
-                .files
-                .iter()
-                .all(|path| snapshot.files.contains(path))
-                && self
-                    .file_system_info
-                    .is_snapshot_valid_sync(&snapshot.snapshot, strategy)
-        })
+    fn build_dependency_paths(&self) -> Vec<PathBuf> {
+        self.options
+            .build_dependencies
+            .iter()
+            .flat_map(|dependency| dependency.files.iter().cloned())
+            .collect()
     }
 }
 
@@ -560,15 +544,8 @@ struct CacheManifest {
     schema_version: u32,
     cache_version: String,
     pack_file: String,
-    build_dependencies: Vec<PersistentBuildDependencySnapshot>,
-    resolve_build_dependencies: Vec<PersistentBuildDependencySnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistentBuildDependencySnapshot {
-    name: String,
-    files: Vec<PathBuf>,
-    snapshot: Snapshot,
+    build_dependencies: Snapshot,
+    resolve_build_dependencies: Snapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

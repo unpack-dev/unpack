@@ -1,0 +1,3 @@
+# Align managed path snapshots with webpack managed items
+
+Unpack managed-path snapshots will follow webpack's managed item model instead of skipping every file under a managed path. A managed path match should identify the relevant package-like managed item, including scoped packages and nested `node_modules`, reject hidden managed items, and record managed item information such as missing, special `node_modules`, grouping-folder, or `name@version` state from `package.json`. This keeps managed paths useful for reducing per-file snapshot work while preserving cache invalidation when the package-managed item changes.

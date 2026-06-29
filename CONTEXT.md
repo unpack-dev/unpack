@@ -28,6 +28,10 @@ _Avoid_: Webpack-compatible output, snapshot-compatible webpack output
 The Node.js-facing programmable API for configuring and running Unpack from JavaScript.
 _Avoid_: Rust API, webpack-compatible API
 
+**Mode**:
+A JavaScript API option that selects a webpack-like default behavior profile, such as development, production, or none.
+_Avoid_: Environment variable, target, optimization preset
+
 **JavaScript API Test**:
 A test authored from the JavaScript side that exercises Unpack through the public JavaScript API boundary.
 _Avoid_: Rust core test, internal facade test
@@ -190,7 +194,7 @@ _Avoid_: Cache options, watch options
 
 **Build Cache**:
 Compiler-owned reusable build information that can be validated and reused across compilations.
-_Avoid_: Compilation cache, module graph reuse
+_Avoid_: Runtime module cache, compilation cache, module graph reuse
 
 **Cache Facade**:
 A scoped access point to the build cache for one compiler subsystem or cache item family.
@@ -212,6 +216,26 @@ _Avoid_: Cached module, parsed module cache
 A recorded view of filesystem inputs used to decide whether cached build information is still valid.
 _Avoid_: Watch event, mtime check
 
+**Snapshot**:
+A validation record created by File System Info that can contain file, context, missing, managed, and immutable filesystem inputs.
+_Avoid_: Watch dependency set, cache item, filesystem cache
+
+**Context Snapshot**:
+A recorded view of a filesystem directory context used to decide whether directory-sensitive cached build information is still valid.
+_Avoid_: Context module snapshot, directory cache, folder watch event
+
+**Snapshot Merge**:
+The File System Info operation that combines two file snapshots into one validation record while preserving each snapshot content category.
+_Avoid_: Manifest merge, cache pack merge, dependency concatenation
+
+**Missing Existence Snapshot**:
+A recorded absence check for a filesystem input where cache validation only needs to know whether that path has appeared.
+_Avoid_: Missing file timestamp, missing dependency error
+
+**File System Info**:
+Filesystem metadata service used to create and validate file snapshots with shared path classification and timestamp/hash caching for a compilation or persistent cache backend.
+_Avoid_: Filesystem wrapper, snapshot record, watcher cache
+
 **Snapshot Strategy**:
 The configured validation method for a file snapshot, such as timestamp validation, content-hash validation, or a combination of both.
 _Avoid_: Cache mode, watcher policy
@@ -220,9 +244,29 @@ _Avoid_: Cache mode, watcher policy
 A class of filesystem inputs that can use its own snapshot strategy, such as module resources, resolution inputs, or build dependencies.
 _Avoid_: Cache namespace, watcher group
 
+**Managed Path**:
+A filesystem path whose contents are assumed to be controlled by a package manager and stable unless the package-managed item changes.
+_Avoid_: Vendor path, ignored path, external dependency path
+
+**Immutable Path**:
+A filesystem path whose contents are assumed not to change because the path includes versioned or content-addressed identity.
+_Avoid_: Read-only path, permanent path, static path
+
+**Unmanaged Path**:
+A filesystem path that must not use managed-path or immutable-path assumptions when validating file snapshots.
+_Avoid_: Source path, dirty path, watched path
+
+**Snapshot Path Pattern**:
+A string path or regular expression used by snapshot options to classify filesystem inputs as managed, immutable, or unmanaged.
+_Avoid_: JavaScript RegExp compatibility promise, watch ignore pattern
+
 **Build Dependency**:
 A toolchain or configuration input whose change can invalidate persistent build cache entries.
 _Avoid_: Application dependency, module dependency
+
+**Resolve Build Dependency Snapshot**:
+A file snapshot of the resolution work needed to find configured build dependencies before deciding whether persistent cache entries can be reused.
+_Avoid_: Build dependency snapshot, resolver cache entry
 
 **Persistent Cache**:
 A build cache stored outside the process so later compiler instances can reuse validated build information.

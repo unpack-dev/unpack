@@ -1,0 +1,3 @@
+# Align effective snapshot option surface with webpack
+
+Unpack will expand JavaScript snapshot options toward webpack by accepting `module`, `resolve`, `buildDependencies`, `resolveBuildDependencies`, `managedPaths`, `immutablePaths`, and `unmanagedPaths` only when each option has active snapshot or build-cache behavior. `contextModule` remains rejected until Unpack has context modules, because accepting inert public options would imply support that does not exist. This revises the initial minimal surface in ADR 0079 and the deferral in ADR 0067: resolve-build-dependency and path-classification options now belong to build-cache alignment work, while context-module snapshots still wait for context modules.

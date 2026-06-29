@@ -29,6 +29,11 @@ pnpm --filter @unpack-js/benchmarks bench -- \
   --turbopack-commit a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc
 ```
 
+During `prepare`, the Turbopack adapter applies a benchmark-local patch to the
+fixed checkout so `turbopack-cli build` explicitly stops TurboTasks before
+process exit. Turbopack build sessions use shutdown-time persistent cache
+storage, so this flushes the cold build cache for the warm measurement.
+
 ## Result Shape
 
 The runner emits a Markdown summary and can write the raw JSON report with `--output-json`.

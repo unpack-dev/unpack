@@ -12,6 +12,7 @@ pub struct SnapshotOptions {
     pub module: SnapshotStrategy,
     pub resolve: SnapshotStrategy,
     pub build_dependencies: SnapshotStrategy,
+    pub resolve_build_dependencies: SnapshotStrategy,
 }
 
 impl Default for SnapshotOptions {
@@ -20,6 +21,7 @@ impl Default for SnapshotOptions {
             module: SnapshotStrategy::timestamp(),
             resolve: SnapshotStrategy::timestamp(),
             build_dependencies: SnapshotStrategy::timestamp_and_hash(),
+            resolve_build_dependencies: SnapshotStrategy::timestamp_and_hash(),
         }
     }
 }

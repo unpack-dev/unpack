@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 
 export interface UnpackOptions {
   context?: string;
+  mode?: Mode;
   entry: string | Record<string, string>;
   output?: {
     path?: string;
@@ -12,6 +13,8 @@ export interface UnpackOptions {
   snapshot?: SnapshotOptions;
   infrastructureLogging?: InfrastructureLoggingOptions;
 }
+
+export type Mode = "development" | "production" | "none";
 
 export type CacheOptions =
   | boolean
@@ -30,6 +33,7 @@ export interface SnapshotOptions {
   module?: SnapshotStrategyOptions;
   resolve?: SnapshotStrategyOptions;
   buildDependencies?: SnapshotStrategyOptions;
+  resolveBuildDependencies?: SnapshotStrategyOptions;
 }
 
 export interface SnapshotStrategyOptions {
@@ -138,6 +142,7 @@ interface NormalizedSnapshotOptions {
   module: NormalizedSnapshotStrategy;
   resolve: NormalizedSnapshotStrategy;
   buildDependencies: NormalizedSnapshotStrategy;
+  resolveBuildDependencies: NormalizedSnapshotStrategy;
 }
 
 interface NormalizedSnapshotStrategy {
@@ -744,7 +749,7 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
   assertPlainObject(options, "options");
   assertKnownKeys(
     options,
-    ["context", "entry", "output", "cache", "snapshot", "infrastructureLogging"],
+    ["context", "mode", "entry", "output", "cache", "snapshot", "infrastructureLogging"],
     "options"
   );
 
@@ -752,6 +757,7 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     options.context === undefined
       ? process.cwd()
       : assertString(options.context, "options.context");
+  const mode = options.mode === undefined ? "production" : assertMode(options.mode);
   const normalizedContext = resolve(process.cwd(), context);
   const output = options.output ?? {};
   assertPlainObject(output, "options.output");
@@ -770,7 +776,7 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     entries: normalizeEntry(options.entry),
     outputPath,
     cache: normalizeCacheOptions(options.cache, normalizedContext),
-    snapshot: normalizeSnapshotOptions(options.snapshot),
+    snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging)
   };
 }
@@ -899,28 +905,38 @@ function normalizeBuildDependencies(
 }
 
 function normalizeSnapshotOptions(
-  snapshot: SnapshotOptions | undefined
+  snapshot: SnapshotOptions | undefined,
+  mode: Mode
 ): NormalizedSnapshotOptions {
+  const moduleAndResolveDefaults = defaultModuleAndResolveSnapshotStrategy(mode);
+
   if (snapshot === undefined) {
     return {
-      module: { timestamp: true, hash: false },
-      resolve: { timestamp: true, hash: false },
-      buildDependencies: { timestamp: true, hash: true }
+      module: { ...moduleAndResolveDefaults },
+      resolve: { ...moduleAndResolveDefaults },
+      buildDependencies: { timestamp: true, hash: true },
+      resolveBuildDependencies: { timestamp: true, hash: true }
     };
   }
 
   assertPlainObject(snapshot, "options.snapshot");
-  assertKnownKeys(snapshot, ["module", "resolve", "buildDependencies"], "options.snapshot");
+  assertKnownKeys(
+    snapshot,
+    ["module", "resolve", "buildDependencies", "resolveBuildDependencies"],
+    "options.snapshot"
+  );
 
   return {
-    module: normalizeSnapshotStrategy(snapshot.module, "options.snapshot.module", {
-      timestamp: true,
-      hash: false
-    }),
-    resolve: normalizeSnapshotStrategy(snapshot.resolve, "options.snapshot.resolve", {
-      timestamp: true,
-      hash: false
-    }),
+    module: normalizeSnapshotStrategy(
+      snapshot.module,
+      "options.snapshot.module",
+      moduleAndResolveDefaults
+    ),
+    resolve: normalizeSnapshotStrategy(
+      snapshot.resolve,
+      "options.snapshot.resolve",
+      moduleAndResolveDefaults
+    ),
     buildDependencies: normalizeSnapshotStrategy(
       snapshot.buildDependencies,
       "options.snapshot.buildDependencies",
@@ -928,8 +944,22 @@ function normalizeSnapshotOptions(
         timestamp: true,
         hash: true
       }
+    ),
+    resolveBuildDependencies: normalizeSnapshotStrategy(
+      snapshot.resolveBuildDependencies,
+      "options.snapshot.resolveBuildDependencies",
+      {
+        timestamp: true,
+        hash: true
+      }
     )
   };
+}
+
+function defaultModuleAndResolveSnapshotStrategy(mode: Mode): NormalizedSnapshotStrategy {
+  return mode === "development" || mode === "none"
+    ? { timestamp: true, hash: false }
+    : { timestamp: true, hash: true };
 }
 
 function normalizeSnapshotStrategy(
@@ -943,13 +973,17 @@ function normalizeSnapshotStrategy(
 
   assertPlainObject(strategy, name);
   assertKnownKeys(strategy, ["timestamp", "hash"], name);
-  return {
+  const normalized = {
     timestamp:
       strategy.timestamp === undefined
         ? defaults.timestamp
         : assertBoolean(strategy.timestamp, `${name}.timestamp`),
     hash: strategy.hash === undefined ? defaults.hash : assertBoolean(strategy.hash, `${name}.hash`)
   };
+  if (!normalized.timestamp && !normalized.hash) {
+    throw new TypeError(`${name} must enable timestamp or hash validation`);
+  }
+  return normalized;
 }
 
 function normalizeInfrastructureLoggingOptions(
@@ -1247,6 +1281,13 @@ function normalizePath(value: unknown, name: string, context: string): string {
 function assertCacheType(value: unknown): "memory" | "filesystem" {
   if (value !== "memory" && value !== "filesystem") {
     throw new TypeError("options.cache.type must be 'memory' or 'filesystem'");
+  }
+  return value;
+}
+
+function assertMode(value: unknown): Mode {
+  if (value !== "development" && value !== "production" && value !== "none") {
+    throw new TypeError("options.mode must be 'development', 'production', or 'none'");
   }
   return value;
 }

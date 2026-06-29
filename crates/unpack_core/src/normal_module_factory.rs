@@ -162,7 +162,11 @@ mod tests {
 
         let mut resolve_options = ResolveOptions::default();
         resolve_options.extensions = vec![".js".to_string()];
-        let build_cache = BuildCache::new(CacheOptions::disabled(), SnapshotStrategy::timestamp());
+        let build_cache = BuildCache::new(
+            CacheOptions::disabled(),
+            SnapshotStrategy::timestamp(),
+            SnapshotStrategy::timestamp(),
+        );
         let factory = NormalModuleFactory::new(
             UnpackResolver::new(resolve_options),
             build_cache.normal_module_factory(),

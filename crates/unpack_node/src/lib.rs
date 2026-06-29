@@ -60,6 +60,8 @@ pub struct NativeSnapshotOptions {
     pub resolve: NativeSnapshotStrategy,
     #[napi(js_name = "buildDependencies")]
     pub build_dependencies: NativeSnapshotStrategy,
+    #[napi(js_name = "resolveBuildDependencies")]
+    pub resolve_build_dependencies: NativeSnapshotStrategy,
 }
 
 #[napi(object)]
@@ -216,6 +218,9 @@ fn snapshot_options_from_native(options: NativeSnapshotOptions) -> SnapshotOptio
         module: snapshot_strategy_from_native(options.module),
         resolve: snapshot_strategy_from_native(options.resolve),
         build_dependencies: snapshot_strategy_from_native(options.build_dependencies),
+        resolve_build_dependencies: snapshot_strategy_from_native(
+            options.resolve_build_dependencies,
+        ),
     }
 }
 

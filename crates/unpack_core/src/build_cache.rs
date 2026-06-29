@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 
 const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
 const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
-const CACHE_SCHEMA_VERSION: u32 = 6;
 const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
 const MANIFEST_FILE: &str = "container.json";
 
@@ -412,10 +411,7 @@ impl BuildCache {
         let Some(pack) = read_pack(cache_location, &manifest.pack_file) else {
             return;
         };
-        if pack.magic != CACHE_MAGIC
-            || pack.schema_version != CACHE_SCHEMA_VERSION
-            || pack.cache_version != self.cache_version()
-        {
+        if pack.magic != CACHE_MAGIC || pack.cache_version != self.cache_version() {
             return;
         }
 
@@ -445,7 +441,6 @@ impl BuildCache {
         let cache_version = self.cache_version();
         let pack = CachePackDto {
             magic: CACHE_MAGIC.to_string(),
-            schema_version: CACHE_SCHEMA_VERSION,
             cache_version: cache_version.clone(),
             resolve_records: resolve_records
                 .iter()
@@ -464,7 +459,6 @@ impl BuildCache {
 
         let manifest = CacheManifest {
             magic: CACHE_MAGIC.to_string(),
-            schema_version: CACHE_SCHEMA_VERSION,
             cache_version,
             pack_file: pack_file.to_string_lossy().replace('\\', "/"),
             build_dependencies: self
@@ -481,7 +475,6 @@ impl BuildCache {
 
     fn manifest_is_valid(&self, manifest: &CacheManifest) -> bool {
         manifest.magic == CACHE_MAGIC
-            && manifest.schema_version == CACHE_SCHEMA_VERSION
             && manifest.cache_version == self.cache_version()
             && self.build_dependency_snapshot_is_valid(
                 &manifest.build_dependencies,
@@ -546,7 +539,6 @@ fn read_pack(cache_location: &Path, pack_file: &str) -> Option<CachePackDto> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CacheManifest {
     magic: String,
-    schema_version: u32,
     cache_version: String,
     pack_file: String,
     build_dependencies: Snapshot,
@@ -556,7 +548,6 @@ struct CacheManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachePackDto {
     magic: String,
-    schema_version: u32,
     cache_version: String,
     resolve_records: Vec<(ResolveRequest, ResolveRecord)>,
     module_builds: Vec<(ModuleIdentity, ModuleBuildRecord)>,

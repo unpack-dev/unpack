@@ -147,6 +147,46 @@ async fn emits_node_require_chunks_for_dynamic_import() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
+async fn disables_sourcemap_assets_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            export const value = 42;
+        "#,
+    )?;
+
+    let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./src/index")]);
+    options.sourcemap = false;
+    let compiler = Compiler::new(options);
+    let compilation = compiler.run().await?;
+
+    assert_eq!(compilation.errors(), []);
+    assert_eq!(compilation.assets().len(), 1);
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .any(|asset| asset.filename == "main.js")
+    );
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .all(|asset| !asset.filename.ends_with(".map"))
+    );
+
+    let main = compilation
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "main.js")
+        .expect("main asset should exist");
+    assert!(!main.source.contains("sourceMappingURL"));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn preserves_import_live_bindings() -> Result<(), Box<dyn std::error::Error>> {
     if !node_available() {
         return Ok(());

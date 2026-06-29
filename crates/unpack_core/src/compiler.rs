@@ -32,6 +32,7 @@ pub struct CompilerOptions {
     pub snapshot: SnapshotOptions,
     pub infrastructure_logging: InfrastructureLoggingOptions,
     pub parallelism: usize,
+    pub sourcemap: bool,
 }
 
 impl CompilerOptions {
@@ -44,6 +45,7 @@ impl CompilerOptions {
             snapshot: SnapshotOptions::default(),
             infrastructure_logging: InfrastructureLoggingOptions::disabled(),
             parallelism: 100,
+            sourcemap: true,
         }
     }
 }

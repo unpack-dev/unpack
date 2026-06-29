@@ -45,6 +45,6 @@ Runtime verification is separate from build timing. A Bundle that builds but doe
 
 ## CI
 
-The `Cross-Bundler Benchmarks` workflow runs on pull requests and manual dispatch. It writes the table to the GitHub Actions job summary and uploads the JSON report as an artifact.
+The `Cross-Bundler Benchmarks` workflow runs on pull requests and manual dispatch. It writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, and uploads the JSON report as an artifact.
 
 The workflow is intentionally non-blocking. Benchmark setup failures, external toolchain failures, or runtime verification failures should be visible in the workflow output without blocking unrelated code from merging.

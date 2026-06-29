@@ -14,6 +14,8 @@ jobs:
     continue-on-error: true
     permissions:
       contents: read
+      issues: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v5
 
@@ -70,6 +72,47 @@ jobs:
               echo
               echo "The benchmark did not produce a summary. Check the workflow logs for setup or runner failures."
             } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Comment benchmark summary on PR
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          marker="<!-- unpack-cross-bundler-benchmark -->"
+          comment_file=".benchmark-work/ci/pr-comment.md"
+          mkdir -p "$(dirname "$comment_file")"
+
+          {
+            echo "$marker"
+            echo "## Cross-Bundler Benchmark"
+            echo
+            if [ -f .benchmark-work/ci/summary.md ]; then
+              cat .benchmark-work/ci/summary.md
+            else
+              echo "The benchmark did not produce a summary. Check the workflow logs for setup or runner failures."
+            fi
+            echo
+            echo "[Workflow run]($RUN_URL)"
+            echo
+            echo "Raw JSON results are uploaded as the \`cross-bundler-benchmark-results\` workflow artifact."
+          } > "$comment_file"
+
+          comment_id="$(
+            gh api "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" --paginate \
+              --jq ".[] | select(.user.type == \"Bot\" and (.body | contains(\"$marker\"))) | .id" \
+              | head -n 1
+          )"
+
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$comment_id" \
+              -f body="$(cat "$comment_file")"
+          else
+            gh api --method POST "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+              -f body="$(cat "$comment_file")"
           fi
 
       - name: Upload benchmark results

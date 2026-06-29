@@ -1,0 +1,337 @@
+import { createRequire } from "node:module";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
+import { dirname, join, resolve, sep } from "node:path";
+
+import { createBenchmarkFixture, FIXTURE_SHAPES } from "./fixture.mjs";
+
+const require = createRequire(import.meta.url);
+
+export const DEFAULT_BUNDLERS = [
+  "unpack",
+  "webpack",
+  "rspack",
+  "rolldown",
+  "turbopack"
+];
+
+export const DEFAULT_TURBOPACK_COMMIT =
+  "a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc";
+
+export async function runBenchmark(options = {}) {
+  const workspaceDir = resolve(options.workspaceDir ?? ".benchmark-work");
+  const fixtureNames = options.fixtures ?? ["small", "medium", "large"];
+  const bundlerNames = options.bundlers ?? DEFAULT_BUNDLERS;
+  const adapters = options.adapters ?? (await defaultAdapters());
+  const shapes = fixtureNames.map((name) => {
+    const shape = FIXTURE_SHAPES[name];
+    if (!shape) {
+      throw new Error(`unknown benchmark fixture '${name}'`);
+    }
+    return shape;
+  });
+
+  await mkdir(workspaceDir, { recursive: true });
+  const fixtureRoot = join(workspaceDir, "fixtures");
+  const results = [];
+
+  for (const shape of shapes) {
+    const fixture = await createBenchmarkFixture(fixtureRoot, shape);
+    for (const bundler of bundlerNames) {
+      const adapter = adapters[bundler];
+      results.push(
+        await runBundlerBenchmark({
+          adapter,
+          bundler,
+          fixture,
+          workspaceDir,
+          options
+        })
+      );
+    }
+  }
+
+  return {
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    results
+  };
+}
+
+export function toSummaryMarkdown(report) {
+  const lines = [
+    "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | output_bytes | status |",
+    "| --- | --- | --- | ---: | ---: | ---: | --- |"
+  ];
+
+  for (const result of report.results) {
+    lines.push(
+      [
+        result.fixture,
+        result.bundler,
+        result.version_source ?? "",
+        formatNumber(result.cold_build_ms),
+        formatNumber(result.warm_build_ms),
+        formatNumber(result.output_bytes, 0),
+        result.status
+      ].join(" | ").replace(/^/, "| ").replace(/$/, " |")
+    );
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, options }) {
+  const versionSource = await adapterVersion(adapter, options);
+  const baseDir = join(workspaceDir, "runs", fixture.name, bundler);
+  const outputDir = adapter?.outputDir
+    ? adapter.outputDir({ fixture, baseDir, options })
+    : join(baseDir, "output");
+  const cacheDir = join(baseDir, "cache");
+
+  if (!adapter) {
+    return emptyResult({
+      fixture,
+      bundler,
+      versionSource: "not_configured",
+      status: "unsupported",
+      message: "no adapter configured"
+    });
+  }
+
+  try {
+    await adapter.prepare?.({ options });
+  } catch (error) {
+    return emptyResult({
+      fixture,
+      bundler,
+      versionSource,
+      status: isUnsupported(error) ? "unsupported" : "setup_failed",
+      message: errorMessage(error)
+    });
+  }
+
+  const cold = await timedBuild({
+    adapter,
+    phase: "cold",
+    fixture,
+    outputDir,
+    cacheDir,
+    options
+  });
+  if (cold.status !== "success") {
+    return resultFromPhases({ fixture, bundler, versionSource, cold });
+  }
+
+  const warm = await timedBuild({
+    adapter,
+    phase: "warm",
+    fixture,
+    outputDir,
+    cacheDir,
+    options
+  });
+
+  return resultFromPhases({ fixture, bundler, versionSource, cold, warm });
+}
+
+async function timedBuild({ adapter, phase, fixture, outputDir, cacheDir, options }) {
+  if (phase === "cold") {
+    await rm(outputDir, { recursive: true, force: true });
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+  await mkdir(outputDir, { recursive: true });
+  await mkdir(cacheDir, { recursive: true });
+
+  let buildResult;
+  const started = performance.now();
+  try {
+    buildResult = await adapter.build({
+      fixture,
+      outputDir,
+      cacheDir,
+      phase,
+      options
+    });
+  } catch (error) {
+    return {
+      status: isUnsupported(error) ? "unsupported" : "build_failed",
+      build_ms: elapsed(started),
+      output_bytes: null,
+      verify_ms: null,
+      message: errorMessage(error)
+    };
+  }
+
+  const buildMs = elapsed(started);
+  const entryFile = buildResult?.entryFile;
+  if (!entryFile) {
+    return {
+      status: "build_failed",
+      build_ms: buildMs,
+      output_bytes: await outputBytes(outputDir),
+      verify_ms: null,
+      message: "adapter did not return an entry file"
+    };
+  }
+
+  const verifyStarted = performance.now();
+  try {
+    await verifyBundle({
+      entryFile,
+      outputDir,
+      expectedChecksum: fixture.expectedChecksum
+    });
+  } catch (error) {
+    return {
+      status: "runtime_failed",
+      build_ms: buildMs,
+      output_bytes: await outputBytes(outputDir),
+      verify_ms: elapsed(verifyStarted),
+      message: errorMessage(error)
+    };
+  }
+
+  return {
+    status: "success",
+    build_ms: buildMs,
+    output_bytes: await outputBytes(outputDir),
+    verify_ms: elapsed(verifyStarted),
+    message: null
+  };
+}
+
+async function verifyBundle({ entryFile, outputDir, expectedChecksum }) {
+  await writeFile(
+    join(outputDir, "package.json"),
+    `${JSON.stringify({ type: "commonjs" }, null, 2)}\n`,
+    "utf8"
+  );
+
+  clearRequireCache(outputDir);
+  const resolvedEntry = require.resolve(entryFile);
+  delete require.cache[resolvedEntry];
+  const exports = require(resolvedEntry);
+  const checksum = exports?.checksum ?? exports?.default?.checksum;
+
+  if (checksum !== expectedChecksum) {
+    throw new Error(
+      `expected bundle checksum ${expectedChecksum}, received ${String(checksum)}`
+    );
+  }
+}
+
+function resultFromPhases({ fixture, bundler, versionSource, cold, warm }) {
+  const status =
+    cold.status !== "success"
+      ? cold.status
+      : warm && warm.status !== "success"
+        ? `warm_${warm.status}`
+        : "success";
+  const message =
+    cold.status !== "success" ? cold.message : warm?.status !== "success" ? warm.message : null;
+
+  return {
+    fixture: fixture.name,
+    bundler,
+    version_source: versionSource,
+    cold_build_ms: cold.status === "success" ? cold.build_ms : null,
+    warm_build_ms: warm?.status === "success" ? warm.build_ms : null,
+    output_bytes: warm?.output_bytes ?? cold.output_bytes,
+    cold_status: cold.status,
+    warm_status: warm?.status ?? "not_run",
+    verify_status:
+      cold.status === "runtime_failed" || warm?.status === "runtime_failed"
+        ? "runtime_failed"
+        : cold.status === "success" && (!warm || warm.status === "success")
+          ? "success"
+          : "not_run",
+    status,
+    error: message
+  };
+}
+
+function emptyResult({ fixture, bundler, versionSource, status, message }) {
+  return {
+    fixture: fixture.name,
+    bundler,
+    version_source: versionSource,
+    cold_build_ms: null,
+    warm_build_ms: null,
+    output_bytes: null,
+    cold_status: "not_run",
+    warm_status: "not_run",
+    verify_status: "not_run",
+    status,
+    error: message
+  };
+}
+
+async function adapterVersion(adapter, options) {
+  if (!adapter) {
+    return "not_configured";
+  }
+  if (adapter.versionSource) {
+    return adapter.versionSource({ options });
+  }
+  return adapter.name;
+}
+
+export async function outputBytes(outputDir) {
+  let total = 0;
+  let entries;
+  try {
+    entries = await readdir(outputDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  for (const entry of entries) {
+    if (entry.name === "package.json") {
+      continue;
+    }
+    const path = join(outputDir, entry.name);
+    if (entry.isDirectory()) {
+      total += (await outputBytes(path)) ?? 0;
+    } else if (entry.isFile()) {
+      total += (await stat(path)).size;
+    }
+  }
+  return total;
+}
+
+function clearRequireCache(outputDir) {
+  const normalizedOutputDir = `${resolve(outputDir)}${sep}`;
+  for (const cacheKey of Object.keys(require.cache)) {
+    if (cacheKey === resolve(outputDir) || cacheKey.startsWith(normalizedOutputDir)) {
+      delete require.cache[cacheKey];
+    }
+  }
+}
+
+function elapsed(started) {
+  return Number((performance.now() - started).toFixed(3));
+}
+
+function formatNumber(value, digits = 3) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return Number(value).toFixed(digits);
+}
+
+function isUnsupported(error) {
+  return error && typeof error === "object" && error.code === "UNSUPPORTED_BUNDLER";
+}
+
+function errorMessage(error) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+async function defaultAdapters() {
+  const { adapters } = await import("./adapters.mjs");
+  return adapters;
+}

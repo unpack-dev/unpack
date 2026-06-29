@@ -1,0 +1,83 @@
+name: Cross-Bundler Benchmarks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  TURBOPACK_NEXT_COMMIT: a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc
+
+jobs:
+  cross-bundler-benchmarks:
+    name: Run cross-bundler benchmarks
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: moonrepo/setup-rust@v0
+        with:
+          channel: stable
+          cache-target: release
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Unpack JavaScript API
+        run: pnpm --filter @unpack-js/core build
+
+      - name: Checkout fixed Turbopack source
+        run: |
+          mkdir -p .benchmark-tools/next.js
+          git -C .benchmark-tools/next.js init
+          git -C .benchmark-tools/next.js remote add origin https://github.com/vercel/next.js.git
+          git -C .benchmark-tools/next.js fetch --depth=1 --filter=blob:none origin "$TURBOPACK_NEXT_COMMIT"
+          git -C .benchmark-tools/next.js checkout --detach FETCH_HEAD
+
+      - name: Run cross-bundler benchmark
+        id: benchmark
+        continue-on-error: true
+        run: |
+          pnpm --filter @unpack-js/benchmarks bench -- \
+            --workspace .benchmark-work/ci \
+            --output-json .benchmark-work/ci/results.json \
+            --summary-md .benchmark-work/ci/summary.md \
+            --turbopack-repo .benchmark-tools/next.js \
+            --turbopack-commit "$TURBOPACK_NEXT_COMMIT"
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          if [ -f .benchmark-work/ci/summary.md ]; then
+            cat .benchmark-work/ci/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Cross-Bundler Benchmarks"
+              echo
+              echo "The benchmark did not produce a summary. Check the workflow logs for setup or runner failures."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-bundler-benchmark-results
+          path: |
+            .benchmark-work/ci/results.json
+            .benchmark-work/ci/summary.md
+          if-no-files-found: warn

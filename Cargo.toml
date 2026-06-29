@@ -11,6 +11,7 @@ repository = "https://github.com/unpack-dev/unpack"
 cbor4ii = { version = "1.2.2", features = ["serde1"] }
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 futures = "0.3.31"
+mimalloc = { version = "0.1.48", default-features = false }
 napi = "3.9.4"
 napi-build = "2.3.2"
 napi-derive = "3.5.7"

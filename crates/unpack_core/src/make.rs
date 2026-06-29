@@ -298,6 +298,9 @@ impl AddTask {
                         .file_dependencies
                         .extend(factorized.file_dependencies.iter().cloned());
                     state
+                        .context_dependencies
+                        .extend(factorized.context_dependencies.iter().cloned());
+                    state
                         .missing_dependencies
                         .extend(factorized.missing_dependencies.iter().cloned());
                     state.file_dependencies.insert(resource.clone());

@@ -656,6 +656,11 @@ class WatchingImpl implements Watching {
       return;
     }
 
+    const directlyWatchedPaths = new Set(
+      targets
+        .filter((target) => target.kind !== "context")
+        .map((target) => target.path)
+    );
     for (const target of targets) {
       try {
         this.#watchers.push(
@@ -664,6 +669,9 @@ class WatchingImpl implements Watching {
               target.kind === "context" && filename
                 ? resolve(target.path, filename.toString())
                 : target.path;
+            if (target.kind === "context" && directlyWatchedPaths.has(changedPath)) {
+              return;
+            }
             if (isIgnoredWatchPath(changedPath, this.#watchOptions.ignored)) {
               return;
             }

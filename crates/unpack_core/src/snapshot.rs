@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -147,6 +148,15 @@ impl FileSystemInfo {
         Snapshot::create_resolve(files, contexts, missing, strategy, self).await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn create_snapshot(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        strategy: SnapshotStrategy,
+    ) -> Result<Snapshot> {
+        Snapshot::create(paths, strategy, self).await
+    }
+
     pub(crate) fn create_snapshot_sync(
         &self,
         paths: impl IntoIterator<Item = PathBuf>,
@@ -169,6 +179,13 @@ impl FileSystemInfo {
         strategy: SnapshotStrategy,
     ) -> bool {
         snapshot.is_valid_sync(strategy, self)
+    }
+
+    pub(crate) fn merge_snapshots<'a>(
+        &self,
+        snapshots: impl IntoIterator<Item = &'a Snapshot>,
+    ) -> Snapshot {
+        Snapshot::merge(snapshots)
     }
 
     fn classify_path(&self, path: &Path) -> SnapshotPathClassification {
@@ -272,6 +289,21 @@ impl Snapshot {
         Ok(Self { entries })
     }
 
+    #[cfg(test)]
+    async fn create(
+        paths: impl IntoIterator<Item = PathBuf>,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> Result<Self> {
+        let paths = normalize_paths(paths);
+        let mut entries = Vec::with_capacity(paths.len());
+        for path in paths {
+            entries
+                .push(SnapshotEntry::create_file(&path, None, strategy, file_system_info).await?);
+        }
+        Ok(Self { entries })
+    }
+
     fn create_sync(
         paths: impl IntoIterator<Item = PathBuf>,
         strategy: SnapshotStrategy,
@@ -310,6 +342,29 @@ impl Snapshot {
         }
         true
     }
+
+    pub(crate) fn has_exact_paths(&self, paths: impl IntoIterator<Item = PathBuf>) -> bool {
+        let paths = normalize_paths(paths);
+        self.entries.len() == paths.len()
+            && self
+                .entries
+                .iter()
+                .zip(paths.iter())
+                .all(|(entry, path)| entry.path() == path)
+    }
+
+    fn merge<'a>(snapshots: impl IntoIterator<Item = &'a Snapshot>) -> Self {
+        let mut entries = BTreeMap::new();
+        for snapshot in snapshots {
+            for entry in &snapshot.entries {
+                entries.insert(entry.path().to_path_buf(), entry.clone());
+            }
+        }
+
+        Self {
+            entries: entries.into_values().collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +377,15 @@ enum SnapshotEntry {
 }
 
 impl SnapshotEntry {
+    fn path(&self) -> &Path {
+        match self {
+            Self::File(file) => &file.path,
+            Self::Context(context) => &context.path,
+            Self::MissingExistence { path } | Self::ImmutablePath { path } => path,
+            Self::ManagedPath(snapshot) => &snapshot.path,
+        }
+    }
+
     async fn create_file(
         path: &Path,
         source: Option<&str>,
@@ -1192,6 +1256,47 @@ mod tests {
         assert!(
             file_system_info
                 .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_system_info_merges_snapshots_with_path_union_and_later_override()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let shared = temp.path().join("shared.js");
+        let extra = temp.path().join("extra.js");
+        let file_system_info = FileSystemInfo::new();
+
+        write(&shared, "export const value = 'before';")?;
+        let stale_shared = file_system_info
+            .create_snapshot(vec![shared.clone()], SnapshotStrategy::hash())
+            .await?;
+        write(&shared, "export const value = 'after';")?;
+        let fresh_shared = file_system_info
+            .create_snapshot(vec![shared.clone()], SnapshotStrategy::hash())
+            .await?;
+        write(&extra, "export const extra = true;")?;
+        let extra_snapshot = file_system_info
+            .create_snapshot(vec![extra.clone()], SnapshotStrategy::hash())
+            .await?;
+
+        let merged =
+            file_system_info.merge_snapshots([&stale_shared, &extra_snapshot, &fresh_shared]);
+
+        assert!(
+            file_system_info
+                .is_snapshot_valid(&merged, SnapshotStrategy::hash())
+                .await
+        );
+
+        write(&extra, "export const extra = false;")?;
+
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&merged, SnapshotStrategy::hash())
                 .await
         );
 

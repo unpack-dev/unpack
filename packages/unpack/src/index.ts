@@ -609,6 +609,8 @@ class WatchingImpl implements Watching {
       return;
     }
 
+    this.#clearRebuildTimer();
+    this.#closeWatchers();
     this.#running = true;
     let latestStats: Stats | undefined;
     await this.#runCompilation((err, stats) => {
@@ -620,7 +622,8 @@ class WatchingImpl implements Watching {
     this.#running = false;
 
     if (!this.#closed && latestStats) {
-      this.#replaceWatchers(latestStats.toJson().watchDependencies);
+      const latestJson = latestStats.toJson();
+      this.#replaceWatchers(latestJson.watchDependencies, latestJson.outputPath);
     }
 
     if (this.#closed) {
@@ -643,7 +646,7 @@ class WatchingImpl implements Watching {
     }
   }
 
-  #replaceWatchers(dependencies: WatchDependencySets): void {
+  #replaceWatchers(dependencies: WatchDependencySets, outputPath: string): void {
     this.#closeWatchers();
     const targets = watchTargets(dependencies).filter(
       (target) => !isIgnoredWatchPath(target.path, this.#watchOptions.ignored)
@@ -661,19 +664,44 @@ class WatchingImpl implements Watching {
         .filter((target) => target.kind !== "context")
         .map((target) => target.path)
     );
+    const contextWatchedPaths = new Set(
+      targets
+        .filter((target) => target.kind === "context")
+        .map((target) => target.path)
+    );
+    const targetSnapshots = new Map(
+      targets.map((target) => [target.path, pollSnapshot(target.path)])
+    );
     for (const target of targets) {
       try {
         this.#watchers.push(
           watchFileSystem(target.path, { persistent: false }, (_eventType, filename) => {
+            if (target.kind === "context" && !filename && this.#watchOptions.ignored.length > 0) {
+              return;
+            }
             const changedPath =
               target.kind === "context" && filename
                 ? resolve(target.path, filename.toString())
                 : target.path;
+            if (isOutputWatchPath(changedPath, outputPath)) {
+              return;
+            }
+            if (target.kind === "context" && contextWatchedPaths.has(changedPath)) {
+              return;
+            }
             if (target.kind === "context" && directlyWatchedPaths.has(changedPath)) {
               return;
             }
             if (isIgnoredWatchPath(changedPath, this.#watchOptions.ignored)) {
               return;
+            }
+            if (target.kind !== "context") {
+              const previous = targetSnapshots.get(target.path);
+              const next = pollSnapshot(target.path);
+              targetSnapshots.set(target.path, next);
+              if (previous && pollSnapshotsEqual(previous, next)) {
+                return;
+              }
             }
             this.#queueRebuild();
           })
@@ -1316,8 +1344,20 @@ function isIgnoredWatchPath(path: string, ignored: WatchIgnoredMatcher[]): boole
   });
 }
 
+function isOutputWatchPath(path: string, outputPath: string): boolean {
+  const normalizedPath = normalizeWatchMatchPath(path);
+  const normalizedOutputPath = normalizeWatchMatchPath(outputPath);
+  return (
+    normalizedPath === normalizedOutputPath ||
+    normalizedPath.startsWith(`${normalizedOutputPath}/`)
+  );
+}
+
 function normalizeWatchMatchPath(path: string): string {
-  return path.replaceAll("\\", "/");
+  const normalizedPath = path.replaceAll("\\", "/");
+  return normalizedPath.startsWith("/private/var/")
+    ? normalizedPath.replace(/^\/private\/var\//, "/var/")
+    : normalizedPath;
 }
 
 function pollSnapshot(path: string): PollSnapshot {

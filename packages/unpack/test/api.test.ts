@@ -231,6 +231,41 @@ test("mode does not weaken resolve build dependency snapshot defaults", async ()
   });
 });
 
+test("resolver snapshots invalidate same-timestamp context candidate additions", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from './dep'; export const result = value;",
+    "src/dep.js": "export const value = 'js';"
+  });
+  const sourceRoot = join(fixture, "src");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(sourceRoot, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    mode: "development",
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      resolve: { timestamp: true, hash: false }
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /js/);
+
+    await writeFile(join(sourceRoot, "dep.ts"), "export const value = 'ts';", {
+      encoding: "utf8"
+    });
+    await utimes(sourceRoot, stableTime, stableTime);
+
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /ts/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("default managed node_modules snapshots invalidate on package version changes", async () => {
   const fixture = await createNodeModulesFixture();
   const moduleFile = join(fixture, "node_modules/pkg/index.js");
@@ -347,6 +382,38 @@ test("immutable path patterns bypass module snapshot file validation", async () 
     await utimes(moduleFile, stableTime, stableTime);
     assert.equal((await runExistingCompiler(compiler)).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("resolver missing candidates invalidate managed packages", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from 'pkg/feature'; export const result = value;",
+    "node_modules/pkg/package.json": JSON.stringify({ name: "pkg", version: "1.0.0" }),
+    "node_modules/pkg/feature.js": "export const value = 'js';"
+  });
+  const packageRoot = join(fixture, "node_modules/pkg");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      resolve: { timestamp: true, hash: false }
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /js/);
+
+    await writeFile(join(packageRoot, "feature.ts"), "export const value = 'ts';", {
+      encoding: "utf8"
+    });
+
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /ts/);
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });

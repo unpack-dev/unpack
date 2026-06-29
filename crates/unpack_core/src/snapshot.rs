@@ -137,12 +137,14 @@ impl FileSystemInfo {
         Snapshot::create_file(path, source, strategy, self).await
     }
 
-    pub(crate) async fn create_snapshot(
+    pub(crate) async fn create_resolve_snapshot(
         &self,
-        paths: impl IntoIterator<Item = PathBuf>,
+        files: impl IntoIterator<Item = PathBuf>,
+        contexts: impl IntoIterator<Item = PathBuf>,
+        missing: impl IntoIterator<Item = PathBuf>,
         strategy: SnapshotStrategy,
     ) -> Result<Snapshot> {
-        Snapshot::create(paths, strategy, self).await
+        Snapshot::create_resolve(files, contexts, missing, strategy, self).await
     }
 
     pub(crate) fn create_snapshot_sync(
@@ -192,7 +194,7 @@ impl FileSystemInfo {
         SnapshotPathClassification::Unclassified
     }
 
-    fn file_snapshot_applies(&self, path: &Path) -> bool {
+    fn ordinary_snapshot_applies(&self, path: &Path) -> bool {
         match self.classify_path(path) {
             SnapshotPathClassification::Unmanaged | SnapshotPathClassification::Unclassified => {
                 true
@@ -244,17 +246,29 @@ impl Snapshot {
         })
     }
 
-    async fn create(
-        paths: impl IntoIterator<Item = PathBuf>,
+    async fn create_resolve(
+        files: impl IntoIterator<Item = PathBuf>,
+        contexts: impl IntoIterator<Item = PathBuf>,
+        missing: impl IntoIterator<Item = PathBuf>,
         strategy: SnapshotStrategy,
         file_system_info: &FileSystemInfo,
     ) -> Result<Self> {
-        let paths = normalize_paths(paths);
-        let mut entries = Vec::with_capacity(paths.len());
-        for path in paths {
+        let files = normalize_paths(files);
+        let contexts = normalize_paths(contexts);
+        let missing = normalize_paths(missing);
+        let mut entries = Vec::with_capacity(files.len() + contexts.len() + missing.len());
+
+        for path in files {
             entries
                 .push(SnapshotEntry::create_file(&path, None, strategy, file_system_info).await?);
         }
+        for path in contexts {
+            entries.push(SnapshotEntry::create_context(&path, strategy, file_system_info).await?);
+        }
+        for path in missing {
+            entries.push(SnapshotEntry::create_missing(&path));
+        }
+
         Ok(Self { entries })
     }
 
@@ -301,6 +315,8 @@ impl Snapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum SnapshotEntry {
     File(SnapshottedFile),
+    Context(SnapshottedContext),
+    MissingExistence { path: PathBuf },
     ImmutablePath { path: PathBuf },
     ManagedPath(ManagedPathSnapshot),
 }
@@ -312,18 +328,8 @@ impl SnapshotEntry {
         strategy: SnapshotStrategy,
         file_system_info: &FileSystemInfo,
     ) -> Result<Self> {
-        match file_system_info.classify_path(path) {
-            SnapshotPathClassification::Managed(boundary) => {
-                if let Some(snapshot) = ManagedPathSnapshot::create(path, &boundary) {
-                    return Ok(Self::ManagedPath(snapshot));
-                }
-            }
-            SnapshotPathClassification::Immutable => {
-                return Ok(Self::ImmutablePath {
-                    path: path.to_path_buf(),
-                });
-            }
-            SnapshotPathClassification::Unmanaged | SnapshotPathClassification::Unclassified => {}
+        if let Some(entry) = Self::classified_path_entry(path, file_system_info) {
+            return Ok(entry);
         }
 
         let snapshot = match source {
@@ -341,24 +347,49 @@ impl SnapshotEntry {
         strategy: SnapshotStrategy,
         file_system_info: &FileSystemInfo,
     ) -> Result<Self> {
-        match file_system_info.classify_path(path) {
-            SnapshotPathClassification::Managed(boundary) => {
-                if let Some(snapshot) = ManagedPathSnapshot::create(path, &boundary) {
-                    return Ok(Self::ManagedPath(snapshot));
-                }
-            }
-            SnapshotPathClassification::Immutable => {
-                return Ok(Self::ImmutablePath {
-                    path: path.to_path_buf(),
-                });
-            }
-            SnapshotPathClassification::Unmanaged | SnapshotPathClassification::Unclassified => {}
+        if let Some(entry) = Self::classified_path_entry(path, file_system_info) {
+            return Ok(entry);
         }
 
         Ok(Self::File(SnapshottedFile {
             path: path.to_path_buf(),
             snapshot: FileSnapshot::create_from_file_sync(path, strategy)?,
         }))
+    }
+
+    async fn create_context(
+        path: &Path,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> Result<Self> {
+        if let Some(entry) = Self::classified_path_entry(path, file_system_info) {
+            return Ok(entry);
+        }
+
+        Ok(Self::Context(SnapshottedContext {
+            path: path.to_path_buf(),
+            snapshot: ContextSnapshot::create(path, strategy).await?,
+        }))
+    }
+
+    fn create_missing(path: &Path) -> Self {
+        Self::MissingExistence {
+            path: path.to_path_buf(),
+        }
+    }
+
+    fn classified_path_entry(path: &Path, file_system_info: &FileSystemInfo) -> Option<Self> {
+        match file_system_info.classify_path(path) {
+            SnapshotPathClassification::Managed(boundary) => {
+                ManagedPathSnapshot::create(path, &boundary).map(Self::ManagedPath)
+            }
+            SnapshotPathClassification::Immutable => Some(Self::ImmutablePath {
+                path: path.to_path_buf(),
+            }),
+            SnapshotPathClassification::Unmanaged | SnapshotPathClassification::Unclassified => {
+                None
+            }
+        }
     }
 
     async fn is_valid(
@@ -368,8 +399,16 @@ impl SnapshotEntry {
     ) -> bool {
         match self {
             Self::File(file) => {
-                file_system_info.file_snapshot_applies(&file.path)
+                file_system_info.ordinary_snapshot_applies(&file.path)
                     && file.snapshot.is_valid(&file.path, strategy).await
+            }
+            Self::Context(context) => {
+                file_system_info.ordinary_snapshot_applies(&context.path)
+                    && context.snapshot.is_valid(&context.path, strategy).await
+            }
+            Self::MissingExistence { path } => {
+                file_system_info.ordinary_snapshot_applies(path)
+                    && MissingExistenceSnapshot::is_valid(path).await
             }
             Self::ImmutablePath { path } => {
                 file_system_info.classify_path(path) == SnapshotPathClassification::Immutable
@@ -386,8 +425,16 @@ impl SnapshotEntry {
     fn is_valid_sync(&self, strategy: SnapshotStrategy, file_system_info: &FileSystemInfo) -> bool {
         match self {
             Self::File(file) => {
-                file_system_info.file_snapshot_applies(&file.path)
+                file_system_info.ordinary_snapshot_applies(&file.path)
                     && file.snapshot.is_valid_sync(&file.path, strategy)
+            }
+            Self::Context(context) => {
+                file_system_info.ordinary_snapshot_applies(&context.path)
+                    && context.snapshot.is_valid_sync(&context.path, strategy)
+            }
+            Self::MissingExistence { path } => {
+                file_system_info.ordinary_snapshot_applies(path)
+                    && MissingExistenceSnapshot::is_valid_sync(path)
             }
             Self::ImmutablePath { path } => {
                 file_system_info.classify_path(path) == SnapshotPathClassification::Immutable
@@ -399,6 +446,106 @@ impl SnapshotEntry {
                 ) && snapshot.is_valid()
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ContextSnapshot {
+    exists: bool,
+    modified: Option<SystemTime>,
+    entries_hash: Option<u64>,
+}
+
+impl ContextSnapshot {
+    async fn create(path: &Path, strategy: SnapshotStrategy) -> Result<Self> {
+        Self::create_sync(path, strategy)
+    }
+
+    fn create_sync(path: &Path, strategy: SnapshotStrategy) -> Result<Self> {
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    exists: false,
+                    modified: None,
+                    entries_hash: None,
+                });
+            }
+            Err(error) => return Err(Error::read(path, error)),
+        };
+
+        if !metadata.is_dir() {
+            return Ok(Self {
+                exists: false,
+                modified: None,
+                entries_hash: None,
+            });
+        }
+
+        let modified = if strategy.timestamp {
+            Some(
+                metadata
+                    .modified()
+                    .map_err(|error| Error::read(path, error))?,
+            )
+        } else {
+            None
+        };
+        let entries_hash = (strategy.timestamp || strategy.hash)
+            .then(|| directory_entries_hash(path))
+            .transpose()?;
+
+        Ok(Self {
+            exists: true,
+            modified,
+            entries_hash,
+        })
+    }
+
+    async fn is_valid(&self, path: &Path, strategy: SnapshotStrategy) -> bool {
+        self.is_valid_sync(path, strategy)
+    }
+
+    fn is_valid_sync(&self, path: &Path, strategy: SnapshotStrategy) -> bool {
+        if !self.exists {
+            return matches!(fs::metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound);
+        }
+
+        let Ok(metadata) = fs::metadata(path) else {
+            return false;
+        };
+        if !metadata.is_dir() {
+            return false;
+        }
+
+        if strategy.timestamp {
+            let Ok(modified) = metadata.modified() else {
+                return false;
+            };
+            if Some(modified) != self.modified {
+                return false;
+            }
+        }
+
+        if (strategy.timestamp || strategy.hash)
+            && directory_entries_hash(path).ok() != self.entries_hash
+        {
+            return false;
+        }
+
+        true
+    }
+}
+
+struct MissingExistenceSnapshot;
+
+impl MissingExistenceSnapshot {
+    async fn is_valid(path: &Path) -> bool {
+        Self::is_valid_sync(path)
+    }
+
+    fn is_valid_sync(path: &Path) -> bool {
+        matches!(fs::metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
     }
 }
 
@@ -614,11 +761,41 @@ struct SnapshottedFile {
     snapshot: FileSnapshot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SnapshottedContext {
+    path: PathBuf,
+    snapshot: ContextSnapshot,
+}
+
 fn normalize_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut paths = paths.into_iter().collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
     paths
+}
+
+fn directory_entries_hash(path: &Path) -> Result<u64> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| Error::read(path, error))?
+        .map(|entry| {
+            let entry = entry.map_err(|error| Error::read(path, error))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| Error::read(entry.path(), error))?;
+            let kind = if file_type.is_dir() {
+                "d"
+            } else if file_type.is_file() {
+                "f"
+            } else if file_type.is_symlink() {
+                "l"
+            } else {
+                "o"
+            };
+            Ok(format!("{}\0{kind}", entry.file_name().to_string_lossy()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    entries.sort();
+    Ok(hash_bytes(entries.join("\0").as_bytes()))
 }
 
 fn managed_item_root(path: &Path, boundary: &ManagedPathBoundary) -> Option<PathBuf> {
@@ -721,6 +898,8 @@ fn hash_bytes(source: &[u8]) -> u64 {
 mod tests {
     use std::{fs, path::Path};
 
+    use filetime::{FileTime, set_file_mtime};
+
     use super::*;
 
     #[tokio::test]
@@ -746,6 +925,98 @@ mod tests {
         assert!(
             !file_system_info
                 .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_existence_snapshots_invalidate_when_path_appears()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let missing = temp.path().join("dep.ts");
+        let file_system_info = FileSystemInfo::new();
+        let snapshot = file_system_info
+            .create_resolve_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![missing.clone()],
+                SnapshotStrategy::timestamp(),
+            )
+            .await?;
+
+        assert!(
+            file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::timestamp())
+                .await
+        );
+
+        write(&missing, "export const value = 'ts';")?;
+
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::timestamp())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_missing_candidates_are_recorded_as_existence_snapshots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let package_root = temp.path().join("node_modules/pkg");
+        let missing = package_root.join("feature.ts");
+        write(
+            package_root.join("package.json"),
+            r#"{"name":"pkg","version":"1.0.0"}"#,
+        )?;
+        let file_system_info = FileSystemInfo::new();
+        let snapshot = file_system_info
+            .create_resolve_snapshot(
+                Vec::new(),
+                Vec::new(),
+                vec![missing.clone()],
+                SnapshotStrategy::timestamp(),
+            )
+            .await?;
+
+        write(&missing, "export const value = 'ts';")?;
+
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::timestamp())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn context_timestamp_snapshots_include_directory_entries()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = temp.path().join("src");
+        write(context.join("dep.js"), "export const value = 'js';")?;
+        let original_mtime = FileTime::from_system_time(fs::metadata(&context)?.modified()?);
+        let file_system_info = FileSystemInfo::new();
+        let snapshot = file_system_info
+            .create_resolve_snapshot(
+                Vec::new(),
+                vec![context.clone()],
+                Vec::new(),
+                SnapshotStrategy::timestamp(),
+            )
+            .await?;
+
+        write(context.join("dep.ts"), "export const value = 'ts';")?;
+        set_file_mtime(&context, original_mtime)?;
+
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::timestamp())
                 .await
         );
 

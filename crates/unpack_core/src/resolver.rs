@@ -39,6 +39,18 @@ impl UnpackResolver {
             .resolve_with_context(directory, request, &mut context)
             .await
             .map_err(|error| Error::resolve(directory, request, error))?;
+        let file_dependencies = context
+            .file_dependencies
+            .into_iter()
+            .map(|path| normalize_resolver_dependency(path.as_path()))
+            .collect::<BTreeSet<_>>();
+        let missing_dependencies = context
+            .missing_dependencies
+            .into_iter()
+            .map(|path| normalize_resolver_dependency(path.as_path()))
+            .collect::<BTreeSet<_>>();
+        let context_dependencies =
+            context_dependencies(directory, &file_dependencies, &missing_dependencies);
 
         Ok(ResolveResult {
             resource: ResolvedResource {
@@ -46,16 +58,9 @@ impl UnpackResolver {
                 query: resolution.query().map(ToOwned::to_owned),
                 fragment: resolution.fragment().map(ToOwned::to_owned),
             },
-            file_dependencies: context
-                .file_dependencies
-                .into_iter()
-                .map(|path| normalize_resolver_dependency(path.as_path()))
-                .collect(),
-            missing_dependencies: context
-                .missing_dependencies
-                .into_iter()
-                .map(|path| normalize_resolver_dependency(path.as_path()))
-                .collect(),
+            file_dependencies,
+            context_dependencies,
+            missing_dependencies,
         })
     }
 }
@@ -64,6 +69,7 @@ impl UnpackResolver {
 pub struct ResolveResult {
     pub resource: ResolvedResource,
     pub file_dependencies: BTreeSet<PathBuf>,
+    pub context_dependencies: BTreeSet<PathBuf>,
     pub missing_dependencies: BTreeSet<PathBuf>,
 }
 
@@ -98,4 +104,40 @@ fn normalize_resolver_dependency(path: &Path) -> PathBuf {
         Some(file_name) => canonical_parent.join(file_name),
         None => canonical_parent,
     }
+}
+
+fn context_dependencies(
+    search_directory: &Path,
+    file_dependencies: &BTreeSet<PathBuf>,
+    missing_dependencies: &BTreeSet<PathBuf>,
+) -> BTreeSet<PathBuf> {
+    let search_directory = normalize_resolver_dependency(search_directory);
+    file_dependencies
+        .iter()
+        .chain(missing_dependencies.iter())
+        .filter_map(|path| context_dependency(&search_directory, path))
+        .collect()
+}
+
+fn context_dependency(search_directory: &Path, dependency: &Path) -> Option<PathBuf> {
+    if dependency
+        .file_name()
+        .is_some_and(|name| name == "node_modules")
+    {
+        return None;
+    }
+
+    let parent = dependency.parent()?;
+    if !parent.is_dir() {
+        return None;
+    }
+
+    let parent = normalize_resolver_dependency(parent);
+    (parent.starts_with(search_directory) || has_component(&parent, "node_modules"))
+        .then_some(parent)
+}
+
+fn has_component(path: &Path, name: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == name)
 }

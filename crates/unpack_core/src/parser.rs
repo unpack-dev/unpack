@@ -37,17 +37,8 @@ struct ImportBinding {
     local: String,
 }
 
-pub(crate) async fn parse_module_dependencies(
-    path: PathBuf,
-    source: String,
-) -> Result<ParsedModule> {
-    let task_path = path.clone();
-    tokio::task::spawn_blocking(move || parse_module_dependencies_sync(&path, &source))
-        .await
-        .map_err(|error| Error::ParseTask {
-            path: task_path,
-            message: error.to_string(),
-        })?
+pub(crate) fn parse_module_dependencies(path: &Path, source: &str) -> Result<ParsedModule> {
+    parse_module_dependencies_sync(path, source)
 }
 
 fn parse_module_dependencies_sync(path: &Path, source: &str) -> Result<ParsedModule> {

@@ -381,7 +381,7 @@ impl BuildTask {
                 return Ok(Vec::new());
             }
         };
-        let parsed = match parse_module_dependencies(self.resource.clone(), source.clone()).await {
+        let parsed = match parse_module_dependencies(&self.resource, &source) {
             Ok(parsed) => parsed,
             Err(error) if error.is_compilation_error() => {
                 state

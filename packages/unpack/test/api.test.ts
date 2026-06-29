@@ -319,6 +319,86 @@ test("compiler close waits for pending filesystem cache flush", async () => {
   }
 });
 
+test("watch performs initial build and close keeps compiler reusable", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    const result = await first;
+    assert.equal(result.err, null);
+    assert.equal(result.stats?.hasErrors(), false);
+
+    await closeWatching(watching);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch invalidate triggers rebuild", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const entry = join(fixture, "src/index.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    const second = results.next();
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(entry, changedTime, changedTime);
+    watching.invalidate();
+
+    assert.equal((await second).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch conflicts with run watch and compiler close", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+
+    assert.equal((await runExistingCompiler(compiler)).err?.name, "ConcurrentRunError");
+
+    const failedWatch = collectWatchResults();
+    const failed = failedWatch.next();
+    compiler.watch({}, failedWatch.handler);
+    assert.equal((await failed).err?.name, "ConcurrentRunError");
+
+    const closeResult = await closeCompilerResult(compiler);
+    assert.equal(closeResult?.name, "CompilerRunningError");
+
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("run callback is asynchronous", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"
@@ -471,6 +551,39 @@ async function closeCompiler(compiler: ReturnType<typeof unpack>) {
       }
     });
   });
+}
+
+async function closeCompilerResult(compiler: ReturnType<typeof unpack>) {
+  return new Promise<Error | null>((resolve) => {
+    compiler.close((err) => {
+      resolve(err);
+    });
+  });
+}
+
+async function closeWatching(watching: ReturnType<ReturnType<typeof unpack>["watch"]>) {
+  await new Promise<void>((resolve, reject) => {
+    watching.close((err) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+function collectWatchResults() {
+  const resolvers: Array<(result: { err: Error | null; stats?: Stats }) => void> = [];
+  return {
+    handler: (err: Error | null, stats?: Stats) => {
+      resolvers.shift()?.({ err, stats });
+    },
+    next: () =>
+      new Promise<{ err: Error | null; stats?: Stats }>((resolve) => {
+        resolvers.push(resolve);
+      })
+  };
 }
 
 function delay(ms: number) {

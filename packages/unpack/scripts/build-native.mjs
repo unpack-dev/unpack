@@ -35,8 +35,20 @@ if (!libraryName) {
 }
 
 const distDir = resolve(packageDir, "dist");
+const nativeOutput = resolve(distDir, "unpack_node.node");
 mkdirSync(distDir, { recursive: true });
 copyFileSync(
   resolve(repoRoot, "target", profile, libraryName),
-  resolve(distDir, "unpack_node.node")
+  nativeOutput
 );
+
+if (process.platform === "darwin") {
+  // Re-sign the copied .node path so macOS accepts it in Node test workers.
+  const codesign = spawnSync("codesign", ["--force", "--sign", "-", nativeOutput], {
+    cwd: repoRoot,
+    stdio: "inherit"
+  });
+  if (codesign.status !== 0) {
+    process.exit(codesign.status ?? 1);
+  }
+}

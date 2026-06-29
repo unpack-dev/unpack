@@ -31,6 +31,9 @@ importers:
       typescript:
         specifier: 6.0.3
         version: 6.0.3
+      webpack:
+        specifier: 5.108.1
+        version: 5.108.1
 
 packages:
 

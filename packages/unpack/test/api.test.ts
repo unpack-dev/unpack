@@ -457,6 +457,61 @@ test("watch aggregateTimeout coalesces rapid changes", async () => {
   }
 });
 
+test("watch ignored string prevents rebuilds from ignored files", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from './ignored'; export const result = value;",
+    "src/ignored.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const ignored = join(fixture, "src/ignored.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({ ignored: "ignored.js" }, results.handler);
+    assert.equal((await first).err, null);
+
+    await writeFile(ignored, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(ignored, changedTime, changedTime);
+    await delay(150);
+
+    assert.equal(results.calls(), 1);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch poll option rebuilds through polling", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const entry = join(fixture, "src/index.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({ aggregateTimeout: 0, poll: 20 }, results.handler);
+    assert.equal((await first).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    const second = results.next();
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(entry, changedTime, changedTime);
+
+    assert.equal((await second).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("watch conflicts with run watch and compiler close", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"
@@ -612,6 +667,82 @@ test("cache and snapshot option validation throws synchronously", () => {
       }),
     /options.snapshot.module.timestamp must be a boolean/
   );
+});
+
+test("watch option validation throws synchronously", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            // @ts-expect-error intentionally testing runtime validation
+            followSymlinks: false
+          },
+          () => {}
+        ),
+      /watchOptions contains unknown option 'followSymlinks'/
+    );
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            // @ts-expect-error intentionally testing runtime validation
+            ignored: 1
+          },
+          () => {}
+        ),
+      /watchOptions.ignored must be a string or RegExp/
+    );
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            // @ts-expect-error intentionally testing runtime validation
+            ignored: ["ok", 1]
+          },
+          () => {}
+        ),
+      /watchOptions.ignored\[1\] must be a string or RegExp/
+    );
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            // @ts-expect-error intentionally testing runtime validation
+            poll: false
+          },
+          () => {}
+        ),
+      /watchOptions.poll must be true or a positive integer/
+    );
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            poll: 0
+          },
+          () => {}
+        ),
+      /watchOptions.poll must be a positive integer/
+    );
+
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch(
+      { ignored: [/unused/, "not-used"], poll: true },
+      results.handler
+    );
+    assert.equal((await first).err, null);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
 });
 
 async function runCompiler(options: Parameters<typeof unpack>[0]) {

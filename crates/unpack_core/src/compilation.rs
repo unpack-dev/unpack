@@ -7,6 +7,7 @@ use crate::{
     build_cache::BuildCache,
     code_generation,
     make::{self, MakeState},
+    snapshot::FileSystemInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -20,6 +21,7 @@ pub struct Compilation {
     entries: Vec<ModuleId>,
     errors: Vec<Error>,
     watch_dependencies: WatchDependencies,
+    file_system_info: FileSystemInfo,
 }
 
 impl Compilation {
@@ -38,6 +40,7 @@ impl Compilation {
             entries: Vec::new(),
             errors: Vec::new(),
             watch_dependencies: WatchDependencies::default(),
+            file_system_info: FileSystemInfo::new(),
         }
     }
 
@@ -75,6 +78,7 @@ impl Compilation {
             &self.options,
             self.resolver.clone(),
             self.build_cache.clone(),
+            self.file_system_info.clone(),
             Arc::clone(&state),
         )
         .await;

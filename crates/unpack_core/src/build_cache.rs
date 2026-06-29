@@ -8,13 +8,13 @@ use std::{
 use crate::{
     ModuleIdentity, SnapshotStrategy,
     parser::ParsedModule,
-    snapshot::{FileSetSnapshot, FileSnapshot},
+    snapshot::{FileSystemInfo, Snapshot},
 };
 use serde::{Deserialize, Serialize};
 
 const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
 const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
-const CACHE_SCHEMA_VERSION: u32 = 2;
+const CACHE_SCHEMA_VERSION: u32 = 3;
 const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
 const MANIFEST_FILE: &str = "container.json";
 
@@ -22,6 +22,7 @@ const MANIFEST_FILE: &str = "container.json";
 pub(crate) struct BuildCache {
     options: CacheOptions,
     build_dependency_snapshot_strategy: SnapshotStrategy,
+    file_system_info: FileSystemInfo,
     inner: Arc<Mutex<BuildCacheInner>>,
 }
 
@@ -139,7 +140,7 @@ pub(crate) struct ResolveRecord {
     resource: PathBuf,
     file_dependencies: BTreeSet<PathBuf>,
     missing_dependencies: BTreeSet<PathBuf>,
-    snapshot: FileSetSnapshot,
+    snapshot: Snapshot,
 }
 
 impl ResolveRecord {
@@ -148,16 +149,18 @@ impl ResolveRecord {
         resource: PathBuf,
         file_dependencies: BTreeSet<PathBuf>,
         missing_dependencies: BTreeSet<PathBuf>,
+        file_system_info: &FileSystemInfo,
         strategy: SnapshotStrategy,
     ) -> crate::Result<Self> {
-        let snapshot = FileSetSnapshot::create(
-            file_dependencies
-                .iter()
-                .chain(missing_dependencies.iter())
-                .cloned(),
-            strategy,
-        )
-        .await?;
+        let snapshot = file_system_info
+            .create_snapshot(
+                file_dependencies
+                    .iter()
+                    .chain(missing_dependencies.iter())
+                    .cloned(),
+                strategy,
+            )
+            .await?;
         Ok(Self {
             identity,
             resource,
@@ -183,8 +186,14 @@ impl ResolveRecord {
         &self.missing_dependencies
     }
 
-    pub(crate) async fn is_valid(&self, strategy: SnapshotStrategy) -> bool {
-        self.snapshot.is_valid(strategy).await
+    pub(crate) async fn is_valid(
+        &self,
+        file_system_info: &FileSystemInfo,
+        strategy: SnapshotStrategy,
+    ) -> bool {
+        file_system_info
+            .is_snapshot_valid(&self.snapshot, strategy)
+            .await
     }
 }
 
@@ -192,11 +201,11 @@ impl ResolveRecord {
 pub(crate) struct ModuleBuildRecord {
     parsed: ParsedModule,
     source: String,
-    snapshot: FileSnapshot,
+    snapshot: Snapshot,
 }
 
 impl ModuleBuildRecord {
-    pub(crate) fn new(parsed: ParsedModule, source: String, snapshot: FileSnapshot) -> Self {
+    pub(crate) fn new(parsed: ParsedModule, source: String, snapshot: Snapshot) -> Self {
         Self {
             parsed,
             source,
@@ -212,8 +221,14 @@ impl ModuleBuildRecord {
         (self.parsed, self.source)
     }
 
-    pub(crate) async fn is_valid(&self, path: &Path, strategy: SnapshotStrategy) -> bool {
-        self.snapshot.is_valid(path, strategy).await
+    pub(crate) async fn is_valid(
+        &self,
+        file_system_info: &FileSystemInfo,
+        strategy: SnapshotStrategy,
+    ) -> bool {
+        file_system_info
+            .is_snapshot_valid(&self.snapshot, strategy)
+            .await
     }
 }
 
@@ -225,6 +240,7 @@ impl BuildCache {
         let cache = Self {
             options,
             build_dependency_snapshot_strategy,
+            file_system_info: FileSystemInfo::new(),
             inner: Arc::new(Mutex::new(BuildCacheInner::default())),
         };
         cache.restore_from_filesystem();
@@ -459,22 +475,14 @@ impl BuildCache {
             .map(|dependency| {
                 Ok(PersistentBuildDependencySnapshot {
                     name: dependency.name.clone(),
-                    files: dependency
-                        .files
-                        .iter()
-                        .map(|path| {
-                            Ok(PersistentFileSnapshot {
-                                path: path.clone(),
-                                snapshot: FileSnapshot::create_from_file_sync(
-                                    path,
-                                    self.build_dependency_snapshot_strategy,
-                                )
-                                .map_err(|error| {
-                                    io::Error::new(io::ErrorKind::InvalidData, error)
-                                })?,
-                            })
-                        })
-                        .collect::<io::Result<Vec<_>>>()?,
+                    files: dependency.files.clone(),
+                    snapshot: self
+                        .file_system_info
+                        .create_snapshot_sync(
+                            dependency.files.clone(),
+                            self.build_dependency_snapshot_strategy,
+                        )
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                 })
             })
             .collect()
@@ -499,14 +507,14 @@ impl BuildCache {
                 return false;
             }
 
-            dependency.files.iter().all(|path| {
-                snapshot.files.iter().any(|snapshot_file| {
-                    snapshot_file.path == *path
-                        && snapshot_file
-                            .snapshot
-                            .is_valid_sync(path, self.build_dependency_snapshot_strategy)
-                })
-            })
+            dependency
+                .files
+                .iter()
+                .all(|path| snapshot.files.contains(path))
+                && self.file_system_info.is_snapshot_valid_sync(
+                    &snapshot.snapshot,
+                    self.build_dependency_snapshot_strategy,
+                )
         })
     }
 }
@@ -534,13 +542,8 @@ struct CacheManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistentBuildDependencySnapshot {
     name: String,
-    files: Vec<PersistentFileSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistentFileSnapshot {
-    path: PathBuf,
-    snapshot: FileSnapshot,
+    files: Vec<PathBuf>,
+    snapshot: Snapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

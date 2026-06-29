@@ -12,7 +12,7 @@ use crate::{
     NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     parser::{ParsedModule, parse_module_dependencies},
-    snapshot::FileSnapshot,
+    snapshot::FileSystemInfo,
 };
 
 #[derive(Debug, Default)]
@@ -31,6 +31,7 @@ struct MakeServices {
     factory: NormalModuleFactory,
     module_build_cache: ModuleBuildCache,
     module_snapshot_strategy: SnapshotStrategy,
+    file_system_info: FileSystemInfo,
     semaphore: Arc<Semaphore>,
 }
 
@@ -53,15 +54,18 @@ pub(crate) async fn run(
     options: &CompilerOptions,
     resolver: UnpackResolver,
     build_cache: BuildCache,
+    file_system_info: FileSystemInfo,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
     let services = MakeServices {
         factory: NormalModuleFactory::new(
             resolver,
             build_cache.normal_module_factory(),
+            file_system_info.clone(),
             options.snapshot.resolve,
         ),
         module_build_cache: build_cache.module_builds(),
+        file_system_info,
         module_snapshot_strategy: options.snapshot.module,
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
@@ -175,7 +179,10 @@ async fn process_request(
 
     if let Some(record) = services.module_build_cache.get_module_build(&identity) {
         if record
-            .is_valid(&resource, services.module_snapshot_strategy)
+            .is_valid(
+                &services.file_system_info,
+                services.module_snapshot_strategy,
+            )
             .await
         {
             let children =
@@ -212,8 +219,10 @@ async fn process_request(
         Err(error) => return Err(error),
     };
     let children = module_build_children(add_result.module_id, &issuer_context, &parsed);
-    let snapshot =
-        FileSnapshot::create(&resource, &source, services.module_snapshot_strategy).await?;
+    let snapshot = services
+        .file_system_info
+        .create_file_snapshot(&resource, &source, services.module_snapshot_strategy)
+        .await?;
     let record = ModuleBuildRecord::new(parsed.clone(), source.clone(), snapshot);
 
     state

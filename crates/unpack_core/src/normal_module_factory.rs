@@ -6,12 +6,14 @@ use std::{
 use crate::{
     Dependency, ModuleIdentity, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{NormalModuleFactoryCache, ResolveRecord, ResolveRequest},
+    snapshot::FileSystemInfo,
 };
 
 #[derive(Debug, Clone)]
 pub struct NormalModuleFactory {
     resolver: UnpackResolver,
     cache: NormalModuleFactoryCache,
+    file_system_info: FileSystemInfo,
     resolve_snapshot_strategy: SnapshotStrategy,
 }
 
@@ -19,11 +21,13 @@ impl NormalModuleFactory {
     pub(crate) fn new(
         resolver: UnpackResolver,
         cache: NormalModuleFactoryCache,
+        file_system_info: FileSystemInfo,
         resolve_snapshot_strategy: SnapshotStrategy,
     ) -> Self {
         Self {
             resolver,
             cache,
+            file_system_info,
             resolve_snapshot_strategy,
         }
     }
@@ -38,7 +42,10 @@ impl NormalModuleFactory {
             .expect("module dependency should have a request");
         let resolve_request = ResolveRequest::new(context, request);
         if let Some(record) = self.cache.get_resolve_record(&resolve_request) {
-            if record.is_valid(self.resolve_snapshot_strategy).await {
+            if record
+                .is_valid(&self.file_system_info, self.resolve_snapshot_strategy)
+                .await
+            {
                 return Ok(FactorizedModule::from_resolve_record(record));
             }
         }
@@ -54,6 +61,7 @@ impl NormalModuleFactory {
             resource,
             resolved.file_dependencies,
             resolved.missing_dependencies,
+            &self.file_system_info,
             self.resolve_snapshot_strategy,
         )
         .await?;

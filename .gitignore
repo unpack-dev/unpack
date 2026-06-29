@@ -1,5 +1,8 @@
 /target/
+.benchmark-tools/
+.benchmark-work/
 node_modules/
 packages/*/dist/
 packages/*/dist-test/
+packages/*/.benchmark-work/
 packages/*/node_modules/

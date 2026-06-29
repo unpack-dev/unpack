@@ -3,6 +3,7 @@
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "scripts": {
-    "test": "cargo test --workspace && pnpm --filter @unpack-js/core test"
+    "benchmark:bundlers": "pnpm --filter @unpack-js/core build && pnpm --filter @unpack-js/benchmarks bench",
+    "test": "cargo test --workspace && pnpm --filter @unpack-js/core test && pnpm --filter @unpack-js/benchmarks test"
   }
 }

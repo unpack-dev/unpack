@@ -32,6 +32,22 @@ _Avoid_: Rust API, full webpack configuration API
 A test authored from the JavaScript side that exercises Unpack through the public JavaScript API boundary.
 _Avoid_: Rust core test, internal facade test
 
+**Cross-Bundler Benchmark**:
+A performance comparison that runs the same benchmark fixture through Unpack and selected external bundlers. Its results are diagnostic signals, not merge gates or compatibility claims.
+_Avoid_: Compatibility benchmark, conformance benchmark, release gate
+
+**Benchmark Fixture**:
+A generated application module graph constrained to JavaScript features the compared bundlers are expected to compile. It exists to produce comparable bundle work, not to model a real application.
+_Avoid_: Sample app, real-world app, compatibility fixture
+
+**Cold Build Measurement**:
+A benchmark measurement taken after clearing the output path and benchmark-owned cache state for the tool under test.
+_Avoid_: First run, clean test
+
+**Warm Build Measurement**:
+A benchmark measurement taken after a prior build in the same benchmark job while preserving benchmark-owned cache state that the tool under test can reuse.
+_Avoid_: Incremental rebuild, watch rebuild
+
 **Module Graph**:
 The connected set of modules reachable from one or more entry points.
 _Avoid_: Dependency tree

@@ -8,6 +8,7 @@ use crate::{
     build_cache::BuildCache,
     code_generation,
     make::{self, MakeState},
+    snapshot::FileSystemInfo,
 };
 use tracing::Instrument;
 
@@ -23,6 +24,7 @@ pub struct Compilation {
     errors: Vec<Error>,
     watch_dependencies: WatchDependencies,
     infrastructure_log_events: Vec<InfrastructureLogEvent>,
+    file_system_info: FileSystemInfo,
 }
 
 impl Compilation {
@@ -42,6 +44,7 @@ impl Compilation {
             errors: Vec::new(),
             watch_dependencies: WatchDependencies::default(),
             infrastructure_log_events: Vec::new(),
+            file_system_info: FileSystemInfo::new(),
         }
     }
 
@@ -89,6 +92,7 @@ impl Compilation {
                 &self.options,
                 self.resolver.clone(),
                 self.build_cache.clone(),
+                self.file_system_info.clone(),
                 Arc::clone(&state),
             )
             .await;

@@ -15,7 +15,7 @@ use crate::{
     ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     parser::{ParsedModule, parse_module_dependencies},
-    snapshot::FileSnapshot,
+    snapshot::FileSystemInfo,
 };
 
 #[derive(Debug, Default)]
@@ -34,6 +34,7 @@ struct MakeServices {
     normal_module_factory: NormalModuleFactory,
     module_build_cache: ModuleBuildCache,
     module_snapshot_strategy: SnapshotStrategy,
+    file_system_info: FileSystemInfo,
     semaphore: Arc<Semaphore>,
 }
 
@@ -117,15 +118,18 @@ pub(crate) async fn run(
     options: &CompilerOptions,
     resolver: UnpackResolver,
     build_cache: BuildCache,
+    file_system_info: FileSystemInfo,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
     let services = MakeServices {
         normal_module_factory: NormalModuleFactory::new(
             resolver,
             build_cache.normal_module_factory(),
+            file_system_info.clone(),
             options.snapshot.resolve,
         ),
         module_build_cache: build_cache.module_builds(),
+        file_system_info,
         module_snapshot_strategy: options.snapshot.module,
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
@@ -349,7 +353,10 @@ impl BuildTask {
 
         if let Some(record) = services.module_build_cache.get(&self.identity) {
             if record
-                .is_valid(&self.resource, services.module_snapshot_strategy)
+                .is_valid(
+                    &services.file_system_info,
+                    services.module_snapshot_strategy,
+                )
                 .await
             {
                 let process_dependencies =
@@ -396,9 +403,10 @@ impl BuildTask {
             return Ok(process_dependencies.into_iter().collect());
         }
 
-        let snapshot =
-            FileSnapshot::create(&self.resource, &source, services.module_snapshot_strategy)
-                .await?;
+        let snapshot = services
+            .file_system_info
+            .create_file_snapshot(&self.resource, &source, services.module_snapshot_strategy)
+            .await?;
         let record = ModuleBuildRecord::new(parsed.clone(), source.clone(), snapshot);
 
         state
@@ -642,7 +650,14 @@ mod tests {
             BuildCache::new(options.cache.clone(), options.snapshot.build_dependencies);
         let state = Arc::new(Mutex::new(MakeState::default()));
 
-        run(&options, resolver, build_cache.clone(), Arc::clone(&state)).await?;
+        run(
+            &options,
+            resolver,
+            build_cache.clone(),
+            FileSystemInfo::new(),
+            Arc::clone(&state),
+        )
+        .await?;
 
         let cache = build_cache.stats();
         let state = state.lock().await;

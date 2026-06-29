@@ -1,0 +1,3 @@
+# Align internal model with webpack responsibilities
+
+Unpack will align internal data structures and algorithms with webpack's names, phase ordering, and responsibility boundaries where practical: concepts such as `Compilation`, `ModuleGraph`, `ChunkGraph`, `ChunkGroup`, `Entrypoint`, `NormalModuleFactory`, `Dependency`, `DependenciesBlock`, `AsyncDependenciesBlock`, `DependencyTemplate`, and `RuntimeRequirement` should remain recognizable. The Rust implementation may use Rust-native traits, enums, ownership, and concurrency instead of copying webpack's JavaScript class hierarchy, mutable object layout, hook storage, or `AsyncQueue` API unless those shapes become necessary to match exposed plugin or loader behavior.

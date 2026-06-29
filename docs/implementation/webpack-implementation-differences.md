@@ -1,16 +1,16 @@
 # Webpack implementation differences
 
-This note compares the current Unpack implementation with the local webpack checkout at `/Users/bytedance/github/webpack` commit `10f5fccb2`. The goal is not webpack compatibility. The goal is to separate intentional webpack-like scope choices from parity gaps that affect Unpack's own semantics.
+This note compares the current Unpack implementation with the local webpack checkout at `/Users/bytedance/github/webpack` commit `10f5fccb2`. The goal is to identify gaps between current Unpack behavior and webpack so staged scope decisions can be separated from alignment gaps.
 
-## Deliberate product boundary
+## Webpack alignment boundary
 
-Unpack is intentionally webpack-like, not webpack-compatible. Existing ADRs already define this boundary:
+Unpack aims to align with webpack's public API shape and internal implementation model where practical. Existing ADRs define the current alignment shape:
 
-- `0001-webpack-like-not-compatible.md`: no compatibility promise for webpack configuration, loader, plugin, or compilation APIs.
+- `0001-align-with-webpack-where-practical.md`: use webpack's public API and implementation model as the default reference, with documented deviations.
 - `0018-use-webpack-like-compilation-pipeline.md`: keep recognizable make, chunk graph, code generation, and asset creation phases.
 - `0031-test-webpack-shaped-output-by-structure-and-semantics.md`: test structure and runtime semantics, not byte-for-byte webpack snapshots.
 
-That means differences should not automatically be treated as bugs. A difference is only a current defect when it breaks a semantic Unpack has chosen to provide.
+That means differences should be classified as staged scope decisions, deliberate documented deviations, or alignment gaps. A difference is a current defect when it breaks a semantic Unpack has chosen to provide or a webpack-aligned surface it claims to expose.
 
 ## Compiler and compilation lifecycle
 
@@ -24,8 +24,8 @@ Webpack's lifecycle is much larger: `Compiler.run` guards concurrent runs, calls
 
 Necessity:
 
-- Keeping Unpack's lifecycle small is intentional while the public API is still narrow.
-- Matching webpack's hook graph, records, cache idle state, and plugin lifecycle is not necessary unless Unpack decides to support a plugin compatibility layer.
+- Keeping Unpack's lifecycle small is a staged implementation choice while the public API grows toward webpack.
+- Matching webpack's hook graph, records, cache idle state, and plugin lifecycle becomes necessary when the corresponding public plugin and lifecycle surfaces are supported.
 - The phase names are still useful because they provide good implementation boundaries and future cache boundaries.
 
 ## Normal module factory
@@ -36,9 +36,9 @@ Webpack's `NormalModuleFactory` owns a large part of public configurability: hoo
 
 Necessity:
 
-- The minimal Unpack factory is an intentional scope reduction.
+- The minimal Unpack factory is a staged scope reduction.
 - The current `ModuleIdentity` shape is still useful because loaders, layers, module types, and query/fragment behavior can be added without redefining graph identity.
-- Implementing webpack's factory hook surface would be a compatibility commitment and should not be copied by default.
+- Webpack's factory hook surface should be introduced when plugin and loader API work starts, using webpack names and ordering as the reference.
 
 ## Make phase and errors
 
@@ -60,7 +60,7 @@ Webpack supports a much wider parser surface: CommonJS, AMD, `import.meta`, cont
 
 Necessity:
 
-- The minimal ESM dependency taxonomy is necessary and useful; it keeps Unpack internally aligned with webpack concepts without inheriting webpack's public API.
+- The minimal ESM dependency taxonomy is necessary and useful; it keeps Unpack internally aligned with webpack concepts while the public API grows in staged slices.
 - Rejecting context-module dynamic imports is an intentional first-scope limitation.
 - CommonJS, import attributes, magic comments, and import modes are future feature choices, not required for the current ESM-first bundler.
 
@@ -125,9 +125,9 @@ Necessity:
 
 ## Current priority classification
 
-Intentional differences to keep:
+Current staged scope limits:
 
-- No webpack-compatible configuration, loader, plugin, or compilation API.
+- No broad webpack configuration, loader, plugin, or compilation API parity yet.
 - Minimal Rust-native compiler and normal module factory.
 - ESM-first parser surface.
 - Fixed Node require chunk loading target.
@@ -144,7 +144,7 @@ Feature work to defer until explicitly chosen:
 
 - Context modules and non-static dynamic imports.
 - CommonJS parsing and interop.
-- Loader and plugin systems.
+- Loader and plugin API parity.
 - Magic comments, dynamic import modes, import attributes, deferred/source import phases.
 - Split chunks, cache groups, runtime chunks, HMR, browser/ESM/webworker chunk loading.
 - Export usage analysis, tree shaking, module concatenation, and deterministic id plugins.

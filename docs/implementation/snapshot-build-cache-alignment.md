@@ -36,7 +36,7 @@ Snapshot validation should have one shared model across memory cache, persistent
 - Do not add context modules or accept `snapshot.contextModule` as a no-op.
 - Do not expose `cache.managedPaths` or `cache.immutablePaths` as effective Unpack entries.
 - Do not support PnP or Yarn-specific default path classification.
-- Do not promise webpack-compatible snapshot serialization.
+- Keep snapshot serialization private while aligning snapshot validation semantics with webpack.
 - Do not add code generation or asset cache items in this work.
 
 ## Slice 1: JavaScript API Normalization

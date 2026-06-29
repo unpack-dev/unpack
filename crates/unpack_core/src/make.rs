@@ -1,11 +1,14 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use tokio::sync::{Mutex, Semaphore};
+use futures::{StreamExt, stream::FuturesUnordered};
+use tokio::{
+    sync::{Mutex, Semaphore},
+    task::JoinHandle,
+};
 
 use crate::{
     CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, ModuleGraph, ModuleId,
@@ -90,6 +93,8 @@ struct AddModuleResult {
     is_new: bool,
 }
 
+type BackgroundMakeTask = JoinHandle<Result<Vec<MakeTask>>>;
+
 pub(crate) async fn run(
     options: &CompilerOptions,
     resolver: UnpackResolver,
@@ -107,9 +112,10 @@ pub(crate) async fn run(
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
 
-    let mut queue = FuturesUnordered::new();
+    let mut main_queue = VecDeque::new();
+    let mut background_queue = FuturesUnordered::new();
     for (entry_index, entry) in options.entries.iter().enumerate() {
-        queue.push(make_task(
+        schedule_make_task(
             MakeTask::Factorize(FactorizeTask {
                 origin_module: None,
                 context: options.context.clone(),
@@ -121,35 +127,94 @@ pub(crate) async fn run(
             }),
             services.clone(),
             Arc::clone(&state),
-        ));
+            &mut main_queue,
+            &mut background_queue,
+        );
     }
 
-    while let Some(result) = queue.next().await {
-        match result {
-            Ok(children) => {
-                for child in children {
-                    queue.push(make_task(child, services.clone(), Arc::clone(&state)));
+    loop {
+        while let Some(task) = main_queue.pop_front() {
+            match task.run(services.clone(), Arc::clone(&state)).await {
+                Ok(children) => {
+                    for child in children {
+                        schedule_make_task(
+                            child,
+                            services.clone(),
+                            Arc::clone(&state),
+                            &mut main_queue,
+                            &mut background_queue,
+                        );
+                    }
+                }
+                Err(error) => {
+                    state.lock().await.errors.push(error.clone());
+                    return Err(error);
                 }
             }
+        }
+
+        if background_queue.is_empty() {
+            return Ok(());
+        }
+
+        let children = match next_background_make_task(&mut background_queue).await {
+            Ok(children) => children,
             Err(error) => {
                 state.lock().await.errors.push(error.clone());
                 return Err(error);
             }
+        };
+        for child in children {
+            schedule_make_task(
+                child,
+                services.clone(),
+                Arc::clone(&state),
+                &mut main_queue,
+                &mut background_queue,
+            );
         }
     }
-
-    Ok(())
 }
 
-fn make_task(
+fn schedule_make_task(
     task: MakeTask,
     services: MakeServices,
     state: Arc<Mutex<MakeState>>,
-) -> BoxFuture<'static, Result<Vec<MakeTask>>> {
-    async move { task.run(services, state).await }.boxed()
+    main_queue: &mut VecDeque<MakeTask>,
+    background_queue: &mut FuturesUnordered<BackgroundMakeTask>,
+) {
+    if task.is_background() {
+        background_queue.push(spawn_make_task(task, services, state));
+    } else {
+        main_queue.push_back(task);
+    }
+}
+
+fn spawn_make_task(
+    task: MakeTask,
+    services: MakeServices,
+    state: Arc<Mutex<MakeState>>,
+) -> BackgroundMakeTask {
+    tokio::spawn(async move { task.run(services, state).await })
+}
+
+async fn next_background_make_task(
+    background_queue: &mut FuturesUnordered<BackgroundMakeTask>,
+) -> Result<Vec<MakeTask>> {
+    background_queue
+        .next()
+        .await
+        .expect("background queue should not be empty")
+        .map_err(|error| Error::MakeTask {
+            message: error.to_string(),
+        })?
 }
 
 impl MakeTask {
+    fn is_background(&self) -> bool {
+        matches!(self, Self::Factorize(_) | Self::Build(_))
+    }
+
     async fn run(
         self,
         services: MakeServices,

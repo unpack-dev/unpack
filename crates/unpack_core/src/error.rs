@@ -25,6 +25,9 @@ pub enum Error {
     #[error("parser task failed for {path}: {message}")]
     ParseTask { path: PathBuf, message: String },
 
+    #[error("make task failed: {message}")]
+    MakeTask { message: String },
+
     #[error("module graph is missing module {0:?}")]
     MissingModule(ModuleId),
 

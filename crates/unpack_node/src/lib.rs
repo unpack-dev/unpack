@@ -15,6 +15,10 @@ use unpack_core::{
     SnapshotPathPattern, SnapshotStrategy,
 };
 
+#[global_allocator]
+#[cfg(not(any(miri, target_family = "wasm")))]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const MAX_BLOCKING_THREADS: usize = 4;
 
 #[napi(object)]

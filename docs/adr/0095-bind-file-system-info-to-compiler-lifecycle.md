@@ -1,0 +1,3 @@
+# Use per-compilation File System Info with compiler watch inputs
+
+Unpack will align with webpack by creating a fresh `File System Info` for each compilation instead of sharing one compiler-owned instance across repeated runs. The compiler owns snapshot path configuration and, during watch sessions, the latest file and context timestamp inputs collected by the watcher; each compilation seeds its `File System Info` from those inputs. Persistent cache backends may own a separate longer-lived `File System Info` for cache-container validation, but compilation snapshot caches should not silently survive unrelated non-watch runs.

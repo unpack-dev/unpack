@@ -1,0 +1,3 @@
+# Test snapshot alignment through JavaScript API behavior
+
+Unpack snapshot alignment should be verified through JavaScript API and integration behavior, not only Rust unit tests. Required coverage includes mode-aware snapshot defaults, snapshot path option validation, regular-expression pattern normalization, continued rejection of `snapshot.contextModule`, rejection of unvalidated strategies, managed item invalidation, unmanaged-over-managed precedence, missing candidate invalidation, and context directory invalidation. These tests define the observable webpack-aligned behavior for the first snapshot alignment implementation.

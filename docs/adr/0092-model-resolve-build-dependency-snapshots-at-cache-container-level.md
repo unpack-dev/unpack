@@ -1,0 +1,3 @@
+# Model resolve build dependency snapshots at cache container level
+
+Unpack will implement `snapshot.resolveBuildDependencies` as persistent-cache container validation for the work needed to locate configured build dependency files, not as a separate cache facade. Because Unpack's first `cache.buildDependencies` shape is already an explicit map of file paths, the first resolve-build-dependency snapshot can live in the persistent cache manifest alongside build dependency snapshots; if build dependencies later accept package requests, globs, or config-driven discovery, the same category can expand into a fuller webpack-like resolve-build-dependency flow.

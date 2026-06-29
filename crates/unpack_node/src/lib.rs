@@ -9,7 +9,7 @@ use napi_derive::napi;
 use unpack_core::{
     Asset, BuildDependency, CacheOptions, Compiler, CompilerOptions, Entry, Error as CoreError,
     InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions, SnapshotOptions,
-    SnapshotStrategy,
+    SnapshotPathPattern, SnapshotStrategy,
 };
 
 #[napi(object)]
@@ -62,12 +62,27 @@ pub struct NativeSnapshotOptions {
     pub build_dependencies: NativeSnapshotStrategy,
     #[napi(js_name = "resolveBuildDependencies")]
     pub resolve_build_dependencies: NativeSnapshotStrategy,
+    #[napi(js_name = "managedPaths")]
+    pub managed_paths: Vec<NativeSnapshotPathPattern>,
+    #[napi(js_name = "immutablePaths")]
+    pub immutable_paths: Vec<NativeSnapshotPathPattern>,
+    #[napi(js_name = "unmanagedPaths")]
+    pub unmanaged_paths: Vec<NativeSnapshotPathPattern>,
 }
 
 #[napi(object)]
 pub struct NativeSnapshotStrategy {
     pub timestamp: bool,
     pub hash: bool,
+}
+
+#[napi(object)]
+pub struct NativeSnapshotPathPattern {
+    #[napi(js_name = "type")]
+    pub pattern_type: String,
+    pub path: Option<String>,
+    pub source: Option<String>,
+    pub flags: Option<String>,
 }
 
 #[napi(object)]
@@ -134,7 +149,7 @@ pub struct NativeFlushResult {
 }
 
 #[napi(js_name = "createCompiler")]
-pub fn create_compiler(options: NativeCompilerOptions) -> NativeCompiler {
+pub fn create_compiler(options: NativeCompilerOptions) -> Result<NativeCompiler> {
     NativeCompiler::new(options)
 }
 
@@ -168,7 +183,7 @@ impl NativeCompiler {
 }
 
 impl NativeCompiler {
-    fn new(options: NativeCompilerOptions) -> Self {
+    fn new(options: NativeCompilerOptions) -> Result<Self> {
         let context = PathBuf::from(&options.context);
         let output_path = PathBuf::from(&options.output_path);
         let entries = options
@@ -178,15 +193,15 @@ impl NativeCompiler {
             .collect::<Vec<_>>();
         let mut compiler_options = CompilerOptions::new(context, entries);
         compiler_options.cache = cache_options_from_native(options.cache);
-        compiler_options.snapshot = snapshot_options_from_native(options.snapshot);
+        compiler_options.snapshot = snapshot_options_from_native(options.snapshot)?;
         compiler_options.infrastructure_logging =
             infrastructure_logging_options_from_native(options.infrastructure_logging);
         let compiler = Compiler::new(compiler_options);
 
-        Self {
+        Ok(Self {
             compiler: Some(Arc::new(compiler)),
             output_path,
-        }
+        })
     }
 }
 
@@ -213,21 +228,65 @@ fn cache_options_from_native(options: NativeCacheOptions) -> CacheOptions {
     cache
 }
 
-fn snapshot_options_from_native(options: NativeSnapshotOptions) -> SnapshotOptions {
-    SnapshotOptions {
+fn snapshot_options_from_native(options: NativeSnapshotOptions) -> Result<SnapshotOptions> {
+    Ok(SnapshotOptions {
         module: snapshot_strategy_from_native(options.module),
         resolve: snapshot_strategy_from_native(options.resolve),
         build_dependencies: snapshot_strategy_from_native(options.build_dependencies),
         resolve_build_dependencies: snapshot_strategy_from_native(
             options.resolve_build_dependencies,
         ),
-    }
+        managed_paths: options
+            .managed_paths
+            .into_iter()
+            .map(snapshot_path_pattern_from_native)
+            .collect::<Result<Vec<_>>>()?,
+        immutable_paths: options
+            .immutable_paths
+            .into_iter()
+            .map(snapshot_path_pattern_from_native)
+            .collect::<Result<Vec<_>>>()?,
+        unmanaged_paths: options
+            .unmanaged_paths
+            .into_iter()
+            .map(snapshot_path_pattern_from_native)
+            .collect::<Result<Vec<_>>>()?,
+    })
 }
 
 fn snapshot_strategy_from_native(strategy: NativeSnapshotStrategy) -> SnapshotStrategy {
     SnapshotStrategy {
         timestamp: strategy.timestamp,
         hash: strategy.hash,
+    }
+}
+
+fn snapshot_path_pattern_from_native(
+    pattern: NativeSnapshotPathPattern,
+) -> Result<SnapshotPathPattern> {
+    match pattern.pattern_type.as_str() {
+        "path" => {
+            let path = PathBuf::from(pattern.path.unwrap_or_default());
+            Ok(SnapshotPathPattern::Path(
+                fs::canonicalize(&path).unwrap_or(path),
+            ))
+        }
+        "regexp" => {
+            let source = pattern.source.unwrap_or_default();
+            let flags = pattern.flags.unwrap_or_default();
+            regex::RegexBuilder::new(&source)
+                .case_insensitive(flags == "i")
+                .build()
+                .map_err(|error| {
+                    napi::Error::from_reason(format!(
+                        "snapshot path RegExp '{}' is not supported by Rust regex: {}",
+                        source, error
+                    ))
+                })?;
+            Ok(SnapshotPathPattern::Regex { source, flags })
+        }
+        "nodeModules" => Ok(SnapshotPathPattern::NodeModules),
+        _ => Ok(SnapshotPathPattern::NodeModules),
     }
 }
 

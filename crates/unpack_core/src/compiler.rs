@@ -58,11 +58,7 @@ pub struct Compiler {
 impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
         let resolver = UnpackResolver::new(options.resolve.clone());
-        let build_cache = BuildCache::new(
-            options.cache.clone(),
-            options.snapshot.build_dependencies,
-            options.snapshot.resolve_build_dependencies,
-        );
+        let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
         Self {
             options,
             resolver,

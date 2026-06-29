@@ -1,6 +1,5 @@
 import { createRequire } from "node:module";
-import { watch as watchFileSystem } from "node:fs";
-import type { FSWatcher } from "node:fs";
+import { statSync, watch as watchFileSystem } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 export interface UnpackOptions {
@@ -81,7 +80,11 @@ export interface Watching {
 
 export interface WatchOptions {
   aggregateTimeout?: number;
+  ignored?: WatchIgnored;
+  poll?: true | number;
 }
+
+export type WatchIgnored = string | RegExp | Array<string | RegExp>;
 
 export type RunCallback = (err: Error | null, stats?: Stats) => void;
 export type WatchHandler = (err: Error | null, stats?: Stats) => void;
@@ -128,6 +131,33 @@ interface NormalizedSnapshotStrategy {
 
 interface NormalizedWatchOptions {
   aggregateTimeout: number;
+  ignored: WatchIgnoredMatcher[];
+  pollInterval: number | undefined;
+}
+
+type WatchIgnoredMatcher =
+  | {
+      type: "path";
+      value: string;
+    }
+  | {
+      type: "regexp";
+      value: RegExp;
+    };
+
+interface WatchSubscription {
+  close(): void;
+}
+
+interface WatchTarget {
+  path: string;
+  kind: "file" | "context" | "missing";
+}
+
+interface PollSnapshot {
+  exists: boolean;
+  mtimeMs: number;
+  size: number;
 }
 
 interface NativeStatsJson {
@@ -245,7 +275,7 @@ class CompilerImpl implements Compiler {
         },
         () => Promise.resolve(null),
         () => {},
-        { aggregateTimeout: 20 }
+        defaultWatchOptions()
       );
       watching.start(handler);
       return watching;
@@ -260,7 +290,7 @@ class CompilerImpl implements Compiler {
         },
         () => Promise.resolve(null),
         () => {},
-        { aggregateTimeout: 20 }
+        defaultWatchOptions()
       );
       watching.start(handler);
       return watching;
@@ -395,7 +425,7 @@ class WatchingImpl implements Watching {
   #invalidated = false;
   #handler: WatchHandler | undefined;
   #rebuildTimer: ReturnType<typeof setTimeout> | undefined;
-  readonly #watchers: FSWatcher[] = [];
+  readonly #watchers: WatchSubscription[] = [];
   readonly #runCompilation: (handler: WatchHandler) => Promise<void> | void;
   readonly #flushCache: () => Promise<Error | null>;
   readonly #onClose: () => void;
@@ -494,10 +524,28 @@ class WatchingImpl implements Watching {
 
   #replaceWatchers(dependencies: WatchDependencySets): void {
     this.#closeWatchers();
-    for (const file of dependencies.files) {
+    const targets = watchTargets(dependencies).filter(
+      (target) => !isIgnoredWatchPath(target.path, this.#watchOptions.ignored)
+    );
+
+    if (this.#watchOptions.pollInterval !== undefined) {
+      if (targets.length > 0) {
+        this.#watchers.push(this.#createPollWatcher(targets));
+      }
+      return;
+    }
+
+    for (const target of targets) {
       try {
         this.#watchers.push(
-          watchFileSystem(file, { persistent: false }, () => {
+          watchFileSystem(target.path, { persistent: false }, (_eventType, filename) => {
+            const changedPath =
+              target.kind === "context" && filename
+                ? resolve(target.path, filename.toString())
+                : target.path;
+            if (isIgnoredWatchPath(changedPath, this.#watchOptions.ignored)) {
+              return;
+            }
             this.#queueRebuild();
           })
         );
@@ -506,6 +554,33 @@ class WatchingImpl implements Watching {
         // make an otherwise successful compilation fail.
       }
     }
+  }
+
+  #createPollWatcher(targets: WatchTarget[]): WatchSubscription {
+    const snapshots = new Map(
+      targets.map((target) => [target.path, pollSnapshot(target.path)])
+    );
+    const interval = setInterval(() => {
+      let changed = false;
+      for (const target of targets) {
+        if (isIgnoredWatchPath(target.path, this.#watchOptions.ignored)) {
+          continue;
+        }
+        const previous = snapshots.get(target.path);
+        const next = pollSnapshot(target.path);
+        snapshots.set(target.path, next);
+        if (!previous || !pollSnapshotsEqual(previous, next)) {
+          changed = true;
+        }
+      }
+      if (changed) {
+        this.#queueRebuild();
+      }
+    }, this.#watchOptions.pollInterval);
+    interval.unref?.();
+    return {
+      close: () => clearInterval(interval)
+    };
   }
 
   #queueRebuild(): void {
@@ -775,13 +850,69 @@ function normalizeSnapshotStrategy(
 
 function normalizeWatchOptions(watchOptions: WatchOptions): NormalizedWatchOptions {
   assertPlainObject(watchOptions, "watchOptions");
-  assertKnownKeys(watchOptions, ["aggregateTimeout"], "watchOptions");
+  assertKnownKeys(watchOptions, ["aggregateTimeout", "ignored", "poll"], "watchOptions");
   return {
     aggregateTimeout:
       watchOptions.aggregateTimeout === undefined
         ? 20
-        : assertNonNegativeInteger(watchOptions.aggregateTimeout, "watchOptions.aggregateTimeout")
+        : assertNonNegativeInteger(watchOptions.aggregateTimeout, "watchOptions.aggregateTimeout"),
+    ignored: normalizeWatchIgnored(watchOptions.ignored, "watchOptions.ignored"),
+    pollInterval: normalizeWatchPoll(watchOptions.poll)
   };
+}
+
+function defaultWatchOptions(): NormalizedWatchOptions {
+  return {
+    aggregateTimeout: 20,
+    ignored: [],
+    pollInterval: undefined
+  };
+}
+
+function normalizeWatchIgnored(value: unknown, name: string): WatchIgnoredMatcher[] {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item, index) => normalizeWatchIgnoredMatcher(item, `${name}[${index}]`));
+  }
+
+  return [normalizeWatchIgnoredMatcher(value, name)];
+}
+
+function normalizeWatchIgnoredMatcher(value: unknown, name: string): WatchIgnoredMatcher {
+  if (typeof value === "string") {
+    return {
+      type: "path",
+      value: normalizeWatchMatchPath(assertNonEmptyString(value, name))
+    };
+  }
+
+  if (value instanceof RegExp) {
+    return {
+      type: "regexp",
+      value
+    };
+  }
+
+  throw new TypeError(`${name} must be a string or RegExp`);
+}
+
+function normalizeWatchPoll(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === true) {
+    return 500;
+  }
+
+  if (typeof value === "number") {
+    return assertPositiveInteger(value, "watchOptions.poll");
+  }
+
+  throw new TypeError("watchOptions.poll must be true or a positive integer");
 }
 
 function normalizeNativeStats(stats: NativeStatsJson | null | undefined): StatsJson {
@@ -829,6 +960,63 @@ function emptyWatchDependencies(): WatchDependencySets {
     contexts: [],
     missing: []
   };
+}
+
+function watchTargets(dependencies: WatchDependencySets): WatchTarget[] {
+  const targets = new Map<string, WatchTarget>();
+  for (const path of dependencies.files) {
+    targets.set(path, { path, kind: "file" });
+  }
+  for (const path of dependencies.contexts) {
+    targets.set(path, { path, kind: "context" });
+  }
+  for (const path of dependencies.missing) {
+    targets.set(path, { path, kind: "missing" });
+  }
+  return [...targets.values()];
+}
+
+function isIgnoredWatchPath(path: string, ignored: WatchIgnoredMatcher[]): boolean {
+  if (ignored.length === 0) {
+    return false;
+  }
+
+  const normalizedPath = normalizeWatchMatchPath(path);
+  return ignored.some((matcher) => {
+    if (matcher.type === "path") {
+      return normalizedPath === matcher.value || normalizedPath.includes(matcher.value);
+    }
+
+    matcher.value.lastIndex = 0;
+    const matched = matcher.value.test(normalizedPath);
+    matcher.value.lastIndex = 0;
+    return matched;
+  });
+}
+
+function normalizeWatchMatchPath(path: string): string {
+  return path.replaceAll("\\", "/");
+}
+
+function pollSnapshot(path: string): PollSnapshot {
+  try {
+    const stat = statSync(path);
+    return {
+      exists: true,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size
+    };
+  } catch {
+    return {
+      exists: false,
+      mtimeMs: 0,
+      size: 0
+    };
+  }
+}
+
+function pollSnapshotsEqual(left: PollSnapshot, right: PollSnapshot): boolean {
+  return left.exists === right.exists && left.mtimeMs === right.mtimeMs && left.size === right.size;
 }
 
 function assertKnownKeys(
@@ -886,6 +1074,17 @@ function assertNonNegativeInteger(value: unknown, name: string): number {
     value < 0
   ) {
     throw new TypeError(`${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function assertPositiveInteger(value: unknown, name: string): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value <= 0
+  ) {
+    throw new TypeError(`${name} must be a positive integer`);
   }
   return value;
 }

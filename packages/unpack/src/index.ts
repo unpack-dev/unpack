@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+import { watch as watchFileSystem } from "node:fs";
+import type { FSWatcher } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 export interface UnpackOptions {
@@ -52,6 +54,13 @@ export interface StatsJson {
   warnings: StatsError[];
   assets: StatsAsset[];
   outputPath: string;
+  watchDependencies: WatchDependencySets;
+}
+
+export interface WatchDependencySets {
+  files: string[];
+  contexts: string[];
+  missing: string[];
 }
 
 export interface Stats {
@@ -70,7 +79,9 @@ export interface Watching {
   invalidate(): void;
 }
 
-export interface WatchOptions {}
+export interface WatchOptions {
+  aggregateTimeout?: number;
+}
 
 export type RunCallback = (err: Error | null, stats?: Stats) => void;
 export type WatchHandler = (err: Error | null, stats?: Stats) => void;
@@ -115,12 +126,18 @@ interface NormalizedSnapshotStrategy {
   hash: boolean;
 }
 
+interface NormalizedWatchOptions {
+  aggregateTimeout: number;
+}
+
 interface NativeStatsJson {
   errors: StatsError[];
   warnings?: StatsError[];
   assets: StatsAsset[];
   outputPath?: string;
   output_path?: string;
+  watchDependencies?: WatchDependencySets;
+  watch_dependencies?: WatchDependencySets;
 }
 
 interface NativeRunResult {
@@ -218,7 +235,7 @@ class CompilerImpl implements Compiler {
   }
 
   watch(watchOptions: WatchOptions, handler: WatchHandler): Watching {
-    normalizeWatchOptions(watchOptions);
+    const normalizedWatchOptions = normalizeWatchOptions(watchOptions);
     assertFunction(handler, "handler");
 
     if (this.#closed) {
@@ -227,7 +244,8 @@ class CompilerImpl implements Compiler {
           defer(() => watchHandler(namedError("CompilerClosedError", "compiler is closed")));
         },
         () => Promise.resolve(null),
-        () => {}
+        () => {},
+        { aggregateTimeout: 20 }
       );
       watching.start(handler);
       return watching;
@@ -241,7 +259,8 @@ class CompilerImpl implements Compiler {
           );
         },
         () => Promise.resolve(null),
-        () => {}
+        () => {},
+        { aggregateTimeout: 20 }
       );
       watching.start(handler);
       return watching;
@@ -254,7 +273,8 @@ class CompilerImpl implements Compiler {
         if (this.#watching === watching) {
           this.#watching = undefined;
         }
-      }
+      },
+      normalizedWatchOptions
     );
     this.#watching = watching;
     watching.start(handler);
@@ -374,19 +394,24 @@ class WatchingImpl implements Watching {
   #running = false;
   #invalidated = false;
   #handler: WatchHandler | undefined;
+  #rebuildTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly #watchers: FSWatcher[] = [];
   readonly #runCompilation: (handler: WatchHandler) => Promise<void> | void;
   readonly #flushCache: () => Promise<Error | null>;
   readonly #onClose: () => void;
+  readonly #watchOptions: NormalizedWatchOptions;
   readonly #closeCallbacks: CloseCallback[] = [];
 
   constructor(
     runCompilation: (handler: WatchHandler) => Promise<void> | void,
     flushCache: () => Promise<Error | null>,
-    onClose: () => void
+    onClose: () => void,
+    watchOptions: NormalizedWatchOptions
   ) {
     this.#runCompilation = runCompilation;
     this.#flushCache = flushCache;
     this.#onClose = onClose;
+    this.#watchOptions = watchOptions;
   }
 
   start(handler: WatchHandler): void {
@@ -398,6 +423,8 @@ class WatchingImpl implements Watching {
     if (this.#closed) {
       return;
     }
+
+    this.#clearRebuildTimer();
 
     if (this.#running) {
       this.#invalidated = true;
@@ -417,6 +444,8 @@ class WatchingImpl implements Watching {
 
     this.#closed = true;
     this.#invalidated = false;
+    this.#clearRebuildTimer();
+    this.#closeWatchers();
     this.#closeCallbacks.push(callback);
 
     if (!this.#running) {
@@ -430,8 +459,18 @@ class WatchingImpl implements Watching {
     }
 
     this.#running = true;
-    await this.#runCompilation(this.#handler);
+    let latestStats: Stats | undefined;
+    await this.#runCompilation((err, stats) => {
+      if (!err && stats) {
+        latestStats = stats;
+      }
+      this.#handler?.(err, stats);
+    });
     this.#running = false;
+
+    if (!this.#closed && latestStats) {
+      this.#replaceWatchers(latestStats.toJson().watchDependencies);
+    }
 
     if (this.#closed) {
       await this.#finishClose();
@@ -452,6 +491,47 @@ class WatchingImpl implements Watching {
       callback(flushError);
     }
   }
+
+  #replaceWatchers(dependencies: WatchDependencySets): void {
+    this.#closeWatchers();
+    for (const file of dependencies.files) {
+      try {
+        this.#watchers.push(
+          watchFileSystem(file, { persistent: false }, () => {
+            this.#queueRebuild();
+          })
+        );
+      } catch {
+        // Missing or unsupported watch targets are represented in stats but should not
+        // make an otherwise successful compilation fail.
+      }
+    }
+  }
+
+  #queueRebuild(): void {
+    if (this.#closed) {
+      return;
+    }
+
+    this.#clearRebuildTimer();
+    this.#rebuildTimer = setTimeout(() => {
+      this.#rebuildTimer = undefined;
+      this.invalidate();
+    }, this.#watchOptions.aggregateTimeout);
+  }
+
+  #clearRebuildTimer(): void {
+    if (this.#rebuildTimer !== undefined) {
+      clearTimeout(this.#rebuildTimer);
+      this.#rebuildTimer = undefined;
+    }
+  }
+
+  #closeWatchers(): void {
+    while (this.#watchers.length > 0) {
+      this.#watchers.pop()?.close();
+    }
+  }
 }
 
 class StatsImpl implements Stats {
@@ -466,7 +546,8 @@ class StatsImpl implements Stats {
       errors: this.json.errors.map(cloneStatsError),
       warnings: this.json.warnings.map(cloneStatsError),
       assets: this.json.assets.map((asset) => ({ ...asset })),
-      outputPath: this.json.outputPath
+      outputPath: this.json.outputPath,
+      watchDependencies: cloneWatchDependencies(this.json.watchDependencies)
     };
   }
 }
@@ -692,20 +773,35 @@ function normalizeSnapshotStrategy(
   };
 }
 
-function normalizeWatchOptions(watchOptions: WatchOptions): void {
+function normalizeWatchOptions(watchOptions: WatchOptions): NormalizedWatchOptions {
   assertPlainObject(watchOptions, "watchOptions");
-  assertKnownKeys(watchOptions, [], "watchOptions");
+  assertKnownKeys(watchOptions, ["aggregateTimeout"], "watchOptions");
+  return {
+    aggregateTimeout:
+      watchOptions.aggregateTimeout === undefined
+        ? 20
+        : assertNonNegativeInteger(watchOptions.aggregateTimeout, "watchOptions.aggregateTimeout")
+  };
 }
 
 function normalizeNativeStats(stats: NativeStatsJson | null | undefined): StatsJson {
   if (!stats) {
-    return { errors: [], warnings: [], assets: [], outputPath: "" };
+    return {
+      errors: [],
+      warnings: [],
+      assets: [],
+      outputPath: "",
+      watchDependencies: emptyWatchDependencies()
+    };
   }
   return {
     errors: stats.errors.map(cloneStatsError),
     warnings: (stats.warnings ?? []).map(cloneStatsError),
     assets: stats.assets.map((asset) => ({ ...asset })),
-    outputPath: stats.outputPath ?? stats.output_path ?? ""
+    outputPath: stats.outputPath ?? stats.output_path ?? "",
+    watchDependencies: cloneWatchDependencies(
+      stats.watchDependencies ?? stats.watch_dependencies ?? emptyWatchDependencies()
+    )
   };
 }
 
@@ -716,6 +812,22 @@ function cloneStatsError(error: StatsError): StatsError {
     ...(error.request === undefined ? {} : { request: error.request }),
     ...(error.issuer === undefined ? {} : { issuer: error.issuer }),
     ...(error.stack === undefined ? {} : { stack: error.stack })
+  };
+}
+
+function cloneWatchDependencies(dependencies: WatchDependencySets): WatchDependencySets {
+  return {
+    files: [...dependencies.files],
+    contexts: [...dependencies.contexts],
+    missing: [...dependencies.missing]
+  };
+}
+
+function emptyWatchDependencies(): WatchDependencySets {
+  return {
+    files: [],
+    contexts: [],
+    missing: []
   };
 }
 

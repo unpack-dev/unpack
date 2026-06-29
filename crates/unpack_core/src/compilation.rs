@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use tokio::sync::Mutex;
 
@@ -19,6 +19,7 @@ pub struct Compilation {
     assets: Vec<Asset>,
     entries: Vec<ModuleId>,
     errors: Vec<Error>,
+    watch_dependencies: WatchDependencies,
 }
 
 impl Compilation {
@@ -36,6 +37,7 @@ impl Compilation {
             assets: Vec::new(),
             entries: Vec::new(),
             errors: Vec::new(),
+            watch_dependencies: WatchDependencies::default(),
         }
     }
 
@@ -63,6 +65,10 @@ impl Compilation {
         &self.errors
     }
 
+    pub fn watch_dependencies(&self) -> &WatchDependencies {
+        &self.watch_dependencies
+    }
+
     pub async fn make(&mut self) -> Result<()> {
         let state = Arc::new(Mutex::new(MakeState::default()));
         let result = make::run(
@@ -77,6 +83,11 @@ impl Compilation {
         self.module_graph = std::mem::take(&mut state.module_graph);
         self.entries = std::mem::take(&mut state.entries).into_values().collect();
         self.errors = std::mem::take(&mut state.errors);
+        self.watch_dependencies = WatchDependencies {
+            files: std::mem::take(&mut state.file_dependencies),
+            contexts: std::mem::take(&mut state.context_dependencies),
+            missing: std::mem::take(&mut state.missing_dependencies),
+        };
 
         result
     }
@@ -92,5 +103,26 @@ impl Compilation {
             &self.chunk_graph,
             &self.entries,
         );
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchDependencies {
+    files: BTreeSet<PathBuf>,
+    contexts: BTreeSet<PathBuf>,
+    missing: BTreeSet<PathBuf>,
+}
+
+impl WatchDependencies {
+    pub fn files(&self) -> &BTreeSet<PathBuf> {
+        &self.files
+    }
+
+    pub fn contexts(&self) -> &BTreeSet<PathBuf> {
+        &self.contexts
+    }
+
+    pub fn missing(&self) -> &BTreeSet<PathBuf> {
+        &self.missing
     }
 }

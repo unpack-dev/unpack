@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 napi = { workspace = true }
 napi-derive = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 unpack_core = { path = "../unpack_core" }
 
 [build-dependencies]

@@ -6,6 +6,7 @@ mod compiler;
 mod dependency;
 mod error;
 mod exports_info;
+mod logging;
 mod make;
 mod module;
 mod module_graph;
@@ -30,6 +31,7 @@ pub use dependency::{
 };
 pub use error::{Error, Result};
 pub use exports_info::ExportsInfo;
+pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions};
 pub use module::{Module, ModuleId, ModuleIdentity, ModuleType};
 pub use module_graph::{ModuleGraph, ModuleGraphConnection};
 pub use normal_module_factory::{FactorizedModule, NormalModuleFactory};

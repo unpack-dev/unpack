@@ -10,6 +10,7 @@ export interface UnpackOptions {
   };
   cache?: CacheOptions;
   snapshot?: SnapshotOptions;
+  infrastructureLogging?: InfrastructureLoggingOptions;
 }
 
 export type CacheOptions =
@@ -35,6 +36,18 @@ export interface SnapshotStrategyOptions {
   timestamp?: boolean;
   hash?: boolean;
 }
+
+export interface InfrastructureLoggingOptions {
+  level?: InfrastructureLoggingLevel;
+}
+
+export type InfrastructureLoggingLevel =
+  | "none"
+  | "error"
+  | "warn"
+  | "info"
+  | "log"
+  | "verbose";
 
 export interface StatsError {
   message: string;
@@ -102,6 +115,7 @@ interface NormalizedOptions {
   outputPath: string;
   cache: NormalizedCacheOptions;
   snapshot: NormalizedSnapshotOptions;
+  infrastructureLogging: NormalizedInfrastructureLoggingOptions;
 }
 
 interface NormalizedCacheOptions {
@@ -129,6 +143,18 @@ interface NormalizedSnapshotOptions {
 interface NormalizedSnapshotStrategy {
   timestamp: boolean;
   hash: boolean;
+}
+
+interface NormalizedInfrastructureLoggingOptions {
+  level: InfrastructureLoggingLevel;
+}
+
+type InfrastructureLogEventLevel = Exclude<InfrastructureLoggingLevel, "none">;
+
+interface InfrastructureLogEvent {
+  level: InfrastructureLogEventLevel;
+  name: string;
+  message: string;
 }
 
 interface NormalizedWatchOptions {
@@ -178,6 +204,7 @@ interface NativeRunResult {
     message: string;
   } | null;
   stats?: NativeStatsJson | null;
+  logs?: InfrastructureLogEvent[] | null;
 }
 
 interface NativeFlushResult {
@@ -208,60 +235,73 @@ class CompilerImpl implements Compiler {
   #pendingCacheFlush: Promise<NativeFlushResult> | undefined;
   readonly #filesystemCache: boolean;
   readonly #cacheIdleTimeout: number;
+  readonly #infrastructureLoggingLevel: InfrastructureLoggingLevel;
   readonly #nativeCompiler: NativeCompiler;
 
   constructor(options: NormalizedOptions) {
     this.#nativeCompiler = native.createCompiler(options);
     this.#filesystemCache = options.cache.type === "filesystem";
     this.#cacheIdleTimeout = options.cache.idleTimeout ?? 0;
+    this.#infrastructureLoggingLevel = options.infrastructureLogging.level;
   }
 
   run(callback: RunCallback): void {
     assertFunction(callback, "callback");
 
     if (this.#closed) {
-      defer(() => callback(namedError("CompilerClosedError", "compiler is closed")));
+      const error = namedError("CompilerClosedError", "compiler is closed");
+      this.#emitInfrastructureLog("error", "unpack.Compiler", error.message);
+      defer(() => callback(error));
       return;
     }
 
     if (this.#running) {
-      defer(() =>
-        callback(namedError("ConcurrentRunError", "compiler is already running"))
-      );
+      const error = namedError("ConcurrentRunError", "compiler is already running");
+      this.#emitInfrastructureLog("error", "unpack.Compiler", error.message);
+      defer(() => callback(error));
       return;
     }
 
     if (this.#watching) {
-      defer(() =>
-        callback(namedError("ConcurrentRunError", "compiler is already watching"))
-      );
+      const error = namedError("ConcurrentRunError", "compiler is already watching");
+      this.#emitInfrastructureLog("error", "unpack.Compiler", error.message);
+      defer(() => callback(error));
       return;
     }
 
     this.#running = true;
     let run: Promise<NativeRunResult>;
     try {
+      this.#emitInfrastructureLog("info", "unpack.Compiler", "run started");
       run = this.#nativeCompiler.run();
     } catch (error) {
       this.#running = false;
-      defer(() => callback(toError(error, "InfrastructureError")));
+      const infrastructureError = toError(error, "InfrastructureError");
+      this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
+      defer(() => callback(infrastructureError));
       return;
     }
 
     run.then(
       (result) => {
         this.#running = false;
+        this.#emitInfrastructureLogs(result.logs);
         if (result.error) {
-          callback(namedError(result.error.name, result.error.message));
+          const error = namedError(result.error.name, result.error.message);
+          this.#emitInfrastructureLog("error", "unpack.Compiler", error.message);
+          callback(error);
           return;
         }
 
         this.#scheduleIdleCacheFlush();
+        this.#emitInfrastructureLog("info", "unpack.Compiler", "run completed");
         callback(null, new StatsImpl(normalizeNativeStats(result.stats)));
       },
       (error: unknown) => {
         this.#running = false;
-        callback(toError(error, "InfrastructureError"));
+        const infrastructureError = toError(error, "InfrastructureError");
+        this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
+        callback(infrastructureError);
       }
     );
   }
@@ -271,9 +311,11 @@ class CompilerImpl implements Compiler {
     assertFunction(handler, "handler");
 
     if (this.#closed) {
+      const error = namedError("CompilerClosedError", "compiler is closed");
+      this.#emitInfrastructureLog("error", "unpack.Watch", error.message);
       const watching = new WatchingImpl(
         (watchHandler) => {
-          defer(() => watchHandler(namedError("CompilerClosedError", "compiler is closed")));
+          defer(() => watchHandler(error));
         },
         () => Promise.resolve(null),
         () => {},
@@ -284,11 +326,11 @@ class CompilerImpl implements Compiler {
     }
 
     if (this.#running || this.#watching) {
+      const error = namedError("ConcurrentRunError", "compiler is already running");
+      this.#emitInfrastructureLog("error", "unpack.Watch", error.message);
       const watching = new WatchingImpl(
         (watchHandler) => {
-          defer(() =>
-            watchHandler(namedError("ConcurrentRunError", "compiler is already running"))
-          );
+          defer(() => watchHandler(error));
         },
         () => Promise.resolve(null),
         () => {},
@@ -317,20 +359,22 @@ class CompilerImpl implements Compiler {
     assertFunction(callback, "callback");
 
     if (this.#running) {
-      defer(() =>
-        callback(
-          namedError("CompilerRunningError", "compiler cannot close while running")
-        )
+      const error = namedError(
+        "CompilerRunningError",
+        "compiler cannot close while running"
       );
+      this.#emitInfrastructureLog("error", "unpack.Compiler", error.message);
+      defer(() => callback(error));
       return;
     }
 
     if (this.#watching) {
-      defer(() =>
-        callback(
-          namedError("CompilerRunningError", "compiler cannot close while watching")
-        )
+      const error = namedError(
+        "CompilerRunningError",
+        "compiler cannot close while watching"
       );
+      this.#emitInfrastructureLog("error", "unpack.Compiler", error.message);
+      defer(() => callback(error));
       return;
     }
 
@@ -347,34 +391,47 @@ class CompilerImpl implements Compiler {
           this.#closed = true;
           callback(null);
         } catch (error) {
-          callback(toError(error, "InfrastructureError"));
+          const infrastructureError = toError(error, "InfrastructureError");
+          this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
+          callback(infrastructureError);
         }
       });
     } catch (error) {
-      defer(() => callback(toError(error, "InfrastructureError")));
+      const infrastructureError = toError(error, "InfrastructureError");
+      this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
+      defer(() => callback(infrastructureError));
     }
   }
 
   async #runWatchCompilation(handler: WatchHandler): Promise<void> {
     let run: Promise<NativeRunResult>;
     try {
+      this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation started");
       run = this.#nativeCompiler.run();
     } catch (error) {
-      handler(toError(error, "InfrastructureError"));
+      const infrastructureError = toError(error, "InfrastructureError");
+      this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
+      handler(infrastructureError);
       return;
     }
 
     try {
       const result = await run;
+      this.#emitInfrastructureLogs(result.logs);
       if (result.error) {
-        handler(namedError(result.error.name, result.error.message));
+        const error = namedError(result.error.name, result.error.message);
+        this.#emitInfrastructureLog("error", "unpack.Watch", error.message);
+        handler(error);
         return;
       }
 
       this.#scheduleIdleCacheFlush();
+      this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation completed");
       handler(null, new StatsImpl(normalizeNativeStats(result.stats)));
     } catch (error) {
-      handler(toError(error, "InfrastructureError"));
+      const infrastructureError = toError(error, "InfrastructureError");
+      this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
+      handler(infrastructureError);
     }
   }
 
@@ -402,21 +459,56 @@ class CompilerImpl implements Compiler {
       return null;
     }
 
+    const startsFlush = this.#pendingCacheFlush === undefined;
+    if (startsFlush) {
+      this.#emitInfrastructureLog("info", "unpack.Cache", "cache flush started");
+    }
     const flush = this.#pendingCacheFlush ?? this.#nativeCompiler.flushCache();
     this.#pendingCacheFlush = flush;
 
     try {
       const result = await flush;
       if (result.error) {
-        return namedError(result.error.name, result.error.message);
+        const error = namedError(result.error.name, result.error.message);
+        if (startsFlush) {
+          this.#emitInfrastructureLog("warn", "unpack.Cache", error.message);
+        }
+        return error;
+      }
+      if (startsFlush) {
+        this.#emitInfrastructureLog("info", "unpack.Cache", "cache flush completed");
       }
       return null;
     } catch (error) {
-      return toError(error, "InfrastructureError");
+      const infrastructureError = toError(error, "InfrastructureError");
+      if (startsFlush) {
+        this.#emitInfrastructureLog("error", "unpack.Cache", infrastructureError.message);
+      }
+      return infrastructureError;
     } finally {
       if (this.#pendingCacheFlush === flush) {
         this.#pendingCacheFlush = undefined;
       }
+    }
+  }
+
+  #emitInfrastructureLog(
+    level: InfrastructureLogEventLevel,
+    name: string,
+    message: string
+  ): void {
+    emitInfrastructureLog(
+      { level, name, message },
+      this.#infrastructureLoggingLevel
+    );
+  }
+
+  #emitInfrastructureLogs(logs: InfrastructureLogEvent[] | null | undefined): void {
+    if (!logs) {
+      return;
+    }
+    for (const log of logs) {
+      emitInfrastructureLog(log, this.#infrastructureLoggingLevel);
     }
   }
 }
@@ -650,7 +742,11 @@ export default function unpack(
 
 function normalizeOptions(options: UnpackOptions): NormalizedOptions {
   assertPlainObject(options, "options");
-  assertKnownKeys(options, ["context", "entry", "output", "cache", "snapshot"], "options");
+  assertKnownKeys(
+    options,
+    ["context", "entry", "output", "cache", "snapshot", "infrastructureLogging"],
+    "options"
+  );
 
   const context =
     options.context === undefined
@@ -674,7 +770,8 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     entries: normalizeEntry(options.entry),
     outputPath,
     cache: normalizeCacheOptions(options.cache, normalizedContext),
-    snapshot: normalizeSnapshotOptions(options.snapshot)
+    snapshot: normalizeSnapshotOptions(options.snapshot),
+    infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging)
   };
 }
 
@@ -855,6 +952,39 @@ function normalizeSnapshotStrategy(
   };
 }
 
+function normalizeInfrastructureLoggingOptions(
+  infrastructureLogging: InfrastructureLoggingOptions | undefined
+): NormalizedInfrastructureLoggingOptions {
+  if (infrastructureLogging === undefined) {
+    return { level: "none" };
+  }
+
+  assertPlainObject(infrastructureLogging, "options.infrastructureLogging");
+  assertKnownKeys(infrastructureLogging, ["level"], "options.infrastructureLogging");
+  return {
+    level:
+      infrastructureLogging.level === undefined
+        ? "none"
+        : assertInfrastructureLoggingLevel(infrastructureLogging.level)
+  };
+}
+
+function assertInfrastructureLoggingLevel(value: unknown): InfrastructureLoggingLevel {
+  if (
+    value !== "none" &&
+    value !== "error" &&
+    value !== "warn" &&
+    value !== "info" &&
+    value !== "log" &&
+    value !== "verbose"
+  ) {
+    throw new TypeError(
+      "options.infrastructureLogging.level must be 'none', 'error', 'warn', 'info', 'log', or 'verbose'"
+    );
+  }
+  return value;
+}
+
 function normalizeWatchOptions(watchOptions: WatchOptions): NormalizedWatchOptions {
   assertPlainObject(watchOptions, "watchOptions");
   assertKnownKeys(watchOptions, ["aggregateTimeout", "ignored", "poll"], "watchOptions");
@@ -967,6 +1097,60 @@ function emptyWatchDependencies(): WatchDependencySets {
     contexts: [],
     missing: []
   };
+}
+
+function emitInfrastructureLog(
+  event: InfrastructureLogEvent,
+  configuredLevel: InfrastructureLoggingLevel
+): void {
+  if (!isInfrastructureLogEnabled(event.level, configuredLevel)) {
+    return;
+  }
+
+  const message = `[${event.name}] ${event.message}`;
+  switch (event.level) {
+    case "error":
+      console.error(message);
+      return;
+    case "warn":
+      console.warn(message);
+      return;
+    case "info":
+      console.info(message);
+      return;
+    case "log":
+    case "verbose":
+      console.log(message);
+      return;
+  }
+}
+
+function isInfrastructureLogEnabled(
+  eventLevel: InfrastructureLogEventLevel,
+  configuredLevel: InfrastructureLoggingLevel
+): boolean {
+  if (configuredLevel === "none") {
+    return false;
+  }
+  return (
+    infrastructureLogLevelRank(eventLevel) <=
+    infrastructureLogLevelRank(configuredLevel)
+  );
+}
+
+function infrastructureLogLevelRank(level: InfrastructureLogEventLevel): number {
+  switch (level) {
+    case "error":
+      return 0;
+    case "warn":
+      return 1;
+    case "info":
+      return 2;
+    case "log":
+      return 3;
+    case "verbose":
+      return 4;
+  }
 }
 
 function watchTargets(dependencies: WatchDependencySets): WatchTarget[] {

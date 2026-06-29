@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use crate::{
-    CacheOptions, Compilation, ResolveOptions, Result, SnapshotOptions, UnpackResolver,
-    build_cache::BuildCache,
+    CacheOptions, Compilation, InfrastructureLoggingOptions, ResolveOptions, Result,
+    SnapshotOptions, UnpackResolver, build_cache::BuildCache,
 };
+use tracing::Instrument;
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx"];
 
@@ -29,6 +30,7 @@ pub struct CompilerOptions {
     pub cache: CacheOptions,
     pub resolve: ResolveOptions,
     pub snapshot: SnapshotOptions,
+    pub infrastructure_logging: InfrastructureLoggingOptions,
     pub parallelism: usize,
 }
 
@@ -40,6 +42,7 @@ impl CompilerOptions {
             cache: CacheOptions::default(),
             resolve: default_resolve_options(),
             snapshot: SnapshotOptions::default(),
+            infrastructure_logging: InfrastructureLoggingOptions::disabled(),
             parallelism: 100,
         }
     }
@@ -77,14 +80,20 @@ impl Compiler {
     }
 
     pub async fn run(&self) -> Result<Compilation> {
-        let mut compilation = self.create_compilation();
-        compilation.make().await?;
-        compilation.build_chunk_graph();
-        compilation.create_assets();
-        Ok(compilation)
+        async {
+            let mut compilation = self.create_compilation();
+            compilation.make().await?;
+            compilation.build_chunk_graph();
+            compilation.create_assets();
+            Ok(compilation)
+        }
+        .instrument(tracing::trace_span!("Compiler::run"))
+        .await
     }
 
     pub fn flush_cache(&self) -> std::result::Result<(), String> {
+        let span = tracing::trace_span!("Compiler::flush_cache");
+        let _enter = span.enter();
         self.build_cache
             .flush_to_filesystem()
             .map_err(|error| error.to_string())

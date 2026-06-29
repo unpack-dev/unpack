@@ -8,7 +8,8 @@ use napi::{Env, Result, Task, bindgen_prelude::AsyncTask};
 use napi_derive::napi;
 use unpack_core::{
     Asset, BuildDependency, CacheOptions, Compiler, CompilerOptions, Entry, Error as CoreError,
-    SnapshotOptions, SnapshotStrategy,
+    InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions, SnapshotOptions,
+    SnapshotStrategy,
 };
 
 #[napi(object)]
@@ -25,6 +26,8 @@ pub struct NativeCompilerOptions {
     pub output_path: String,
     pub cache: NativeCacheOptions,
     pub snapshot: NativeSnapshotOptions,
+    #[napi(js_name = "infrastructureLogging")]
+    pub infrastructure_logging: NativeInfrastructureLoggingOptions,
 }
 
 #[napi(object)]
@@ -63,6 +66,11 @@ pub struct NativeSnapshotOptions {
 pub struct NativeSnapshotStrategy {
     pub timestamp: bool,
     pub hash: bool,
+}
+
+#[napi(object)]
+pub struct NativeInfrastructureLoggingOptions {
+    pub level: String,
 }
 
 #[napi(object)]
@@ -105,9 +113,17 @@ pub struct NativeInfrastructureError {
 }
 
 #[napi(object)]
+pub struct NativeInfrastructureLogEvent {
+    pub level: String,
+    pub name: String,
+    pub message: String,
+}
+
+#[napi(object)]
 pub struct NativeRunResult {
     pub error: Option<NativeInfrastructureError>,
     pub stats: Option<NativeStatsJson>,
+    pub logs: Vec<NativeInfrastructureLogEvent>,
 }
 
 #[napi(object)]
@@ -161,6 +177,8 @@ impl NativeCompiler {
         let mut compiler_options = CompilerOptions::new(context, entries);
         compiler_options.cache = cache_options_from_native(options.cache);
         compiler_options.snapshot = snapshot_options_from_native(options.snapshot);
+        compiler_options.infrastructure_logging =
+            infrastructure_logging_options_from_native(options.infrastructure_logging);
         let compiler = Compiler::new(compiler_options);
 
         Self {
@@ -205,6 +223,21 @@ fn snapshot_strategy_from_native(strategy: NativeSnapshotStrategy) -> SnapshotSt
     SnapshotStrategy {
         timestamp: strategy.timestamp,
         hash: strategy.hash,
+    }
+}
+
+fn infrastructure_logging_options_from_native(
+    options: NativeInfrastructureLoggingOptions,
+) -> InfrastructureLoggingOptions {
+    InfrastructureLoggingOptions {
+        level: match options.level.as_str() {
+            "error" => Some(InfrastructureLogLevel::Error),
+            "warn" => Some(InfrastructureLogLevel::Warn),
+            "info" => Some(InfrastructureLogLevel::Info),
+            "log" => Some(InfrastructureLogLevel::Log),
+            "verbose" => Some(InfrastructureLogLevel::Verbose),
+            _ => None,
+        },
     }
 }
 
@@ -284,8 +317,9 @@ fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> Native
         }
     };
 
+    let logs = infrastructure_log_events(compilation.infrastructure_log_events());
     if let Err(error) = emit_assets(output_path, compilation.assets()) {
-        return infrastructure_error("OutputWriteError", error);
+        return infrastructure_error_with_logs("OutputWriteError", error, logs);
     }
 
     NativeRunResult {
@@ -297,10 +331,13 @@ fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> Native
             output_path: output_path.to_string_lossy().into_owned(),
             watch_dependencies: watch_dependencies(compilation.watch_dependencies()),
         }),
+        logs,
     }
 }
 
 fn emit_assets(output_path: &Path, assets: &[Asset]) -> std::result::Result<(), String> {
+    let span = tracing::trace_span!("unpack_node::emit_assets");
+    let _enter = span.enter();
     fs::create_dir_all(output_path).map_err(|error| {
         format!(
             "failed to create output path {}: {error}",
@@ -326,12 +363,21 @@ fn emit_assets(output_path: &Path, assets: &[Asset]) -> std::result::Result<(), 
 }
 
 fn infrastructure_error(name: impl Into<String>, message: impl Into<String>) -> NativeRunResult {
+    infrastructure_error_with_logs(name, message, Vec::new())
+}
+
+fn infrastructure_error_with_logs(
+    name: impl Into<String>,
+    message: impl Into<String>,
+    logs: Vec<NativeInfrastructureLogEvent>,
+) -> NativeRunResult {
     NativeRunResult {
         error: Some(NativeInfrastructureError {
             name: name.into(),
             message: message.into(),
         }),
         stats: None,
+        logs,
     }
 }
 
@@ -380,6 +426,19 @@ fn asset_stats(asset: &Asset) -> NativeAsset {
         name: asset.filename.clone(),
         size: asset.source.len().try_into().unwrap_or(u32::MAX),
     }
+}
+
+fn infrastructure_log_events(
+    events: &[InfrastructureLogEvent],
+) -> Vec<NativeInfrastructureLogEvent> {
+    events
+        .iter()
+        .map(|event| NativeInfrastructureLogEvent {
+            level: event.level.as_str().to_string(),
+            name: event.name.clone(),
+            message: event.message.clone(),
+        })
+        .collect()
 }
 
 fn watch_dependencies(dependencies: &unpack_core::WatchDependencies) -> NativeWatchDependencies {

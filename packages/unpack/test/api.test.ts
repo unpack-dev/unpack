@@ -603,6 +603,85 @@ test("compilation errors are reported in stats and still emit assets", async () 
   }
 });
 
+test("infrastructure logging is quiet by default", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const captured = captureConsole();
+
+  try {
+    const result = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js"
+    });
+
+    assert.equal(result.err, null);
+    assert.deepEqual(captured.all(), []);
+  } finally {
+    captured.restore();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("infrastructure logging level info reports compiler runs outside stats", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const captured = captureConsole();
+
+  try {
+    const result = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      infrastructureLogging: {
+        level: "info"
+      }
+    });
+
+    assert.equal(result.err, null);
+    assert.ok(result.stats);
+    assert.equal("logs" in result.stats.toJson(), false);
+    assert.deepEqual(captured.calls.info, [
+      "[unpack.Compiler] run started",
+      "[unpack.Compiler] run completed"
+    ]);
+    assert.deepEqual(captured.calls.log, []);
+  } finally {
+    captured.restore();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("infrastructure logging level verbose reports compilation phases", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const captured = captureConsole();
+
+  try {
+    const result = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      infrastructureLogging: {
+        level: "verbose"
+      }
+    });
+
+    assert.equal(result.err, null);
+    assert.deepEqual(captured.calls.log, [
+      "[unpack.Compilation] make started",
+      "[unpack.Compilation] make completed",
+      "[unpack.Compilation] chunk graph build started",
+      "[unpack.Compilation] chunk graph build completed",
+      "[unpack.Compilation] asset creation started",
+      "[unpack.Compilation] asset creation completed"
+    ]);
+  } finally {
+    captured.restore();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("top-level option validation throws synchronously", () => {
   assert.throws(
     () =>
@@ -620,6 +699,31 @@ test("top-level option validation throws synchronously", () => {
         null
       ),
     /options must be an object/
+  );
+});
+
+test("infrastructure logging option validation throws synchronously", () => {
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        infrastructureLogging: {
+          // @ts-expect-error intentionally testing runtime validation
+          debug: true
+        }
+      }),
+    /options.infrastructureLogging contains unknown option 'debug'/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        infrastructureLogging: {
+          // @ts-expect-error intentionally testing runtime validation
+          level: "debug"
+        }
+      }),
+    /options.infrastructureLogging.level must be/
   );
 });
 
@@ -826,6 +930,37 @@ function delay(ms: number) {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+type ConsoleMethod = "error" | "warn" | "info" | "log";
+
+function captureConsole() {
+  const methods: ConsoleMethod[] = ["error", "warn", "info", "log"];
+  const original = Object.fromEntries(
+    methods.map((method) => [method, console[method]])
+  ) as Record<ConsoleMethod, (...data: unknown[]) => void>;
+  const calls: Record<ConsoleMethod, string[]> = {
+    error: [],
+    warn: [],
+    info: [],
+    log: []
+  };
+
+  for (const method of methods) {
+    console[method] = (...data: unknown[]) => {
+      calls[method].push(data.map(String).join(" "));
+    };
+  }
+
+  return {
+    calls,
+    all: () => methods.flatMap((method) => calls[method]),
+    restore: () => {
+      for (const method of methods) {
+        console[method] = original[method];
+      }
+    }
+  };
 }
 
 async function createFixture(files: Record<string, string>) {

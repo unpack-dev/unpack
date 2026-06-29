@@ -31,7 +31,7 @@ pub(crate) struct MakeState {
 
 #[derive(Clone)]
 struct MakeServices {
-    factory: NormalModuleFactory,
+    normal_module_factory: NormalModuleFactory,
     module_build_cache: ModuleBuildCache,
     module_snapshot_strategy: SnapshotStrategy,
     semaphore: Arc<Semaphore>,
@@ -47,6 +47,7 @@ enum MakeTask {
 
 #[derive(Debug, Clone)]
 struct FactorizeTask {
+    factory: ModuleFactoryKind,
     origin_module: Option<ModuleId>,
     context: PathBuf,
     dependencies: Vec<QueuedDependency>,
@@ -93,6 +94,23 @@ struct AddModuleResult {
     is_new: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ModuleFactoryKind {
+    Normal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DependencyCategory {
+    Esm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FactorizeGroupKey {
+    factory: ModuleFactoryKind,
+    category: DependencyCategory,
+    resource_identifier: String,
+}
+
 type BackgroundMakeTask = JoinHandle<Result<Vec<MakeTask>>>;
 
 pub(crate) async fn run(
@@ -102,7 +120,7 @@ pub(crate) async fn run(
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
     let services = MakeServices {
-        factory: NormalModuleFactory::new(
+        normal_module_factory: NormalModuleFactory::new(
             resolver,
             build_cache.normal_module_factory(),
             options.snapshot.resolve,
@@ -117,6 +135,7 @@ pub(crate) async fn run(
     for (entry_index, entry) in options.entries.iter().enumerate() {
         schedule_make_task(
             MakeTask::Factorize(FactorizeTask {
+                factory: ModuleFactoryKind::Normal,
                 origin_module: None,
                 context: options.context.clone(),
                 dependencies: vec![QueuedDependency {
@@ -244,7 +263,11 @@ impl FactorizeTask {
             .expect("factorize task should have at least one dependency")
             .dependency
             .clone();
-        let result = match services.factory.factorize(&self.context, &dependency).await {
+        let result = match self
+            .factory
+            .factorize(&services, &self.context, &dependency)
+            .await
+        {
             Ok(factorized) => FactorizeTaskResult::Success(factorized),
             Err(error) if error.is_compilation_error() => FactorizeTaskResult::Failed(error),
             Err(error) => return Err(error),
@@ -381,16 +404,65 @@ impl BuildTask {
 
 impl ProcessDependenciesTask {
     fn run(self) -> Vec<MakeTask> {
-        group_dependencies_by_resource_identifier(self.dependencies)
+        group_dependencies_for_factorization(self.dependencies)
             .into_iter()
-            .map(|dependencies| {
+            .map(|(key, dependencies)| {
                 MakeTask::Factorize(FactorizeTask {
+                    factory: key.factory,
                     origin_module: Some(self.origin_module),
                     context: self.context.clone(),
                     dependencies,
                 })
             })
             .collect()
+    }
+}
+
+impl ModuleFactoryKind {
+    async fn factorize(
+        self,
+        services: &MakeServices,
+        context: &Path,
+        dependency: &Dependency,
+    ) -> Result<FactorizedModule> {
+        match self {
+            Self::Normal => {
+                services
+                    .normal_module_factory
+                    .factorize(context, dependency)
+                    .await
+            }
+        }
+    }
+}
+
+impl FactorizeGroupKey {
+    fn for_dependency(dependency: &Dependency) -> Option<Self> {
+        Some(Self {
+            factory: ModuleFactoryKind::for_dependency(dependency)?,
+            category: DependencyCategory::for_dependency(dependency)?,
+            resource_identifier: dependency.resource_identifier()?,
+        })
+    }
+}
+
+impl ModuleFactoryKind {
+    fn for_dependency(dependency: &Dependency) -> Option<Self> {
+        if dependency.is_module_dependency() {
+            Some(Self::Normal)
+        } else {
+            None
+        }
+    }
+}
+
+impl DependencyCategory {
+    fn for_dependency(dependency: &Dependency) -> Option<Self> {
+        if dependency.is_module_dependency() {
+            Some(Self::Esm)
+        } else {
+            None
+        }
     }
 }
 
@@ -432,29 +504,23 @@ fn process_dependencies_task(
     }
 }
 
-fn group_dependencies_by_resource_identifier(
+fn group_dependencies_for_factorization(
     dependencies: Vec<QueuedDependency>,
-) -> Vec<Vec<QueuedDependency>> {
-    let mut groups: Vec<(String, Vec<QueuedDependency>)> = Vec::new();
+) -> Vec<(FactorizeGroupKey, Vec<QueuedDependency>)> {
+    let mut groups: Vec<(FactorizeGroupKey, Vec<QueuedDependency>)> = Vec::new();
 
     for dependency in dependencies {
-        let Some(resource_identifier) = dependency.dependency.resource_identifier() else {
+        let Some(key) = FactorizeGroupKey::for_dependency(&dependency.dependency) else {
             continue;
         };
-        if let Some((_, group)) = groups
-            .iter_mut()
-            .find(|(key, _)| key == &resource_identifier)
-        {
+        if let Some((_, group)) = groups.iter_mut().find(|(group_key, _)| group_key == &key) {
             group.push(dependency);
         } else {
-            groups.push((resource_identifier, vec![dependency]));
+            groups.push((key, vec![dependency]));
         }
     }
 
     groups
-        .into_iter()
-        .map(|(_, dependencies)| dependencies)
-        .collect()
 }
 
 fn failed_module_identity(context: &Path, dependency: &Dependency) -> ModuleIdentity {

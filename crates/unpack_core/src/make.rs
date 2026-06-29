@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::{
     CompilerOptions, Dependency, DependencyKind, Error, ModuleGraph, ModuleId, ModuleIdentity,
     NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
-    build_cache::{BuildCache, ModuleBuildRecord},
+    build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     parser::{ParsedModule, parse_module_dependencies},
     snapshot::FileSnapshot,
 };
@@ -29,7 +29,7 @@ pub(crate) struct MakeState {
 #[derive(Debug, Clone)]
 struct MakeServices {
     factory: NormalModuleFactory,
-    build_cache: BuildCache,
+    module_build_cache: ModuleBuildCache,
     module_snapshot_strategy: SnapshotStrategy,
     semaphore: Arc<Semaphore>,
 }
@@ -56,8 +56,12 @@ pub(crate) async fn run(
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
     let services = MakeServices {
-        factory: NormalModuleFactory::new(resolver),
-        build_cache,
+        factory: NormalModuleFactory::new(
+            resolver,
+            build_cache.normal_module_factory(),
+            options.snapshot.resolve,
+        ),
+        module_build_cache: build_cache.module_builds(),
         module_snapshot_strategy: options.snapshot.module,
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
@@ -144,6 +148,12 @@ async fn process_request(
 
     let add_result = {
         let mut state = state.lock().await;
+        state
+            .file_dependencies
+            .extend(factorized.file_dependencies.iter().cloned());
+        state
+            .missing_dependencies
+            .extend(factorized.missing_dependencies.iter().cloned());
         state.file_dependencies.insert(resource.clone());
         state.add_or_connect(
             request.origin_module,
@@ -163,7 +173,7 @@ async fn process_request(
         .ok_or(Error::MissingModuleDirectory(add_result.module_id))?
         .to_path_buf();
 
-    if let Some(record) = services.build_cache.get_module_build(&identity) {
+    if let Some(record) = services.module_build_cache.get_module_build(&identity) {
         if record
             .is_valid(&resource, services.module_snapshot_strategy)
             .await
@@ -210,7 +220,9 @@ async fn process_request(
         .lock()
         .await
         .finish_build(add_result.module_id, parsed, source)?;
-    services.build_cache.store_module_build(identity, record);
+    services
+        .module_build_cache
+        .store_module_build(identity, record);
 
     Ok(children)
 }

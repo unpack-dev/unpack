@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
 const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
-const CACHE_SCHEMA_VERSION: u32 = 3;
+const CACHE_SCHEMA_VERSION: u32 = 4;
 const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
 const MANIFEST_FILE: &str = "container.json";
 
@@ -24,6 +24,7 @@ const MANIFEST_FILE: &str = "container.json";
 pub(crate) struct BuildCache {
     options: CacheOptions,
     build_dependency_snapshot_strategy: SnapshotStrategy,
+    resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
     file_system_info: FileSystemInfo,
     inner: Arc<Mutex<BuildCacheInner>>,
 }
@@ -277,10 +278,12 @@ impl BuildCache {
     pub(crate) fn new(
         options: CacheOptions,
         build_dependency_snapshot_strategy: SnapshotStrategy,
+        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
     ) -> Self {
         let cache = Self {
             options,
             build_dependency_snapshot_strategy,
+            resolve_build_dependency_snapshot_strategy,
             file_system_info: FileSystemInfo::new(),
             inner: Arc::new(Mutex::new(BuildCacheInner::default())),
         };
@@ -459,7 +462,10 @@ impl BuildCache {
             schema_version: CACHE_SCHEMA_VERSION,
             cache_version,
             pack_file: pack_file.to_string_lossy().replace('\\', "/"),
-            build_dependencies: self.build_dependency_snapshots()?,
+            build_dependencies: self
+                .build_dependency_snapshots(self.build_dependency_snapshot_strategy)?,
+            resolve_build_dependencies: self
+                .build_dependency_snapshots(self.resolve_build_dependency_snapshot_strategy)?,
         };
         fs::create_dir_all(cache_location)?;
         let manifest_json = serde_json::to_vec_pretty(&manifest)
@@ -472,14 +478,24 @@ impl BuildCache {
         manifest.magic == CACHE_MAGIC
             && manifest.schema_version == CACHE_SCHEMA_VERSION
             && manifest.cache_version == self.cache_version()
-            && self.build_dependency_snapshots_are_valid(&manifest.build_dependencies)
+            && self.build_dependency_snapshots_are_valid(
+                &manifest.build_dependencies,
+                self.build_dependency_snapshot_strategy,
+            )
+            && self.build_dependency_snapshots_are_valid(
+                &manifest.resolve_build_dependencies,
+                self.resolve_build_dependency_snapshot_strategy,
+            )
     }
 
     fn cache_version(&self) -> String {
         self.options.version.clone().unwrap_or_default()
     }
 
-    fn build_dependency_snapshots(&self) -> io::Result<Vec<PersistentBuildDependencySnapshot>> {
+    fn build_dependency_snapshots(
+        &self,
+        strategy: SnapshotStrategy,
+    ) -> io::Result<Vec<PersistentBuildDependencySnapshot>> {
         self.options
             .build_dependencies
             .iter()
@@ -489,10 +505,7 @@ impl BuildCache {
                     files: dependency.files.clone(),
                     snapshot: self
                         .file_system_info
-                        .create_snapshot_sync(
-                            dependency.files.clone(),
-                            self.build_dependency_snapshot_strategy,
-                        )
+                        .create_snapshot_sync(dependency.files.clone(), strategy)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                 })
             })
@@ -502,6 +515,7 @@ impl BuildCache {
     fn build_dependency_snapshots_are_valid(
         &self,
         snapshots: &[PersistentBuildDependencySnapshot],
+        strategy: SnapshotStrategy,
     ) -> bool {
         if snapshots.len() != self.options.build_dependencies.len() {
             return false;
@@ -522,10 +536,9 @@ impl BuildCache {
                 .files
                 .iter()
                 .all(|path| snapshot.files.contains(path))
-                && self.file_system_info.is_snapshot_valid_sync(
-                    &snapshot.snapshot,
-                    self.build_dependency_snapshot_strategy,
-                )
+                && self
+                    .file_system_info
+                    .is_snapshot_valid_sync(&snapshot.snapshot, strategy)
         })
     }
 }
@@ -548,6 +561,7 @@ struct CacheManifest {
     cache_version: String,
     pack_file: String,
     build_dependencies: Vec<PersistentBuildDependencySnapshot>,
+    resolve_build_dependencies: Vec<PersistentBuildDependencySnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -205,6 +205,32 @@ test("snapshot module hash detects same-timestamp source edits", async () => {
   }
 });
 
+test("omitted and production mode default module snapshots to timestamp plus hash", async () => {
+  await assertSameTimestampModuleEditEmits("after", {});
+  await assertSameTimestampModuleEditEmits("after", { mode: "production" });
+});
+
+test("development and none default module snapshots to timestamp only", async () => {
+  await assertSameTimestampModuleEditEmits("before", { mode: "development" });
+  await assertSameTimestampModuleEditEmits("before", { mode: "none" });
+});
+
+test("mode does not weaken build dependency snapshot defaults", async () => {
+  await assertSameTimestampBuildDependencyEditEmits({
+    snapshot: {
+      resolveBuildDependencies: { timestamp: true, hash: false }
+    }
+  });
+});
+
+test("mode does not weaken resolve build dependency snapshot defaults", async () => {
+  await assertSameTimestampBuildDependencyEditEmits({
+    snapshot: {
+      buildDependencies: { timestamp: true, hash: false }
+    }
+  });
+});
+
 test("accepts filesystem cache option shape", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;",
@@ -688,6 +714,15 @@ test("top-level option validation throws synchronously", () => {
       unpack({
         entry: "./src/index.js",
         // @ts-expect-error intentionally testing runtime validation
+        mode: "staging"
+      }),
+    /options.mode must be 'development', 'production', or 'none'/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        // @ts-expect-error intentionally testing runtime validation
         plugins: []
       }),
     /unknown option 'plugins'/
@@ -786,6 +821,70 @@ test("cache and snapshot option validation throws synchronously", () => {
       }),
     /options.snapshot.module.timestamp must be a boolean/
   );
+  assert.doesNotThrow(() =>
+    unpack({
+      entry: "./src/index.js",
+      snapshot: {
+        resolve: {
+          timestamp: false
+        }
+      }
+    })
+  );
+  assert.doesNotThrow(() =>
+    unpack({
+      entry: "./src/index.js",
+      mode: "production",
+      snapshot: {
+        resolve: {
+          timestamp: false
+        }
+      }
+    })
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          module: {
+            timestamp: false,
+            hash: false
+          }
+        }
+      }),
+    /options.snapshot.module must enable timestamp or hash validation/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        mode: "development",
+        snapshot: {
+          resolve: {
+            timestamp: false
+          },
+          resolveBuildDependencies: {
+            timestamp: true,
+            hash: false
+          }
+        }
+      }),
+    /options.snapshot.resolve must enable timestamp or hash validation/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          resolveBuildDependencies: {
+            timestamp: false,
+            hash: false
+          }
+        }
+      }),
+    /options.snapshot.resolveBuildDependencies must enable timestamp or hash validation/
+  );
 });
 
 test("watch option validation throws synchronously", async () => {
@@ -866,6 +965,100 @@ test("watch option validation throws synchronously", async () => {
 
 async function runCompiler(options: Parameters<typeof unpack>[0]) {
   return runExistingCompiler(unpack(options));
+}
+
+async function assertSameTimestampModuleEditEmits(
+  expected: string,
+  options: Partial<Parameters<typeof unpack>[0]>
+) {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const entry = join(fixture, "src/index.js");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(entry, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    ...options
+  });
+
+  try {
+    const first = await runExistingCompiler(compiler);
+    assert.equal(first.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    await utimes(entry, stableTime, stableTime);
+
+    const second = await runExistingCompiler(compiler);
+    assert.equal(second.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), new RegExp(expected));
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+}
+
+async function assertSameTimestampBuildDependencyEditEmits(
+  options: Partial<Parameters<typeof unpack>[0]>
+) {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';",
+    "config/build.js": "export default 'before';"
+  });
+  const entry = join(fixture, "src/index.js");
+  const config = join(fixture, "config/build.js");
+  const cacheLocation = join(fixture, ".cache/unpack/default");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(entry, stableTime, stableTime);
+  await utimes(config, stableTime, stableTime);
+
+  try {
+    const firstCompiler = unpack({
+      context: fixture,
+      mode: "development",
+      entry: "./src/index.js",
+      cache: {
+        type: "filesystem",
+        cacheLocation,
+        buildDependencies: {
+          config: ["./config/build.js"]
+        }
+      },
+      ...options
+    });
+    const first = await runExistingCompiler(firstCompiler);
+    await closeCompiler(firstCompiler);
+    assert.equal(first.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    await writeFile(config, "export default 'after';", { encoding: "utf8" });
+    await utimes(entry, stableTime, stableTime);
+    await utimes(config, stableTime, stableTime);
+
+    const secondCompiler = unpack({
+      context: fixture,
+      mode: "development",
+      entry: "./src/index.js",
+      cache: {
+        type: "filesystem",
+        cacheLocation,
+        buildDependencies: {
+          config: ["./config/build.js"]
+        }
+      },
+      ...options
+    });
+    const second = await runExistingCompiler(secondCompiler);
+    await closeCompiler(secondCompiler);
+    assert.equal(second.err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
 }
 
 async function runExistingCompiler(compiler: ReturnType<typeof unpack>) {

@@ -1,0 +1,3 @@
+# Use snapshot path options as the effective path classification entrypoint
+
+Unpack will treat `snapshot.managedPaths`, `snapshot.immutablePaths`, and `snapshot.unmanagedPaths` as the canonical effective configuration for filesystem path classification. Although webpack's option types still include cache-level managed and immutable path fields, webpack's current application path feeds snapshot path options into compiler and cache-backend `File System Info` instances. Unpack will follow that effective behavior and avoid introducing separate cache-level path-classification entries until a concrete compatibility need appears.

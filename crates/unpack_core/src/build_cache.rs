@@ -96,6 +96,7 @@ pub struct BuildDependency {
 #[derive(Debug, Default)]
 struct BuildCacheInner {
     module_builds: HashMap<ModuleIdentity, ModuleBuildRecord>,
+    dirty: bool,
     module_hits: usize,
     module_misses: usize,
 }
@@ -166,22 +167,41 @@ impl BuildCache {
             return;
         }
 
-        let module_builds = {
+        {
             let mut inner = self
                 .inner
                 .lock()
                 .expect("build cache mutex should not be poisoned");
             inner.module_builds.insert(identity, record);
             if self.options.kind == CacheKind::Filesystem {
-                Some(inner.module_builds.clone())
-            } else {
-                None
+                inner.dirty = true;
             }
+        }
+    }
+
+    pub(crate) fn flush_to_filesystem(&self) -> io::Result<()> {
+        if self.options.kind != CacheKind::Filesystem {
+            return Ok(());
+        }
+
+        let module_builds = {
+            let inner = self
+                .inner
+                .lock()
+                .expect("build cache mutex should not be poisoned");
+            if !inner.dirty {
+                return Ok(());
+            }
+            inner.module_builds.clone()
         };
 
-        if let Some(module_builds) = module_builds {
-            let _ = self.write_filesystem_cache(&module_builds);
-        }
+        self.write_filesystem_cache(&module_builds)?;
+
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .dirty = false;
+        Ok(())
     }
 
     #[cfg(test)]

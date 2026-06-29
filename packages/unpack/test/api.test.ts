@@ -227,12 +227,14 @@ test("accepts filesystem cache option shape", async () => {
   };
 
   try {
-    const first = await runCompiler({
+    const firstCompiler = unpack({
       context: fixture,
       entry: "./src/index.js",
       cache: cacheOptions,
       snapshot
     });
+    const first = await runExistingCompiler(firstCompiler);
+    await closeCompiler(firstCompiler);
 
     assert.equal(first.err, null);
     assert.equal(first.stats?.hasErrors(), false);
@@ -242,14 +244,76 @@ test("accepts filesystem cache option shape", async () => {
     );
     assert.ok(await readFile(join(fixture, ".cache/unpack/test-cache/packs/modules.cbor")));
 
-    const second = await runCompiler({
+    const secondCompiler = unpack({
       context: fixture,
       entry: "./src/index.js",
       cache: cacheOptions,
       snapshot
     });
+    const second = await runExistingCompiler(secondCompiler);
+    await closeCompiler(secondCompiler);
     assert.equal(second.err, null);
     assert.deepEqual(second.stats?.toJson(), first.stats?.toJson());
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("filesystem cache flushes after idle timeout", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/idle");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeout: 30
+    }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+    await assert.rejects(readFile(join(cacheLocation, "container.json"), "utf8"));
+
+    await delay(100);
+    assert.match(
+      await readFile(join(cacheLocation, "container.json"), "utf8"),
+      /UNPACK_PERSISTENT_CACHE/
+    );
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("compiler close waits for pending filesystem cache flush", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/close");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeout: 60_000
+    }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+
+    await closeCompiler(compiler);
+    assert.match(
+      await readFile(join(cacheLocation, "container.json"), "utf8"),
+      /UNPACK_PERSISTENT_CACHE/
+    );
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -406,6 +470,12 @@ async function closeCompiler(compiler: ReturnType<typeof unpack>) {
         resolve();
       }
     });
+  });
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
   });
 }
 

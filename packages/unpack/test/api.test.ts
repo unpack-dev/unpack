@@ -231,6 +231,128 @@ test("mode does not weaken resolve build dependency snapshot defaults", async ()
   });
 });
 
+test("default managed node_modules snapshots invalidate on package version changes", async () => {
+  const fixture = await createNodeModulesFixture();
+  const moduleFile = join(fixture, "node_modules/pkg/index.js");
+  const packageJson = join(fixture, "node_modules/pkg/package.json");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      module: { timestamp: false, hash: true }
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(moduleFile, "export const value = 'after';", { encoding: "utf8" });
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(packageJson, JSON.stringify({ name: "pkg", version: "2.0.0" }), {
+      encoding: "utf8"
+    });
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("unversioned managed packages fall back to module file snapshots", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from 'pkg/index.js'; export const result = value;",
+    "node_modules/pkg/package.json": JSON.stringify({ name: "pkg" }),
+    "node_modules/pkg/index.js": "export const value = 'before';"
+  });
+  const moduleFile = join(fixture, "node_modules/pkg/index.js");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(moduleFile, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      module: { timestamp: false, hash: true }
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(moduleFile, "export const value = 'after';", { encoding: "utf8" });
+    await utimes(moduleFile, stableTime, stableTime);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("unmanaged path patterns override managed node_modules snapshots", async () => {
+  const fixture = await createNodeModulesFixture();
+  const moduleFile = join(fixture, "node_modules/pkg/index.js");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(moduleFile, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      module: { timestamp: false, hash: true },
+      unmanagedPaths: [join(fixture, "node_modules/pkg")]
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(moduleFile, "export const value = 'after';", { encoding: "utf8" });
+    await utimes(moduleFile, stableTime, stableTime);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("immutable path patterns bypass module snapshot file validation", async () => {
+  const fixture = await createNodeModulesFixture();
+  const moduleFile = join(fixture, "node_modules/pkg/index.js");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(moduleFile, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      module: { timestamp: false, hash: true },
+      immutablePaths: [/NODE_MODULES.PKG/i]
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(moduleFile, "export const value = 'after';", { encoding: "utf8" });
+    await utimes(moduleFile, stableTime, stableTime);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("accepts filesystem cache option shape", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;",
@@ -885,6 +1007,57 @@ test("cache and snapshot option validation throws synchronously", () => {
       }),
     /options.snapshot.resolveBuildDependencies must enable timestamp or hash validation/
   );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          managedPaths: ["node_modules"]
+        }
+      }),
+    /options.snapshot.managedPaths\[0\] must be an absolute path/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          immutablePaths: [/node_modules/g]
+        }
+      }),
+    /options.snapshot.immutablePaths\[0\] RegExp flags must be empty or 'i'/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          immutablePaths: [/(?<=node_modules)pkg/]
+        }
+      }),
+    /snapshot path RegExp .* is not supported by Rust regex/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          // @ts-expect-error intentionally testing runtime validation
+          unmanagedPaths: "/absolute/path"
+        }
+      }),
+    /options.snapshot.unmanagedPaths must be an array/
+  );
+  assert.doesNotThrow(() =>
+    unpack({
+      entry: "./src/index.js",
+      snapshot: {
+        managedPaths: ["/absolute/path"],
+        immutablePaths: [/node_modules/i],
+        unmanagedPaths: []
+      }
+    })
+  );
 });
 
 test("watch option validation throws synchronously", async () => {
@@ -1059,6 +1232,14 @@ async function assertSameTimestampBuildDependencyEditEmits(
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
+}
+
+async function createNodeModulesFixture() {
+  return createFixture({
+    "src/index.js": "import { value } from 'pkg/index.js'; export const result = value;",
+    "node_modules/pkg/package.json": JSON.stringify({ name: "pkg", version: "1.0.0" }),
+    "node_modules/pkg/index.js": "export const value = 'before';"
+  });
 }
 
 async function runExistingCompiler(compiler: ReturnType<typeof unpack>) {

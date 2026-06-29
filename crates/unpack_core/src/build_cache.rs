@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    ModuleIdentity, SnapshotStrategy,
+    ModuleIdentity, SnapshotOptions, SnapshotStrategy,
     parser::ParsedModule,
     snapshot::{FileSystemInfo, Snapshot},
 };
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
 const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
-const CACHE_SCHEMA_VERSION: u32 = 4;
+const CACHE_SCHEMA_VERSION: u32 = 5;
 const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
 const MANIFEST_FILE: &str = "container.json";
 
@@ -275,16 +275,15 @@ impl ModuleBuildRecord {
 }
 
 impl BuildCache {
-    pub(crate) fn new(
-        options: CacheOptions,
-        build_dependency_snapshot_strategy: SnapshotStrategy,
-        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-    ) -> Self {
+    pub(crate) fn new(options: CacheOptions, snapshot_options: SnapshotOptions) -> Self {
+        let build_dependency_snapshot_strategy = snapshot_options.build_dependencies;
+        let resolve_build_dependency_snapshot_strategy =
+            snapshot_options.resolve_build_dependencies;
         let cache = Self {
             options,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
-            file_system_info: FileSystemInfo::new(),
+            file_system_info: FileSystemInfo::from_snapshot_options(&snapshot_options),
             inner: Arc::new(Mutex::new(BuildCacheInner::default())),
         };
         cache.restore_from_filesystem();

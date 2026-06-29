@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 cbor4ii = { workspace = true }
 futures = { workspace = true }
+regex = { workspace = true }
 rspack_resolver = { workspace = true }
 rspack_sources = { workspace = true }
 serde = { workspace = true }

@@ -5,14 +5,18 @@ use std::{
 };
 
 use crate::{Error, Result};
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotOptions {
     pub module: SnapshotStrategy,
     pub resolve: SnapshotStrategy,
     pub build_dependencies: SnapshotStrategy,
     pub resolve_build_dependencies: SnapshotStrategy,
+    pub managed_paths: Vec<SnapshotPathPattern>,
+    pub immutable_paths: Vec<SnapshotPathPattern>,
+    pub unmanaged_paths: Vec<SnapshotPathPattern>,
 }
 
 impl Default for SnapshotOptions {
@@ -22,6 +26,9 @@ impl Default for SnapshotOptions {
             resolve: SnapshotStrategy::timestamp(),
             build_dependencies: SnapshotStrategy::timestamp_and_hash(),
             resolve_build_dependencies: SnapshotStrategy::timestamp_and_hash(),
+            managed_paths: vec![SnapshotPathPattern::NodeModules],
+            immutable_paths: Vec::new(),
+            unmanaged_paths: Vec::new(),
         }
     }
 }
@@ -55,12 +62,70 @@ impl SnapshotStrategy {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct FileSystemInfo;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SnapshotPathPattern {
+    Path(PathBuf),
+    Regex { source: String, flags: String },
+    NodeModules,
+}
+
+impl SnapshotPathPattern {
+    fn matches(&self, path: &Path) -> bool {
+        match self {
+            Self::Path(pattern) => path.starts_with(pattern),
+            Self::Regex { source, flags } => {
+                let normalized_path = normalize_path_for_matching(path);
+                RegexBuilder::new(source)
+                    .case_insensitive(flags == "i")
+                    .build()
+                    .map(|regex| regex.is_match(&normalized_path))
+                    .unwrap_or(false)
+            }
+            Self::NodeModules => has_component(path, "node_modules"),
+        }
+    }
+
+    fn managed_boundary(&self, path: &Path) -> Option<ManagedPathBoundary> {
+        match self {
+            Self::Path(pattern) if path.starts_with(pattern) => {
+                Some(ManagedPathBoundary::Path(pattern.clone()))
+            }
+            Self::Regex { source, flags } => {
+                let normalized_path = normalize_path_for_matching(path);
+                RegexBuilder::new(source)
+                    .case_insensitive(flags == "i")
+                    .build()
+                    .ok()?
+                    .captures(&normalized_path)?
+                    .get(1)
+                    .map(|capture| ManagedPathBoundary::Path(PathBuf::from(capture.as_str())))
+            }
+            Self::NodeModules if has_component(path, "node_modules") => {
+                Some(ManagedPathBoundary::NodeModules)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FileSystemInfo {
+    managed_paths: Vec<SnapshotPathPattern>,
+    immutable_paths: Vec<SnapshotPathPattern>,
+    unmanaged_paths: Vec<SnapshotPathPattern>,
+}
 
 impl FileSystemInfo {
     pub(crate) fn new() -> Self {
-        Self
+        Self::from_snapshot_options(&SnapshotOptions::default())
+    }
+
+    pub(crate) fn from_snapshot_options(options: &SnapshotOptions) -> Self {
+        Self {
+            managed_paths: options.managed_paths.clone(),
+            immutable_paths: options.immutable_paths.clone(),
+            unmanaged_paths: options.unmanaged_paths.clone(),
+        }
     }
 
     pub(crate) async fn create_file_snapshot(
@@ -69,7 +134,7 @@ impl FileSystemInfo {
         source: &str,
         strategy: SnapshotStrategy,
     ) -> Result<Snapshot> {
-        Snapshot::create_file(path, source, strategy).await
+        Snapshot::create_file(path, source, strategy, self).await
     }
 
     pub(crate) async fn create_snapshot(
@@ -77,7 +142,7 @@ impl FileSystemInfo {
         paths: impl IntoIterator<Item = PathBuf>,
         strategy: SnapshotStrategy,
     ) -> Result<Snapshot> {
-        Snapshot::create(paths, strategy).await
+        Snapshot::create(paths, strategy, self).await
     }
 
     pub(crate) fn create_snapshot_sync(
@@ -85,7 +150,7 @@ impl FileSystemInfo {
         paths: impl IntoIterator<Item = PathBuf>,
         strategy: SnapshotStrategy,
     ) -> Result<Snapshot> {
-        Snapshot::create_sync(paths, strategy)
+        Snapshot::create_sync(paths, strategy, self)
     }
 
     pub(crate) async fn is_snapshot_valid(
@@ -93,7 +158,7 @@ impl FileSystemInfo {
         snapshot: &Snapshot,
         strategy: SnapshotStrategy,
     ) -> bool {
-        snapshot.is_valid(strategy).await
+        snapshot.is_valid(strategy, self).await
     }
 
     pub(crate) fn is_snapshot_valid_sync(
@@ -101,71 +166,239 @@ impl FileSystemInfo {
         snapshot: &Snapshot,
         strategy: SnapshotStrategy,
     ) -> bool {
-        snapshot.is_valid_sync(strategy)
+        snapshot.is_valid_sync(strategy, self)
     }
+
+    fn classify_path(&self, path: &Path) -> SnapshotPathClassification {
+        if self
+            .unmanaged_paths
+            .iter()
+            .any(|pattern| pattern.matches(path))
+        {
+            return SnapshotPathClassification::Unmanaged;
+        }
+        if self
+            .immutable_paths
+            .iter()
+            .any(|pattern| pattern.matches(path))
+        {
+            return SnapshotPathClassification::Immutable;
+        }
+        for pattern in &self.managed_paths {
+            if let Some(boundary) = pattern.managed_boundary(path) {
+                return SnapshotPathClassification::Managed(boundary);
+            }
+        }
+        SnapshotPathClassification::Unclassified
+    }
+
+    fn file_snapshot_applies(&self, path: &Path) -> bool {
+        match self.classify_path(path) {
+            SnapshotPathClassification::Unmanaged | SnapshotPathClassification::Unclassified => {
+                true
+            }
+            SnapshotPathClassification::Immutable => false,
+            SnapshotPathClassification::Managed(boundary) => {
+                ManagedPathSnapshot::create(path, &boundary).is_none()
+            }
+        }
+    }
+}
+
+impl Default for FileSystemInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotPathClassification {
+    Unmanaged,
+    Immutable,
+    Managed(ManagedPathBoundary),
+    Unclassified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManagedPathBoundary {
+    NodeModules,
+    Path(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
-    files: Vec<SnapshottedFile>,
+    entries: Vec<SnapshotEntry>,
 }
 
 impl Snapshot {
-    async fn create_file(path: &Path, source: &str, strategy: SnapshotStrategy) -> Result<Self> {
+    async fn create_file(
+        path: &Path,
+        source: &str,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> Result<Self> {
         Ok(Self {
-            files: vec![SnapshottedFile {
-                path: path.to_path_buf(),
-                snapshot: FileSnapshot::create(path, source, strategy).await?,
-            }],
+            entries: vec![
+                SnapshotEntry::create_file(path, Some(source), strategy, file_system_info).await?,
+            ],
         })
     }
 
     async fn create(
         paths: impl IntoIterator<Item = PathBuf>,
         strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
     ) -> Result<Self> {
         let paths = normalize_paths(paths);
-        let mut files = Vec::with_capacity(paths.len());
+        let mut entries = Vec::with_capacity(paths.len());
         for path in paths {
-            files.push(SnapshottedFile {
-                snapshot: FileSnapshot::create_from_path(&path, strategy).await?,
-                path,
-            });
+            entries
+                .push(SnapshotEntry::create_file(&path, None, strategy, file_system_info).await?);
         }
-        Ok(Self { files })
+        Ok(Self { entries })
     }
 
     fn create_sync(
         paths: impl IntoIterator<Item = PathBuf>,
         strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
     ) -> Result<Self> {
         let paths = normalize_paths(paths);
-        let mut files = Vec::with_capacity(paths.len());
+        let mut entries = Vec::with_capacity(paths.len());
         for path in paths {
-            files.push(SnapshottedFile {
-                snapshot: FileSnapshot::create_from_file_sync(&path, strategy)?,
-                path,
-            });
+            entries.push(SnapshotEntry::create_file_sync(
+                &path,
+                strategy,
+                file_system_info,
+            )?);
         }
-        Ok(Self { files })
+        Ok(Self { entries })
     }
 
-    async fn is_valid(&self, strategy: SnapshotStrategy) -> bool {
-        for file in &self.files {
-            if !file.snapshot.is_valid(&file.path, strategy).await {
+    async fn is_valid(
+        &self,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> bool {
+        for entry in &self.entries {
+            if !entry.is_valid(strategy, file_system_info).await {
                 return false;
             }
         }
         true
     }
 
-    fn is_valid_sync(&self, strategy: SnapshotStrategy) -> bool {
-        for file in &self.files {
-            if !file.snapshot.is_valid_sync(&file.path, strategy) {
+    fn is_valid_sync(&self, strategy: SnapshotStrategy, file_system_info: &FileSystemInfo) -> bool {
+        for entry in &self.entries {
+            if !entry.is_valid_sync(strategy, file_system_info) {
                 return false;
             }
         }
         true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum SnapshotEntry {
+    File(SnapshottedFile),
+    ImmutablePath { path: PathBuf },
+    ManagedPath(ManagedPathSnapshot),
+}
+
+impl SnapshotEntry {
+    async fn create_file(
+        path: &Path,
+        source: Option<&str>,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> Result<Self> {
+        match file_system_info.classify_path(path) {
+            SnapshotPathClassification::Managed(boundary) => {
+                if let Some(snapshot) = ManagedPathSnapshot::create(path, &boundary) {
+                    return Ok(Self::ManagedPath(snapshot));
+                }
+            }
+            SnapshotPathClassification::Immutable => {
+                return Ok(Self::ImmutablePath {
+                    path: path.to_path_buf(),
+                });
+            }
+            SnapshotPathClassification::Unmanaged | SnapshotPathClassification::Unclassified => {}
+        }
+
+        let snapshot = match source {
+            Some(source) => FileSnapshot::create(path, source, strategy).await?,
+            None => FileSnapshot::create_from_path(path, strategy).await?,
+        };
+        Ok(Self::File(SnapshottedFile {
+            path: path.to_path_buf(),
+            snapshot,
+        }))
+    }
+
+    fn create_file_sync(
+        path: &Path,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> Result<Self> {
+        match file_system_info.classify_path(path) {
+            SnapshotPathClassification::Managed(boundary) => {
+                if let Some(snapshot) = ManagedPathSnapshot::create(path, &boundary) {
+                    return Ok(Self::ManagedPath(snapshot));
+                }
+            }
+            SnapshotPathClassification::Immutable => {
+                return Ok(Self::ImmutablePath {
+                    path: path.to_path_buf(),
+                });
+            }
+            SnapshotPathClassification::Unmanaged | SnapshotPathClassification::Unclassified => {}
+        }
+
+        Ok(Self::File(SnapshottedFile {
+            path: path.to_path_buf(),
+            snapshot: FileSnapshot::create_from_file_sync(path, strategy)?,
+        }))
+    }
+
+    async fn is_valid(
+        &self,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> bool {
+        match self {
+            Self::File(file) => {
+                file_system_info.file_snapshot_applies(&file.path)
+                    && file.snapshot.is_valid(&file.path, strategy).await
+            }
+            Self::ImmutablePath { path } => {
+                file_system_info.classify_path(path) == SnapshotPathClassification::Immutable
+            }
+            Self::ManagedPath(snapshot) => {
+                matches!(
+                    file_system_info.classify_path(&snapshot.path),
+                    SnapshotPathClassification::Managed(_)
+                ) && snapshot.is_valid()
+            }
+        }
+    }
+
+    fn is_valid_sync(&self, strategy: SnapshotStrategy, file_system_info: &FileSystemInfo) -> bool {
+        match self {
+            Self::File(file) => {
+                file_system_info.file_snapshot_applies(&file.path)
+                    && file.snapshot.is_valid_sync(&file.path, strategy)
+            }
+            Self::ImmutablePath { path } => {
+                file_system_info.classify_path(path) == SnapshotPathClassification::Immutable
+            }
+            Self::ManagedPath(snapshot) => {
+                matches!(
+                    file_system_info.classify_path(&snapshot.path),
+                    SnapshotPathClassification::Managed(_)
+                ) && snapshot.is_valid()
+            }
+        }
     }
 }
 
@@ -326,6 +559,56 @@ impl FileSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ManagedPathSnapshot {
+    path: PathBuf,
+    root: PathBuf,
+    state: ManagedItemState,
+}
+
+impl ManagedPathSnapshot {
+    fn create(path: &Path, boundary: &ManagedPathBoundary) -> Option<Self> {
+        let root = managed_item_root(path, boundary)?;
+        let state = ManagedItemState::create(&root)?;
+        Some(Self {
+            path: path.to_path_buf(),
+            state,
+            root,
+        })
+    }
+
+    fn is_valid(&self) -> bool {
+        ManagedItemState::create(&self.root).is_some_and(|state| state == self.state)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum ManagedItemState {
+    NodeModules,
+    GroupingFolder,
+    Package { name: String, version: String },
+}
+
+impl ManagedItemState {
+    fn create(root: &Path) -> Option<Self> {
+        if path_file_name(root) == Some("node_modules") {
+            return Some(Self::NodeModules);
+        }
+
+        if path_file_name(root).is_some_and(|name| name.starts_with('@')) {
+            return Some(Self::GroupingFolder);
+        }
+
+        let package_json = root.join("package.json");
+        let source = fs::read(&package_json).ok()?;
+        let json = serde_json::from_slice::<serde_json::Value>(&source).ok()?;
+        let name = json.get("name")?.as_str()?.to_string();
+        let version = json.get("version")?.as_str()?.to_string();
+
+        Some(Self::Package { name, version })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SnapshottedFile {
     path: PathBuf,
     snapshot: FileSnapshot,
@@ -336,6 +619,93 @@ fn normalize_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     paths.sort();
     paths.dedup();
     paths
+}
+
+fn managed_item_root(path: &Path, boundary: &ManagedPathBoundary) -> Option<PathBuf> {
+    match boundary {
+        ManagedPathBoundary::NodeModules => managed_node_modules_item_root(path).flatten(),
+        ManagedPathBoundary::Path(boundary) => managed_node_modules_item_root(path)
+            .flatten()
+            .or_else(|| nearest_package_root_within(path, boundary))
+            .or_else(|| Some(boundary.clone())),
+    }
+}
+
+fn managed_node_modules_item_root(path: &Path) -> Option<Option<PathBuf>> {
+    let components = path.components().collect::<Vec<_>>();
+    let node_modules_index =
+        components
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, component)| {
+                (component.as_os_str() == "node_modules").then_some(index)
+            })?;
+    let item_index = node_modules_index + 1;
+    if item_index >= components.len() {
+        return Some(Some(path_prefix(path, node_modules_index + 1)));
+    }
+
+    let item_name = components[item_index].as_os_str().to_string_lossy();
+    if item_name.starts_with('.') {
+        return Some(None);
+    }
+
+    if item_name.starts_with('@') {
+        let package_index = item_index + 1;
+        if package_index >= components.len() {
+            return Some(Some(path_prefix(path, item_index + 1)));
+        }
+
+        let package_name = components[package_index].as_os_str().to_string_lossy();
+        if package_name.starts_with('.') {
+            return Some(None);
+        }
+        return Some(Some(path_prefix(path, package_index + 1)));
+    }
+
+    Some(Some(path_prefix(path, item_index + 1)))
+}
+
+fn nearest_package_root_within(path: &Path, boundary: &Path) -> Option<PathBuf> {
+    let mut current = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+
+    loop {
+        if !current.starts_with(boundary) {
+            return None;
+        }
+        if current.join("package.json").exists() {
+            return Some(current);
+        }
+        if current == boundary || !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn path_prefix(path: &Path, len: usize) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    for component in path.components().take(len) {
+        prefix.push(component.as_os_str());
+    }
+    prefix
+}
+
+fn has_component(path: &Path, name: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == name)
+}
+
+fn path_file_name(path: &Path) -> Option<&str> {
+    path.file_name()?.to_str()
+}
+
+fn normalize_path_for_matching(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn hash_bytes(source: &[u8]) -> u64 {
@@ -382,7 +752,213 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn default_managed_node_modules_snapshots_follow_package_version()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let module = temp.path().join("node_modules/pkg/index.js");
+        let package_json = temp.path().join("node_modules/pkg/package.json");
+        write(&module, "export const value = 'before';")?;
+        write(&package_json, r#"{"name":"pkg","version":"1.0.0"}"#)?;
+        let source = fs::read_to_string(&module)?;
+        let file_system_info = FileSystemInfo::new();
+        let snapshot = file_system_info
+            .create_file_snapshot(&module, &source, SnapshotStrategy::hash())
+            .await?;
+
+        write(&module, "export const value = 'after';")?;
+        assert!(
+            file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        write(&package_json, r#"{"name":"pkg","version":"2.0.0"}"#)?;
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unmanaged_paths_override_default_managed_paths()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let package_root = temp.path().join("node_modules/pkg");
+        let module = package_root.join("index.js");
+        write(&module, "export const value = 'before';")?;
+        write(
+            package_root.join("package.json"),
+            r#"{"name":"pkg","version":"1.0.0"}"#,
+        )?;
+
+        let mut options = SnapshotOptions::default();
+        options
+            .unmanaged_paths
+            .push(SnapshotPathPattern::Path(package_root));
+        let file_system_info = FileSystemInfo::from_snapshot_options(&options);
+        let source = fs::read_to_string(&module)?;
+        let snapshot = file_system_info
+            .create_file_snapshot(&module, &source, SnapshotStrategy::hash())
+            .await?;
+
+        write(&module, "export const value = 'after';")?;
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_managed_paths_do_not_use_package_roots_above_the_matched_path()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let managed_path = temp.path().join("managed");
+        let module = managed_path.join("index.js");
+        let root_package_json = temp.path().join("package.json");
+        write(&module, "export const value = 'before';")?;
+        write(
+            &root_package_json,
+            r#"{"name":"workspace","version":"1.0.0"}"#,
+        )?;
+
+        let mut options = SnapshotOptions::default();
+        options.managed_paths = vec![SnapshotPathPattern::Path(managed_path.clone())];
+        let file_system_info = FileSystemInfo::from_snapshot_options(&options);
+        let source = fs::read_to_string(&module)?;
+        let snapshot = file_system_info
+            .create_file_snapshot(&module, &source, SnapshotStrategy::hash())
+            .await?;
+
+        write(
+            &root_package_json,
+            r#"{"name":"workspace","version":"2.0.0"}"#,
+        )?;
+        assert!(
+            file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        write(
+            managed_path.join("package.json"),
+            r#"{"name":"managed","version":"1.0.0"}"#,
+        )?;
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_regex_paths_use_the_first_capture_as_the_managed_item()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let package_root = temp.path().join("managed/pkg");
+        let module = package_root.join("index.js");
+        let package_json = package_root.join("package.json");
+        write(&module, "export const value = 'before';")?;
+        write(&package_json, r#"{"name":"pkg","version":"1.0.0"}"#)?;
+
+        let mut options = SnapshotOptions::default();
+        options.managed_paths = vec![SnapshotPathPattern::Regex {
+            source: format!(
+                "({})",
+                regex::escape(&normalize_path_for_matching(&package_root))
+            ),
+            flags: String::new(),
+        }];
+        let file_system_info = FileSystemInfo::from_snapshot_options(&options);
+        let source = fs::read_to_string(&module)?;
+        let snapshot = file_system_info
+            .create_file_snapshot(&module, &source, SnapshotStrategy::hash())
+            .await?;
+
+        write(&module, "export const value = 'after';")?;
+        assert!(
+            file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        write(&package_json, r#"{"name":"pkg","version":"2.0.0"}"#)?;
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_managed_packages_fall_back_to_file_snapshots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let module = temp.path().join("node_modules/pkg/index.js");
+        write(&module, "export const value = 'before';")?;
+        write(
+            temp.path().join("node_modules/pkg/package.json"),
+            r#"{"name":"pkg"}"#,
+        )?;
+        let source = fs::read_to_string(&module)?;
+        let file_system_info = FileSystemInfo::new();
+        let snapshot = file_system_info
+            .create_file_snapshot(&module, &source, SnapshotStrategy::hash())
+            .await?;
+
+        write(&module, "export const value = 'after';")?;
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn immutable_regex_paths_are_recorded_without_file_validation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let module = temp.path().join("node_modules/pkg/index.js");
+        write(&module, "export const value = 'before';")?;
+
+        let mut options = SnapshotOptions::default();
+        options.immutable_paths.push(SnapshotPathPattern::Regex {
+            source: "NODE_MODULES.PKG".to_string(),
+            flags: "i".to_string(),
+        });
+        let file_system_info = FileSystemInfo::from_snapshot_options(&options);
+        let source = fs::read_to_string(&module)?;
+        let snapshot = file_system_info
+            .create_file_snapshot(&module, &source, SnapshotStrategy::hash())
+            .await?;
+
+        write(&module, "export const value = 'after';")?;
+        assert!(
+            file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
     fn write(path: impl AsRef<Path>, source: &str) -> std::io::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(path, source)
     }
 }

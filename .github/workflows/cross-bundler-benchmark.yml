@@ -40,6 +40,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Unpack JavaScript API
+        env:
+          UNPACK_NATIVE_PROFILE: release
         run: pnpm --filter @unpack-js/core build
 
       - name: Checkout fixed Turbopack source

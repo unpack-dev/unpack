@@ -86,6 +86,15 @@ pub struct NativeStatsJson {
     pub assets: Vec<NativeAsset>,
     #[napi(js_name = "outputPath")]
     pub output_path: String,
+    #[napi(js_name = "watchDependencies")]
+    pub watch_dependencies: NativeWatchDependencies,
+}
+
+#[napi(object)]
+pub struct NativeWatchDependencies {
+    pub files: Vec<String>,
+    pub contexts: Vec<String>,
+    pub missing: Vec<String>,
 }
 
 #[napi(object)]
@@ -98,6 +107,11 @@ pub struct NativeInfrastructureError {
 pub struct NativeRunResult {
     pub error: Option<NativeInfrastructureError>,
     pub stats: Option<NativeStatsJson>,
+}
+
+#[napi(object)]
+pub struct NativeFlushResult {
+    pub error: Option<NativeInfrastructureError>,
 }
 
 #[napi(js_name = "createCompiler")]
@@ -118,6 +132,13 @@ impl NativeCompiler {
         AsyncTask::new(RunCompilerTask {
             compiler: self.compiler.clone(),
             output_path: self.output_path.clone(),
+        })
+    }
+
+    #[napi(js_name = "flushCache")]
+    pub fn flush_cache(&self) -> AsyncTask<FlushCacheTask> {
+        AsyncTask::new(FlushCacheTask {
+            compiler: self.compiler.clone(),
         })
     }
 
@@ -190,6 +211,10 @@ pub struct RunCompilerTask {
     output_path: PathBuf,
 }
 
+pub struct FlushCacheTask {
+    compiler: Option<Arc<Compiler>>,
+}
+
 impl Task for RunCompilerTask {
     type Output = NativeRunResult;
     type JsValue = NativeRunResult;
@@ -199,6 +224,36 @@ impl Task for RunCompilerTask {
             self.compiler.as_deref(),
             &self.output_path,
         ))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for FlushCacheTask {
+    type Output = NativeFlushResult;
+    type JsValue = NativeFlushResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let Some(compiler) = self.compiler.as_deref() else {
+            return Ok(NativeFlushResult {
+                error: Some(NativeInfrastructureError {
+                    name: "CompilerClosedError".to_string(),
+                    message: "compiler is closed".to_string(),
+                }),
+            });
+        };
+
+        Ok(match compiler.flush_cache() {
+            Ok(()) => NativeFlushResult { error: None },
+            Err(message) => NativeFlushResult {
+                error: Some(NativeInfrastructureError {
+                    name: "CacheFlushError".to_string(),
+                    message,
+                }),
+            },
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -238,6 +293,7 @@ fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> Native
             warnings: Vec::new(),
             assets: compilation.assets().iter().map(asset_stats).collect(),
             output_path: output_path.to_string_lossy().into_owned(),
+            watch_dependencies: watch_dependencies(compilation.watch_dependencies()),
         }),
     }
 }
@@ -321,5 +377,25 @@ fn asset_stats(asset: &Asset) -> NativeAsset {
     NativeAsset {
         name: asset.filename.clone(),
         size: asset.source.len().try_into().unwrap_or(u32::MAX),
+    }
+}
+
+fn watch_dependencies(dependencies: &unpack_core::WatchDependencies) -> NativeWatchDependencies {
+    NativeWatchDependencies {
+        files: dependencies
+            .files()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        contexts: dependencies
+            .contexts()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        missing: dependencies
+            .missing()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
     }
 }

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -210,30 +210,332 @@ test("accepts filesystem cache option shape", async () => {
     "src/index.js": "export const value = 1;",
     "config/build.js": "export default {};"
   });
+  const cacheOptions = {
+    type: "filesystem" as const,
+    cacheDirectory: ".cache/unpack",
+    name: "test-cache",
+    version: "v1",
+    buildDependencies: {
+      config: ["./config/build.js"]
+    },
+    maxMemoryGenerations: 2,
+    idleTimeout: 10
+  };
+  const snapshot = {
+    module: { timestamp: true, hash: false },
+    buildDependencies: { timestamp: true, hash: true }
+  };
 
   try {
-    const { err, stats } = await runCompiler({
+    const firstCompiler = unpack({
       context: fixture,
       entry: "./src/index.js",
-      cache: {
-        type: "filesystem",
-        cacheDirectory: ".cache/unpack",
-        name: "test-cache",
-        version: "v1",
-        buildDependencies: {
-          config: ["./config/build.js"]
-        },
-        maxMemoryGenerations: 2,
-        idleTimeout: 10
-      },
-      snapshot: {
-        module: { timestamp: true, hash: false },
-        buildDependencies: { timestamp: true, hash: true }
-      }
+      cache: cacheOptions,
+      snapshot
     });
+    const first = await runExistingCompiler(firstCompiler);
+    await closeCompiler(firstCompiler);
 
-    assert.equal(err, null);
-    assert.equal(stats?.hasErrors(), false);
+    assert.equal(first.err, null);
+    assert.equal(first.stats?.hasErrors(), false);
+    assert.match(
+      await readFile(join(fixture, ".cache/unpack/test-cache/container.json"), "utf8"),
+      /UNPACK_PERSISTENT_CACHE/
+    );
+    assert.ok(await readFile(join(fixture, ".cache/unpack/test-cache/packs/modules.cbor")));
+
+    const secondCompiler = unpack({
+      context: fixture,
+      entry: "./src/index.js",
+      cache: cacheOptions,
+      snapshot
+    });
+    const second = await runExistingCompiler(secondCompiler);
+    await closeCompiler(secondCompiler);
+    assert.equal(second.err, null);
+    assert.deepEqual(second.stats?.toJson(), first.stats?.toJson());
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("filesystem cache flushes after idle timeout", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/idle");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeout: 30
+    }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+    await assert.rejects(readFile(join(cacheLocation, "container.json"), "utf8"));
+
+    await delay(100);
+    assert.match(
+      await readFile(join(cacheLocation, "container.json"), "utf8"),
+      /UNPACK_PERSISTENT_CACHE/
+    );
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("compiler close waits for pending filesystem cache flush", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/close");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeout: 60_000
+    }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+
+    await closeCompiler(compiler);
+    assert.match(
+      await readFile(join(cacheLocation, "container.json"), "utf8"),
+      /UNPACK_PERSISTENT_CACHE/
+    );
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch performs initial build and close keeps compiler reusable", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    const result = await first;
+    assert.equal(result.err, null);
+    assert.equal(result.stats?.hasErrors(), false);
+
+    await closeWatching(watching);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch invalidate triggers rebuild", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const entry = join(fixture, "src/index.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    const second = results.next();
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(entry, changedTime, changedTime);
+    watching.invalidate();
+
+    assert.equal((await second).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("stats exposes watch dependency sets", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import './dep'; import './missing'; export const value = dep;",
+    "src/dep.js": "export const dep = 'dep';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+    const json = result.stats?.toJson();
+    const sourceRoot = await realpath(join(fixture, "src"));
+    assert.ok(json);
+    assert.equal(json.errors.length, 1);
+    assert.deepEqual(json.watchDependencies.files.sort(), [
+      join(sourceRoot, "dep.js"),
+      join(sourceRoot, "index.js")
+    ]);
+    assert.deepEqual(json.watchDependencies.contexts, []);
+    assert.deepEqual(json.watchDependencies.missing, [join(sourceRoot, "missing")]);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch rebuilds when a watched dependency changes", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from './dep'; export const result = value;",
+    "src/dep.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const dependency = join(fixture, "src/dep.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    const second = results.next();
+    await writeFile(dependency, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(dependency, changedTime, changedTime);
+
+    assert.equal((await second).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch aggregateTimeout coalesces rapid changes", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'initial';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const entry = join(fixture, "src/index.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({ aggregateTimeout: 50 }, results.handler);
+    assert.equal((await first).err, null);
+
+    const second = results.next();
+    await writeFile(entry, "export const value = 'first';", { encoding: "utf8" });
+    const firstTime = new Date(Date.now() + 2000);
+    await utimes(entry, firstTime, firstTime);
+    await writeFile(entry, "export const value = 'second';", { encoding: "utf8" });
+    const secondTime = new Date(Date.now() + 4000);
+    await utimes(entry, secondTime, secondTime);
+
+    assert.equal((await second).err, null);
+    await delay(150);
+    assert.equal(results.calls(), 2);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /second/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch ignored string prevents rebuilds from ignored files", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from './ignored'; export const result = value;",
+    "src/ignored.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const ignored = join(fixture, "src/ignored.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({ ignored: "ignored.js" }, results.handler);
+    assert.equal((await first).err, null);
+
+    await writeFile(ignored, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(ignored, changedTime, changedTime);
+    await delay(150);
+
+    assert.equal(results.calls(), 1);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch poll option rebuilds through polling", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const entry = join(fixture, "src/index.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({ aggregateTimeout: 0, poll: 20 }, results.handler);
+    assert.equal((await first).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    const second = results.next();
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(entry, changedTime, changedTime);
+
+    assert.equal((await second).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch conflicts with run watch and compiler close", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+
+    assert.equal((await runExistingCompiler(compiler)).err?.name, "ConcurrentRunError");
+
+    const failedWatch = collectWatchResults();
+    const failed = failedWatch.next();
+    compiler.watch({}, failedWatch.handler);
+    assert.equal((await failed).err?.name, "ConcurrentRunError");
+
+    const closeResult = await closeCompilerResult(compiler);
+    assert.equal(closeResult?.name, "CompilerRunningError");
+
+    await closeWatching(watching);
+    await closeCompiler(compiler);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -367,6 +669,82 @@ test("cache and snapshot option validation throws synchronously", () => {
   );
 });
 
+test("watch option validation throws synchronously", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            // @ts-expect-error intentionally testing runtime validation
+            followSymlinks: false
+          },
+          () => {}
+        ),
+      /watchOptions contains unknown option 'followSymlinks'/
+    );
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            // @ts-expect-error intentionally testing runtime validation
+            ignored: 1
+          },
+          () => {}
+        ),
+      /watchOptions.ignored must be a string or RegExp/
+    );
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            // @ts-expect-error intentionally testing runtime validation
+            ignored: ["ok", 1]
+          },
+          () => {}
+        ),
+      /watchOptions.ignored\[1\] must be a string or RegExp/
+    );
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            // @ts-expect-error intentionally testing runtime validation
+            poll: false
+          },
+          () => {}
+        ),
+      /watchOptions.poll must be true or a positive integer/
+    );
+    assert.throws(
+      () =>
+        compiler.watch(
+          {
+            poll: 0
+          },
+          () => {}
+        ),
+      /watchOptions.poll must be a positive integer/
+    );
+
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch(
+      { ignored: [/unused/, "not-used"], poll: true },
+      results.handler
+    );
+    assert.equal((await first).err, null);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 async function runCompiler(options: Parameters<typeof unpack>[0]) {
   return runExistingCompiler(unpack(options));
 }
@@ -390,6 +768,48 @@ async function closeCompiler(compiler: ReturnType<typeof unpack>) {
         resolve();
       }
     });
+  });
+}
+
+async function closeCompilerResult(compiler: ReturnType<typeof unpack>) {
+  return new Promise<Error | null>((resolve) => {
+    compiler.close((err) => {
+      resolve(err);
+    });
+  });
+}
+
+async function closeWatching(watching: ReturnType<ReturnType<typeof unpack>["watch"]>) {
+  await new Promise<void>((resolve, reject) => {
+    watching.close((err) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+function collectWatchResults() {
+  const resolvers: Array<(result: { err: Error | null; stats?: Stats }) => void> = [];
+  let calls = 0;
+  return {
+    handler: (err: Error | null, stats?: Stats) => {
+      calls += 1;
+      resolvers.shift()?.({ err, stats });
+    },
+    next: () =>
+      new Promise<{ err: Error | null; stats?: Stats }>((resolve) => {
+        resolvers.push(resolve);
+      }),
+    calls: () => calls
+  };
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
   });
 }
 

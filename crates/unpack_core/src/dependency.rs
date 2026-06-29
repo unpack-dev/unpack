@@ -1,6 +1,8 @@
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SourceRange {
     pub start: u32,
     pub end: u32,
@@ -23,7 +25,7 @@ impl SourceRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AsyncDependenciesBlock {
     dependencies: Vec<Dependency>,
 }
@@ -38,7 +40,7 @@ impl AsyncDependenciesBlock {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Dependency {
     Entry(EntryDependency),
     HarmonyImportSideEffect(HarmonyImportSideEffectDependency),
@@ -161,7 +163,7 @@ impl Dependency {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModuleDependency {
     pub request: String,
     pub user_request: String,
@@ -197,7 +199,7 @@ impl fmt::Debug for ModuleDependency {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntryDependency {
     pub module: ModuleDependency,
 }
@@ -210,7 +212,7 @@ impl EntryDependency {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarmonyImportSideEffectDependency {
     pub module: ModuleDependency,
     pub import_var: Option<String>,
@@ -231,7 +233,7 @@ impl HarmonyImportSideEffectDependency {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarmonyImportSpecifierDependency {
     pub module: ModuleDependency,
     pub ids: Vec<String>,
@@ -258,7 +260,7 @@ impl HarmonyImportSpecifierDependency {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarmonyExportHeaderDependency {
     pub declaration_range: Option<SourceRange>,
     pub statement_range: SourceRange,
@@ -273,7 +275,7 @@ impl HarmonyExportHeaderDependency {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarmonyExportSpecifierDependency {
     pub id: String,
     pub name: String,
@@ -288,7 +290,7 @@ impl HarmonyExportSpecifierDependency {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarmonyExportExpressionDependency {
     pub range: SourceRange,
     pub statement_range: SourceRange,
@@ -309,7 +311,7 @@ impl HarmonyExportExpressionDependency {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarmonyExportImportedSpecifierDependency {
     pub module: ModuleDependency,
     pub ids: Vec<String>,
@@ -337,7 +339,7 @@ impl HarmonyExportImportedSpecifierDependency {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConstDependency {
     pub expression: String,
     pub range: SourceRange,
@@ -352,10 +354,10 @@ impl ConstDependency {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NullDependency;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ImportDependency {
     pub module: ModuleDependency,
 }
@@ -378,7 +380,7 @@ impl ImportDependency {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DependencyKind {
     Entry,
     StaticImport,

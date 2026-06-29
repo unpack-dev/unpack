@@ -37,7 +37,7 @@ impl NormalModuleFactory {
             .request()
             .expect("module dependency should have a request");
         let resolve_request = ResolveRequest::new(context, request);
-        if let Some(record) = self.cache.get_resolve_record(&resolve_request) {
+        if let Some(record) = self.cache.get(&resolve_request) {
             if record.is_valid(self.resolve_snapshot_strategy).await {
                 return Ok(FactorizedModule::from_resolve_record(record));
             }
@@ -57,8 +57,7 @@ impl NormalModuleFactory {
             self.resolve_snapshot_strategy,
         )
         .await?;
-        self.cache
-            .store_resolve_record(resolve_request, record.clone());
+        self.cache.store(resolve_request, record.clone());
 
         Ok(FactorizedModule::from_resolve_record(record))
     }

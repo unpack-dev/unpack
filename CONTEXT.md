@@ -1,12 +1,12 @@
 # Unpack
 
-Unpack is a JavaScript bundling project that aims for webpack-like outcomes without treating webpack compatibility as part of its product contract.
+Unpack is a JavaScript bundling project that uses webpack's architecture as its default reference model while producing webpack-like bundling outcomes.
 
 ## Language
 
 **Webpack-like**:
-Similar in purpose and workflow to webpack, but free to use its own public API, configuration model, loader model, and plugin model.
-_Avoid_: Webpack-compatible
+Similar in purpose, workflow, and architecture to webpack, using webpack's bundler concepts as the default design reference unless a different design has a specific advantage.
+_Avoid_: Unpack-native by default, byte-for-byte webpack clone
 
 **Bundle**:
 The emitted JavaScript and related assets produced from an application's dependency graph.
@@ -21,12 +21,12 @@ The filesystem directory where a compiler run writes emitted assets for JavaScri
 _Avoid_: Dist directory, build folder
 
 **Webpack-shaped Output**:
-Bundle output whose file structure and runtime semantics resemble webpack output, including concepts such as module tables, module cache, entry bundles, and asynchronous chunk loading, without promising byte-for-byte output matching or webpack API compatibility.
-_Avoid_: Webpack-compatible output, snapshot-compatible webpack output
+Bundle output whose file structure and runtime semantics resemble webpack output, including concepts such as module tables, module cache, entry bundles, and asynchronous chunk loading, while treating byte-for-byte output matching and public API shape as separate decisions.
+_Avoid_: Byte-for-byte webpack output, snapshot-compatible webpack output
 
 **JavaScript API**:
 The Node.js-facing programmable API for configuring and running Unpack from JavaScript.
-_Avoid_: Rust API, webpack-compatible API
+_Avoid_: Rust API, full webpack configuration API
 
 **JavaScript API Test**:
 A test authored from the JavaScript side that exercises Unpack through the public JavaScript API boundary.

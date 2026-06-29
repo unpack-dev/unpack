@@ -1,16 +1,16 @@
 # Webpack implementation differences
 
-This note compares the current Unpack implementation with the local webpack checkout at `/Users/bytedance/github/webpack` commit `10f5fccb2`. The goal is not webpack compatibility. The goal is to separate intentional webpack-like scope choices from parity gaps that affect Unpack's own semantics.
+This note compares the current Unpack implementation with the local webpack checkout at `/Users/bytedance/github/webpack` commit `10f5fccb2`. The goal is to use webpack's bundler architecture as the default reference model, then separate justified scope choices from parity gaps that affect Unpack's own semantics.
 
-## Deliberate product boundary
+## Architectural alignment principle
 
-Unpack is intentionally webpack-like, not webpack-compatible. Existing ADRs already define this boundary:
+Unpack should reuse webpack's architecture, terminology, and phase boundaries where they fit the project. Existing ADRs define that direction:
 
-- `0001-webpack-like-not-compatible.md`: no compatibility promise for webpack configuration, loader, plugin, or compilation APIs.
+- `0001-reuse-webpack-architecture-by-default.md`: default to webpack-aligned compiler, graph, dependency, runtime, cache, and snapshot architecture.
 - `0018-use-webpack-like-compilation-pipeline.md`: keep recognizable make, chunk graph, code generation, and asset creation phases.
 - `0031-test-webpack-shaped-output-by-structure-and-semantics.md`: test structure and runtime semantics, not byte-for-byte webpack snapshots.
 
-That means differences should not automatically be treated as bugs. A difference is only a current defect when it breaks a semantic Unpack has chosen to provide.
+That means differences should be treated as design debt until they have a concrete reason: a deliberately smaller first scope, a Rust-specific implementation advantage, or a better architecture recorded near the choice. Public API compatibility remains an explicit product decision, but it should not be used as a reason to ignore useful webpack architecture.
 
 ## Compiler and compilation lifecycle
 
@@ -24,9 +24,9 @@ Webpack's lifecycle is much larger: `Compiler.run` guards concurrent runs, calls
 
 Necessity:
 
-- Keeping Unpack's lifecycle small is intentional while the public API is still narrow.
-- Matching webpack's hook graph, records, cache idle state, and plugin lifecycle is not necessary unless Unpack decides to support a plugin compatibility layer.
-- The phase names are still useful because they provide good implementation boundaries and future cache boundaries.
+- Keeping Unpack's lifecycle small is a first-scope choice, not a different architectural direction.
+- Webpack's hook graph, records, cache idle state, and plugin lifecycle should remain the reference model for future extension points, but they do not need to be fully implemented before Unpack has plugins, records, or the corresponding cache features.
+- The phase names are useful because they preserve webpack's implementation boundaries and future cache boundaries.
 
 ## Normal module factory
 
@@ -38,7 +38,7 @@ Necessity:
 
 - The minimal Unpack factory is an intentional scope reduction.
 - The current `ModuleIdentity` shape is still useful because loaders, layers, module types, and query/fragment behavior can be added without redefining graph identity.
-- Implementing webpack's factory hook surface would be a compatibility commitment and should not be copied by default.
+- Webpack's factory responsibilities remain the reference model; Unpack should add them as the corresponding features arrive instead of inventing unrelated boundaries.
 
 ## Make phase and errors
 
@@ -48,7 +48,7 @@ Webpack uses separate async queues for factorize, add, build, rebuild, and proce
 
 Necessity:
 
-- Rust-native queues are fine; copying webpack's `AsyncQueue` API is not needed.
+- Rust-native queues are fine when they preserve webpack's factorize, add, build, rebuild, and process-dependencies responsibilities.
 - The current stop-on-first module-processing error is a real parity gap against Unpack's own ADRs `0037`, `0042`, and `0052`.
 - Keeping failed modules in the graph and generating throwing module factories is necessary if the JavaScript API is expected to mirror webpack-like completed-compilation error semantics.
 
@@ -60,7 +60,7 @@ Webpack supports a much wider parser surface: CommonJS, AMD, `import.meta`, cont
 
 Necessity:
 
-- The minimal ESM dependency taxonomy is necessary and useful; it keeps Unpack internally aligned with webpack concepts without inheriting webpack's public API.
+- The minimal ESM dependency taxonomy is necessary and useful because it keeps Unpack internally aligned with webpack concepts.
 - Rejecting context-module dynamic imports is an intentional first-scope limitation.
 - CommonJS, import attributes, magic comments, and import modes are future feature choices, not required for the current ESM-first bundler.
 
@@ -125,9 +125,8 @@ Necessity:
 
 ## Current priority classification
 
-Intentional differences to keep:
+Justified first-scope differences:
 
-- No webpack-compatible configuration, loader, plugin, or compilation API.
 - Minimal Rust-native compiler and normal module factory.
 - ESM-first parser surface.
 - Fixed Node require chunk loading target.

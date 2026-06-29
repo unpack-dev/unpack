@@ -53,8 +53,122 @@ impl SnapshotStrategy {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileSystemInfo;
+
+impl FileSystemInfo {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+
+    pub(crate) async fn create_file_snapshot(
+        &self,
+        path: &Path,
+        source: &str,
+        strategy: SnapshotStrategy,
+    ) -> Result<Snapshot> {
+        Snapshot::create_file(path, source, strategy).await
+    }
+
+    pub(crate) async fn create_snapshot(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        strategy: SnapshotStrategy,
+    ) -> Result<Snapshot> {
+        Snapshot::create(paths, strategy).await
+    }
+
+    pub(crate) fn create_snapshot_sync(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        strategy: SnapshotStrategy,
+    ) -> Result<Snapshot> {
+        Snapshot::create_sync(paths, strategy)
+    }
+
+    pub(crate) async fn is_snapshot_valid(
+        &self,
+        snapshot: &Snapshot,
+        strategy: SnapshotStrategy,
+    ) -> bool {
+        snapshot.is_valid(strategy).await
+    }
+
+    pub(crate) fn is_snapshot_valid_sync(
+        &self,
+        snapshot: &Snapshot,
+        strategy: SnapshotStrategy,
+    ) -> bool {
+        snapshot.is_valid_sync(strategy)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct FileSnapshot {
+pub(crate) struct Snapshot {
+    files: Vec<SnapshottedFile>,
+}
+
+impl Snapshot {
+    async fn create_file(path: &Path, source: &str, strategy: SnapshotStrategy) -> Result<Self> {
+        Ok(Self {
+            files: vec![SnapshottedFile {
+                path: path.to_path_buf(),
+                snapshot: FileSnapshot::create(path, source, strategy).await?,
+            }],
+        })
+    }
+
+    async fn create(
+        paths: impl IntoIterator<Item = PathBuf>,
+        strategy: SnapshotStrategy,
+    ) -> Result<Self> {
+        let paths = normalize_paths(paths);
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            files.push(SnapshottedFile {
+                snapshot: FileSnapshot::create_from_path(&path, strategy).await?,
+                path,
+            });
+        }
+        Ok(Self { files })
+    }
+
+    fn create_sync(
+        paths: impl IntoIterator<Item = PathBuf>,
+        strategy: SnapshotStrategy,
+    ) -> Result<Self> {
+        let paths = normalize_paths(paths);
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            files.push(SnapshottedFile {
+                snapshot: FileSnapshot::create_from_file_sync(&path, strategy)?,
+                path,
+            });
+        }
+        Ok(Self { files })
+    }
+
+    async fn is_valid(&self, strategy: SnapshotStrategy) -> bool {
+        for file in &self.files {
+            if !file.snapshot.is_valid(&file.path, strategy).await {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn is_valid_sync(&self, strategy: SnapshotStrategy) -> bool {
+        for file in &self.files {
+            if !file.snapshot.is_valid_sync(&file.path, strategy) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FileSnapshot {
     exists: bool,
     modified: Option<SystemTime>,
     source_hash: Option<u64>,
@@ -210,43 +324,16 @@ impl FileSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct FileSetSnapshot {
-    files: Vec<SnapshottedFile>,
-}
-
-impl FileSetSnapshot {
-    pub(crate) async fn create(
-        paths: impl IntoIterator<Item = PathBuf>,
-        strategy: SnapshotStrategy,
-    ) -> Result<Self> {
-        let mut paths = paths.into_iter().collect::<Vec<_>>();
-        paths.sort();
-        paths.dedup();
-
-        let mut files = Vec::with_capacity(paths.len());
-        for path in paths {
-            files.push(SnapshottedFile {
-                snapshot: FileSnapshot::create_from_path(&path, strategy).await?,
-                path,
-            });
-        }
-        Ok(Self { files })
-    }
-
-    pub(crate) async fn is_valid(&self, strategy: SnapshotStrategy) -> bool {
-        for file in &self.files {
-            if !file.snapshot.is_valid(&file.path, strategy).await {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SnapshottedFile {
     path: PathBuf,
     snapshot: FileSnapshot,
+}
+
+fn normalize_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn hash_bytes(source: &[u8]) -> u64 {
@@ -256,4 +343,44 @@ fn hash_bytes(source: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn file_system_info_validates_aggregate_file_snapshots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("module.js");
+        write(&path, "export const value = 'before';")?;
+        let source = fs::read_to_string(&path)?;
+        let file_system_info = FileSystemInfo::new();
+        let snapshot = file_system_info
+            .create_file_snapshot(&path, &source, SnapshotStrategy::hash())
+            .await?;
+
+        assert!(
+            file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        write(&path, "export const value = 'after';")?;
+
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
+    fn write(path: impl AsRef<Path>, source: &str) -> std::io::Result<()> {
+        fs::write(path, source)
+    }
 }

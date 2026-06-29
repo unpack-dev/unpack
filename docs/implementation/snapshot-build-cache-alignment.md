@@ -87,7 +87,7 @@ Replace file-only snapshots with aggregate snapshot records.
 - Add context snapshots with directory modified time plus stable directory-entry digest in timestamp mode.
 - Add missing existence snapshots that only validate absence/presence.
 - Add snapshot merge with webpack-like map override and set union behavior.
-- Keep the serialized snapshot schema Unpack-private and bump cache schema version when persistent DTOs change.
+- Keep the serialized snapshot schema Unpack-private while relying on cache magic, user cache version, and DTO deserialization failure to reject incompatible persistent cache data.
 
 Done when module, resolve, build-dependency, and resolve-build-dependency validation can all store the same aggregate snapshot type.
 

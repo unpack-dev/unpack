@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{AsyncDependenciesBlock, Dependency, Error, ExportsInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -106,7 +108,7 @@ impl Module {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModuleIdentity {
     pub module_type: ModuleType,
     pub resource: PathBuf,
@@ -129,7 +131,7 @@ impl ModuleIdentity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ModuleType {
     JavaScriptAuto,
 }

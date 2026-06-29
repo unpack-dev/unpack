@@ -6,9 +6,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cbor4ii = { workspace = true }
 futures = { workspace = true }
 rspack_resolver = { workspace = true }
 rspack_sources = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 swc_experimental_allocator = { workspace = true }
 swc_experimental_ecma_ast = { workspace = true }
 swc_experimental_ecma_parser = { workspace = true }

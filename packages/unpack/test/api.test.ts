@@ -210,30 +210,46 @@ test("accepts filesystem cache option shape", async () => {
     "src/index.js": "export const value = 1;",
     "config/build.js": "export default {};"
   });
+  const cacheOptions = {
+    type: "filesystem" as const,
+    cacheDirectory: ".cache/unpack",
+    name: "test-cache",
+    version: "v1",
+    buildDependencies: {
+      config: ["./config/build.js"]
+    },
+    maxMemoryGenerations: 2,
+    idleTimeout: 10
+  };
+  const snapshot = {
+    module: { timestamp: true, hash: false },
+    buildDependencies: { timestamp: true, hash: true }
+  };
 
   try {
-    const { err, stats } = await runCompiler({
+    const first = await runCompiler({
       context: fixture,
       entry: "./src/index.js",
-      cache: {
-        type: "filesystem",
-        cacheDirectory: ".cache/unpack",
-        name: "test-cache",
-        version: "v1",
-        buildDependencies: {
-          config: ["./config/build.js"]
-        },
-        maxMemoryGenerations: 2,
-        idleTimeout: 10
-      },
-      snapshot: {
-        module: { timestamp: true, hash: false },
-        buildDependencies: { timestamp: true, hash: true }
-      }
+      cache: cacheOptions,
+      snapshot
     });
 
-    assert.equal(err, null);
-    assert.equal(stats?.hasErrors(), false);
+    assert.equal(first.err, null);
+    assert.equal(first.stats?.hasErrors(), false);
+    assert.match(
+      await readFile(join(fixture, ".cache/unpack/test-cache/container.json"), "utf8"),
+      /UNPACK_PERSISTENT_CACHE/
+    );
+    assert.ok(await readFile(join(fixture, ".cache/unpack/test-cache/packs/modules.cbor")));
+
+    const second = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      cache: cacheOptions,
+      snapshot
+    });
+    assert.equal(second.err, null);
+    assert.deepEqual(second.stats?.toJson(), first.stats?.toJson());
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

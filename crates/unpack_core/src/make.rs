@@ -173,7 +173,7 @@ async fn process_request(
         .ok_or(Error::MissingModuleDirectory(add_result.module_id))?
         .to_path_buf();
 
-    if let Some(record) = services.module_build_cache.get_module_build(&identity) {
+    if let Some(record) = services.module_build_cache.get(&identity) {
         if record
             .is_valid(&resource, services.module_snapshot_strategy)
             .await
@@ -220,9 +220,7 @@ async fn process_request(
         .lock()
         .await
         .finish_build(add_result.module_id, parsed, source)?;
-    services
-        .module_build_cache
-        .store_module_build(identity, record);
+    services.module_build_cache.store(identity, record);
 
     Ok(children)
 }

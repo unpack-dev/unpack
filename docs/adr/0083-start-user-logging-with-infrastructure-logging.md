@@ -1,0 +1,11 @@
+# Start user logging with infrastructure logging
+
+Unpack's first user-facing logging surface will use an `infrastructureLogging` JavaScript option and follow webpack's infrastructure logging shape rather than adding logs to `Stats`. The first option subset will expose only `infrastructureLogging.level`, keeping output targets, logger-name filtering, colors, and append-only console behavior out of the first API. Unlike webpack's `info` default, Unpack's JavaScript API will default infrastructure logging to `none` so library usage remains quiet unless the caller opts into output.
+
+Rust will report infrastructure log events through the native run result, and the TypeScript wrapper will write enabled events through Node's `console` at JavaScript compiler lifecycle points and when replaying native events after each run or watch compilation completes. Each infrastructure log event will carry only a level, logger name, and message text in the first API. This avoids making the Rust core own user output policy, keeps cross-thread JavaScript callbacks out of the first implementation, and leaves webpack-style custom `console` support as a future extension.
+
+`none` is a configuration value rather than an event level. The enabled levels are cumulative: `error` enables errors only, `warn` enables errors and warnings, `info` adds informational messages, `log` adds normal log messages, and `verbose` enables every infrastructure log event.
+
+The first event set will stay at compiler and phase granularity. `info` will cover run or watch compilation start and completion plus cache flush start and completion. `warn` and `error` will cover infrastructure failures that are also represented through the existing callback error path. `verbose` may include make, chunk graph, asset creation, and cache summary phase messages, but it will not emit per-module resolve or build messages in the first implementation.
+
+This keeps `Stats` aligned with its deliberately small report surface while giving JavaScript API users a way to control compiler infrastructure messages before Unpack has a plugin or loader lifecycle that would justify a compilation logger surface. A future CLI can choose a noisier default without making the package API write to stdout or stderr by default.

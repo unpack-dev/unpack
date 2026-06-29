@@ -48,6 +48,22 @@ _Avoid_: First run, clean test
 A benchmark measurement taken after a prior build in the same benchmark job while preserving benchmark-owned cache state that the tool under test can reuse.
 _Avoid_: Incremental rebuild, watch rebuild
 
+**Tracing**:
+Internal execution signals captured for Unpack developers while maintaining or debugging the bundler itself.
+_Avoid_: User logging, stats logging, telemetry
+
+**Logging**:
+User-facing build messages exposed through the JavaScript API and controlled by user configuration.
+_Avoid_: Internal tracing, Rust debug output, diagnostics
+
+**Infrastructure Logging**:
+User-facing logging for compiler infrastructure activity, configured through the JavaScript API without adding log entries to `Stats`.
+_Avoid_: Stats logging, compilation logger, tracing
+
+**Infrastructure Log Event**:
+A user-facing infrastructure logging message with a level, logger name, and message text.
+_Avoid_: Trace event, stats entry, diagnostic
+
 **Module Graph**:
 The connected set of modules reachable from one or more entry points.
 _Avoid_: Dependency tree

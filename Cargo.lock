@@ -1216,6 +1216,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1226,6 +1227,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "tokio",
+ "tracing",
  "unpack_core",
 ]
 

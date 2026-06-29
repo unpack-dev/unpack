@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -370,6 +370,93 @@ test("watch invalidate triggers rebuild", async () => {
   }
 });
 
+test("stats exposes watch dependency sets", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import './dep'; import './missing'; export const value = dep;",
+    "src/dep.js": "export const dep = 'dep';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+    const json = result.stats?.toJson();
+    const sourceRoot = await realpath(join(fixture, "src"));
+    assert.ok(json);
+    assert.equal(json.errors.length, 1);
+    assert.deepEqual(json.watchDependencies.files.sort(), [
+      join(sourceRoot, "dep.js"),
+      join(sourceRoot, "index.js")
+    ]);
+    assert.deepEqual(json.watchDependencies.contexts, []);
+    assert.deepEqual(json.watchDependencies.missing, [join(sourceRoot, "missing")]);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch rebuilds when a watched dependency changes", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from './dep'; export const result = value;",
+    "src/dep.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const dependency = join(fixture, "src/dep.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    const second = results.next();
+    await writeFile(dependency, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(dependency, changedTime, changedTime);
+
+    assert.equal((await second).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch aggregateTimeout coalesces rapid changes", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'initial';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const entry = join(fixture, "src/index.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({ aggregateTimeout: 50 }, results.handler);
+    assert.equal((await first).err, null);
+
+    const second = results.next();
+    await writeFile(entry, "export const value = 'first';", { encoding: "utf8" });
+    const firstTime = new Date(Date.now() + 2000);
+    await utimes(entry, firstTime, firstTime);
+    await writeFile(entry, "export const value = 'second';", { encoding: "utf8" });
+    const secondTime = new Date(Date.now() + 4000);
+    await utimes(entry, secondTime, secondTime);
+
+    assert.equal((await second).err, null);
+    await delay(150);
+    assert.equal(results.calls(), 2);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /second/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("watch conflicts with run watch and compiler close", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"
@@ -575,14 +662,17 @@ async function closeWatching(watching: ReturnType<ReturnType<typeof unpack>["wat
 
 function collectWatchResults() {
   const resolvers: Array<(result: { err: Error | null; stats?: Stats }) => void> = [];
+  let calls = 0;
   return {
     handler: (err: Error | null, stats?: Stats) => {
+      calls += 1;
       resolvers.shift()?.({ err, stats });
     },
     next: () =>
       new Promise<{ err: Error | null; stats?: Stats }>((resolve) => {
         resolvers.push(resolve);
-      })
+      }),
+    calls: () => calls
   };
 }
 

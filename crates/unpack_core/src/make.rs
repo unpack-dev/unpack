@@ -387,6 +387,15 @@ impl BuildTask {
         };
         let process_dependencies =
             process_dependencies_task(self.module_id, &issuer_context, &parsed);
+
+        if !services.module_build_cache.is_enabled() {
+            state
+                .lock()
+                .await
+                .finish_build(self.module_id, parsed, source)?;
+            return Ok(process_dependencies.into_iter().collect());
+        }
+
         let snapshot =
             FileSnapshot::create(&self.resource, &source, services.module_snapshot_strategy)
                 .await?;

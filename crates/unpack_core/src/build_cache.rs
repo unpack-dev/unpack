@@ -336,8 +336,12 @@ where
     K: Eq + Hash,
     V: Clone,
 {
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.build_cache.options.kind != CacheKind::Disabled
+    }
+
     pub(crate) fn get(&self, key: &K) -> Option<V> {
-        if self.build_cache.options.kind == CacheKind::Disabled {
+        if !self.is_enabled() {
             return None;
         }
 
@@ -350,7 +354,7 @@ where
     }
 
     pub(crate) fn store(&self, key: K, value: V) {
-        if self.build_cache.options.kind == CacheKind::Disabled {
+        if !self.is_enabled() {
             return;
         }
 

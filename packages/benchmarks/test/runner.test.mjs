@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { adapters, applyTurbopackBuildCacheFlushPatch } from "../src/adapters.mjs";
 import { runBenchmark, toSummaryMarkdown } from "../src/runner.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -114,6 +115,95 @@ test("CLI accepts pnpm-style -- separator and writes JSON output", async () => {
     const report = JSON.parse(await readFile(outputJson, "utf8"));
     assert.equal(report.results[0].bundler, "turbopack");
     assert.equal(report.results[0].status, "unsupported");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("turbopack build enables persistent cache for warm measurements", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const repo = join(workspace, "next.js");
+    const binary = join(repo, "target", "release", "turbopack-cli");
+    const argsLog = join(repo, "turbopack-args.txt");
+    const fixtureContext = join(workspace, "fixture");
+    const cacheDir = join(workspace, "cache");
+
+    await mkdir(join(repo, "target", "release"), { recursive: true });
+    await mkdir(fixtureContext, { recursive: true });
+    await writeFile(
+      binary,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsLog}"\n`,
+      "utf8"
+    );
+    await chmod(binary, 0o755);
+
+    await adapters.turbopack.build({
+      fixture: {
+        context: fixtureContext,
+        entry: "./src/index.js"
+      },
+      cacheDir,
+      options: {
+        turbopackRepo: repo,
+        turbopackProfile: "release"
+      }
+    });
+
+    const args = (await readFile(argsLog, "utf8")).trim().split("\n");
+    assert.ok(args.includes("--persistent-caching"));
+    assert.equal(args[args.indexOf("--cache-dir") + 1], cacheDir);
+    assert.equal(args.at(-1), "./src/index.js");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("turbopack prepare patches build shutdown to flush persistent cache", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const repo = join(workspace, "next.js");
+    const buildSourcePath = join(
+      repo,
+      "turbopack",
+      "crates",
+      "turbopack-cli",
+      "src",
+      "build",
+      "mod.rs"
+    );
+
+    await mkdir(join(repo, "turbopack", "crates", "turbopack-cli", "src", "build"), {
+      recursive: true
+    });
+    await writeFile(
+      buildSourcePath,
+      `async fn build() {
+    builder.build().await?;
+
+    // Intentionally leak this \`Arc\`. Otherwise we'll waste time during process exit performing a
+    // ton of drop calls.
+    if !args.force_memory_cleanup {
+        forget(tt);
+    }
+}
+`,
+      "utf8"
+    );
+
+    await applyTurbopackBuildCacheFlushPatch(repo);
+    const patched = await readFile(buildSourcePath, "utf8");
+    assert.match(patched, /if args\.common\.persistent_caching \{/);
+    assert.match(patched, /tt\.stop_and_wait\(\)\.await;/);
+    assert.ok(
+      patched.indexOf("tt.stop_and_wait().await;") >
+        patched.indexOf("builder.build().await?;")
+    );
+
+    await applyTurbopackBuildCacheFlushPatch(repo);
+    assert.equal(await readFile(buildSourcePath, "utf8"), patched);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

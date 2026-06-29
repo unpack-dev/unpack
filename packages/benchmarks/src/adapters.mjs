@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -127,7 +128,7 @@ export const adapters = {
     name: "turbopack",
     outputDir: ({ fixture }) => join(fixture.context, "dist"),
     versionSource: ({ options }) =>
-      `vercel/next.js@${options.turbopackCommit ?? DEFAULT_TURBOPACK_COMMIT}`,
+      `vercel/next.js@${options.turbopackCommit ?? DEFAULT_TURBOPACK_COMMIT}+benchmark-cache-flush`,
     async prepare({ options }) {
       const repo = options.turbopackRepo;
       if (!repo) {
@@ -139,6 +140,8 @@ export const adapters = {
       if (preparedTurbopackBuilds.has(prepareKey)) {
         return;
       }
+
+      await applyTurbopackBuildCacheFlushPatch(repo);
 
       const args = ["build", "--package", "turbopack-cli", "--bin", "turbopack-cli"];
       if (profile === "release") {
@@ -198,6 +201,43 @@ export const adapters = {
     }
   }
 };
+
+export async function applyTurbopackBuildCacheFlushPatch(repo) {
+  const buildSourcePath = join(
+    repo,
+    "turbopack",
+    "crates",
+    "turbopack-cli",
+    "src",
+    "build",
+    "mod.rs"
+  );
+  const source = await readFile(buildSourcePath, "utf8");
+
+  if (source.includes("tt.stop_and_wait().await;")) {
+    return;
+  }
+
+  const target = `    builder.build().await?;
+
+    // Intentionally leak this \`Arc\`. Otherwise we'll waste time during process exit performing a
+`;
+  const replacement = `    builder.build().await?;
+
+    if args.common.persistent_caching {
+        // Benchmark patch: flush ReadWriteOnShutdown storage before process exit.
+        tt.stop_and_wait().await;
+    }
+
+    // Intentionally leak this \`Arc\`. Otherwise we'll waste time during process exit performing a
+`;
+
+  if (!source.includes(target)) {
+    throw new Error("unable to patch Turbopack build cache shutdown path");
+  }
+
+  await writeFile(buildSourcePath, source.replace(target, replacement), "utf8");
+}
 
 function webpackLikeConfig({ fixture, outputDir }) {
   return {

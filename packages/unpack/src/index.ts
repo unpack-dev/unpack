@@ -61,10 +61,19 @@ export interface Stats {
 
 export interface Compiler {
   run(callback: RunCallback): void;
+  watch(watchOptions: WatchOptions, handler: WatchHandler): Watching;
   close(callback: CloseCallback): void;
 }
 
+export interface Watching {
+  close(callback: CloseCallback): void;
+  invalidate(): void;
+}
+
+export interface WatchOptions {}
+
 export type RunCallback = (err: Error | null, stats?: Stats) => void;
+export type WatchHandler = (err: Error | null, stats?: Stats) => void;
 export type CloseCallback = (err: Error | null) => void;
 
 interface NormalizedEntry {
@@ -145,6 +154,7 @@ const native = require("./unpack_node.node") as NativeBinding;
 class CompilerImpl implements Compiler {
   #closed = false;
   #running = false;
+  #watching: WatchingImpl | undefined;
   #idleFlushTimer: ReturnType<typeof setTimeout> | undefined;
   #pendingCacheFlush: Promise<NativeFlushResult> | undefined;
   readonly #filesystemCache: boolean;
@@ -168,6 +178,13 @@ class CompilerImpl implements Compiler {
     if (this.#running) {
       defer(() =>
         callback(namedError("ConcurrentRunError", "compiler is already running"))
+      );
+      return;
+    }
+
+    if (this.#watching) {
+      defer(() =>
+        callback(namedError("ConcurrentRunError", "compiler is already watching"))
       );
       return;
     }
@@ -200,6 +217,50 @@ class CompilerImpl implements Compiler {
     );
   }
 
+  watch(watchOptions: WatchOptions, handler: WatchHandler): Watching {
+    normalizeWatchOptions(watchOptions);
+    assertFunction(handler, "handler");
+
+    if (this.#closed) {
+      const watching = new WatchingImpl(
+        (watchHandler) => {
+          defer(() => watchHandler(namedError("CompilerClosedError", "compiler is closed")));
+        },
+        () => Promise.resolve(null),
+        () => {}
+      );
+      watching.start(handler);
+      return watching;
+    }
+
+    if (this.#running || this.#watching) {
+      const watching = new WatchingImpl(
+        (watchHandler) => {
+          defer(() =>
+            watchHandler(namedError("ConcurrentRunError", "compiler is already running"))
+          );
+        },
+        () => Promise.resolve(null),
+        () => {}
+      );
+      watching.start(handler);
+      return watching;
+    }
+
+    const watching = new WatchingImpl(
+      (watchHandler) => this.#runWatchCompilation(watchHandler),
+      () => this.#flushCacheNow(),
+      () => {
+        if (this.#watching === watching) {
+          this.#watching = undefined;
+        }
+      }
+    );
+    this.#watching = watching;
+    watching.start(handler);
+    return watching;
+  }
+
   close(callback: CloseCallback): void {
     assertFunction(callback, "callback");
 
@@ -207,6 +268,15 @@ class CompilerImpl implements Compiler {
       defer(() =>
         callback(
           namedError("CompilerRunningError", "compiler cannot close while running")
+        )
+      );
+      return;
+    }
+
+    if (this.#watching) {
+      defer(() =>
+        callback(
+          namedError("CompilerRunningError", "compiler cannot close while watching")
         )
       );
       return;
@@ -230,6 +300,29 @@ class CompilerImpl implements Compiler {
       });
     } catch (error) {
       defer(() => callback(toError(error, "InfrastructureError")));
+    }
+  }
+
+  async #runWatchCompilation(handler: WatchHandler): Promise<void> {
+    let run: Promise<NativeRunResult>;
+    try {
+      run = this.#nativeCompiler.run();
+    } catch (error) {
+      handler(toError(error, "InfrastructureError"));
+      return;
+    }
+
+    try {
+      const result = await run;
+      if (result.error) {
+        handler(namedError(result.error.name, result.error.message));
+        return;
+      }
+
+      this.#scheduleIdleCacheFlush();
+      handler(null, new StatsImpl(normalizeNativeStats(result.stats)));
+    } catch (error) {
+      handler(toError(error, "InfrastructureError"));
     }
   }
 
@@ -272,6 +365,91 @@ class CompilerImpl implements Compiler {
       if (this.#pendingCacheFlush === flush) {
         this.#pendingCacheFlush = undefined;
       }
+    }
+  }
+}
+
+class WatchingImpl implements Watching {
+  #closed = false;
+  #running = false;
+  #invalidated = false;
+  #handler: WatchHandler | undefined;
+  readonly #runCompilation: (handler: WatchHandler) => Promise<void> | void;
+  readonly #flushCache: () => Promise<Error | null>;
+  readonly #onClose: () => void;
+  readonly #closeCallbacks: CloseCallback[] = [];
+
+  constructor(
+    runCompilation: (handler: WatchHandler) => Promise<void> | void,
+    flushCache: () => Promise<Error | null>,
+    onClose: () => void
+  ) {
+    this.#runCompilation = runCompilation;
+    this.#flushCache = flushCache;
+    this.#onClose = onClose;
+  }
+
+  start(handler: WatchHandler): void {
+    this.#handler = handler;
+    this.#run();
+  }
+
+  invalidate(): void {
+    if (this.#closed) {
+      return;
+    }
+
+    if (this.#running) {
+      this.#invalidated = true;
+      return;
+    }
+
+    this.#run();
+  }
+
+  close(callback: CloseCallback): void {
+    assertFunction(callback, "callback");
+
+    if (this.#closed && !this.#running) {
+      defer(() => callback(null));
+      return;
+    }
+
+    this.#closed = true;
+    this.#invalidated = false;
+    this.#closeCallbacks.push(callback);
+
+    if (!this.#running) {
+      void this.#finishClose();
+    }
+  }
+
+  async #run(): Promise<void> {
+    if (this.#closed || this.#running || !this.#handler) {
+      return;
+    }
+
+    this.#running = true;
+    await this.#runCompilation(this.#handler);
+    this.#running = false;
+
+    if (this.#closed) {
+      await this.#finishClose();
+      return;
+    }
+
+    if (this.#invalidated) {
+      this.#invalidated = false;
+      await this.#run();
+    }
+  }
+
+  async #finishClose(): Promise<void> {
+    const callbacks = this.#closeCallbacks.splice(0);
+    const flushError = await this.#flushCache();
+    this.#onClose();
+    for (const callback of callbacks) {
+      callback(flushError);
     }
   }
 }
@@ -512,6 +690,11 @@ function normalizeSnapshotStrategy(
         : assertBoolean(strategy.timestamp, `${name}.timestamp`),
     hash: strategy.hash === undefined ? defaults.hash : assertBoolean(strategy.hash, `${name}.hash`)
   };
+}
+
+function normalizeWatchOptions(watchOptions: WatchOptions): void {
+  assertPlainObject(watchOptions, "watchOptions");
+  assertKnownKeys(watchOptions, [], "watchOptions");
 }
 
 function normalizeNativeStats(stats: NativeStatsJson | null | undefined): StatsJson {

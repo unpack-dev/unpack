@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    ModuleIdentity, SnapshotStrategy,
+    ModuleIdentity, SnapshotOptions, SnapshotStrategy,
     parser::ParsedModule,
     snapshot::{FileSystemInfo, Snapshot},
 };
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
 const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
-const CACHE_SCHEMA_VERSION: u32 = 4;
+const CACHE_SCHEMA_VERSION: u32 = 5;
 const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
 const MANIFEST_FILE: &str = "container.json";
 
@@ -181,6 +181,7 @@ pub(crate) struct ResolveRecord {
     identity: ModuleIdentity,
     resource: PathBuf,
     file_dependencies: BTreeSet<PathBuf>,
+    context_dependencies: BTreeSet<PathBuf>,
     missing_dependencies: BTreeSet<PathBuf>,
     snapshot: Snapshot,
 }
@@ -190,16 +191,16 @@ impl ResolveRecord {
         identity: ModuleIdentity,
         resource: PathBuf,
         file_dependencies: BTreeSet<PathBuf>,
+        context_dependencies: BTreeSet<PathBuf>,
         missing_dependencies: BTreeSet<PathBuf>,
         file_system_info: &FileSystemInfo,
         strategy: SnapshotStrategy,
     ) -> crate::Result<Self> {
         let snapshot = file_system_info
-            .create_snapshot(
-                file_dependencies
-                    .iter()
-                    .chain(missing_dependencies.iter())
-                    .cloned(),
+            .create_resolve_snapshot(
+                file_dependencies.iter().cloned(),
+                context_dependencies.iter().cloned(),
+                missing_dependencies.iter().cloned(),
                 strategy,
             )
             .await?;
@@ -207,6 +208,7 @@ impl ResolveRecord {
             identity,
             resource,
             file_dependencies,
+            context_dependencies,
             missing_dependencies,
             snapshot,
         })
@@ -222,6 +224,10 @@ impl ResolveRecord {
 
     pub(crate) fn file_dependencies(&self) -> &BTreeSet<PathBuf> {
         &self.file_dependencies
+    }
+
+    pub(crate) fn context_dependencies(&self) -> &BTreeSet<PathBuf> {
+        &self.context_dependencies
     }
 
     pub(crate) fn missing_dependencies(&self) -> &BTreeSet<PathBuf> {
@@ -275,16 +281,15 @@ impl ModuleBuildRecord {
 }
 
 impl BuildCache {
-    pub(crate) fn new(
-        options: CacheOptions,
-        build_dependency_snapshot_strategy: SnapshotStrategy,
-        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-    ) -> Self {
+    pub(crate) fn new(options: CacheOptions, snapshot_options: SnapshotOptions) -> Self {
+        let build_dependency_snapshot_strategy = snapshot_options.build_dependencies;
+        let resolve_build_dependency_snapshot_strategy =
+            snapshot_options.resolve_build_dependencies;
         let cache = Self {
             options,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
-            file_system_info: FileSystemInfo::new(),
+            file_system_info: FileSystemInfo::new(&snapshot_options),
             inner: Arc::new(Mutex::new(BuildCacheInner::default())),
         };
         cache.restore_from_filesystem();

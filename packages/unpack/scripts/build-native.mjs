@@ -35,8 +35,12 @@ if (!libraryName) {
 }
 
 const distDir = resolve(packageDir, "dist");
+const nativeAddonPath = resolve(distDir, "unpack_node.node");
 mkdirSync(distDir, { recursive: true });
-copyFileSync(
-  resolve(repoRoot, "target", profile, libraryName),
-  resolve(distDir, "unpack_node.node")
-);
+copyFileSync(resolve(repoRoot, "target", profile, libraryName), nativeAddonPath);
+
+if (process.platform === "darwin") {
+  spawnSync("xattr", ["-d", "com.apple.provenance", nativeAddonPath], {
+    stdio: "ignore"
+  });
+}

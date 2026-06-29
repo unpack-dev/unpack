@@ -1206,6 +1206,7 @@ dependencies = [
  "cbor4ii",
  "codspeed-divan-compat",
  "futures",
+ "regex",
  "rspack_resolver",
  "rspack_sources",
  "serde",

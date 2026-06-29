@@ -105,6 +105,7 @@ impl NormalModuleFactory {
                 identity,
                 resource,
                 file_dependencies: resolved.file_dependencies,
+                context_dependencies: resolved.context_dependencies,
                 missing_dependencies: resolved.missing_dependencies,
             });
         }
@@ -112,6 +113,7 @@ impl NormalModuleFactory {
             identity,
             resource,
             resolved.file_dependencies,
+            resolved.context_dependencies,
             resolved.missing_dependencies,
             &self.file_system_info,
             self.resolve_snapshot_strategy,
@@ -128,6 +130,7 @@ pub struct FactorizedModule {
     pub identity: ModuleIdentity,
     pub resource: PathBuf,
     pub file_dependencies: BTreeSet<PathBuf>,
+    pub context_dependencies: BTreeSet<PathBuf>,
     pub missing_dependencies: BTreeSet<PathBuf>,
 }
 
@@ -137,6 +140,7 @@ impl FactorizedModule {
             identity: record.identity().clone(),
             resource: record.resource().to_path_buf(),
             file_dependencies: record.file_dependencies().clone(),
+            context_dependencies: record.context_dependencies().clone(),
             missing_dependencies: record.missing_dependencies().clone(),
         }
     }
@@ -162,15 +166,12 @@ mod tests {
 
         let mut resolve_options = ResolveOptions::default();
         resolve_options.extensions = vec![".js".to_string()];
-        let build_cache = BuildCache::new(
-            CacheOptions::disabled(),
-            SnapshotStrategy::timestamp(),
-            SnapshotStrategy::timestamp(),
-        );
+        let build_cache =
+            BuildCache::new(CacheOptions::disabled(), crate::SnapshotOptions::default());
         let factory = NormalModuleFactory::new(
             UnpackResolver::new(resolve_options),
             build_cache.normal_module_factory(),
-            FileSystemInfo::new(),
+            FileSystemInfo::new(&crate::SnapshotOptions::default()),
             SnapshotStrategy::timestamp(),
         );
         let dependency = Dependency::new(DependencyKind::StaticImport, "./dep");

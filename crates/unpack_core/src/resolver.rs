@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -40,17 +41,21 @@ impl UnpackResolver {
             .await
             .map_err(|error| Error::resolve(directory, request, error))?;
 
+        let file_dependencies = context
+            .file_dependencies
+            .into_iter()
+            .map(|path| normalize_resolver_dependency(path.as_path()))
+            .collect::<BTreeSet<_>>();
+        let context_dependencies = resolver_context_dependencies(&file_dependencies);
+
         Ok(ResolveResult {
             resource: ResolvedResource {
                 path: resolution.path().to_path_buf(),
                 query: resolution.query().map(ToOwned::to_owned),
                 fragment: resolution.fragment().map(ToOwned::to_owned),
             },
-            file_dependencies: context
-                .file_dependencies
-                .into_iter()
-                .map(|path| normalize_resolver_dependency(path.as_path()))
-                .collect(),
+            file_dependencies,
+            context_dependencies,
             missing_dependencies: context
                 .missing_dependencies
                 .into_iter()
@@ -64,6 +69,7 @@ impl UnpackResolver {
 pub struct ResolveResult {
     pub resource: ResolvedResource,
     pub file_dependencies: BTreeSet<PathBuf>,
+    pub context_dependencies: BTreeSet<PathBuf>,
     pub missing_dependencies: BTreeSet<PathBuf>,
 }
 
@@ -98,4 +104,12 @@ fn normalize_resolver_dependency(path: &Path) -> PathBuf {
         Some(file_name) => canonical_parent.join(file_name),
         None => canonical_parent,
     }
+}
+
+fn resolver_context_dependencies(file_dependencies: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    file_dependencies
+        .iter()
+        .filter(|path| path.file_name() == Some(OsStr::new("package.json")))
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .collect()
 }

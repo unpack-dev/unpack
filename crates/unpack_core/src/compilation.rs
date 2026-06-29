@@ -33,6 +33,7 @@ impl Compilation {
         resolver: UnpackResolver,
         build_cache: BuildCache,
     ) -> Self {
+        let file_system_info = FileSystemInfo::new(&options.snapshot);
         Self {
             options,
             resolver,
@@ -44,7 +45,7 @@ impl Compilation {
             errors: Vec::new(),
             watch_dependencies: WatchDependencies::default(),
             infrastructure_log_events: Vec::new(),
-            file_system_info: FileSystemInfo::new(),
+            file_system_info,
         }
     }
 

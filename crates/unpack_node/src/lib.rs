@@ -9,7 +9,7 @@ use napi_derive::napi;
 use unpack_core::{
     Asset, BuildDependency, CacheOptions, Compiler, CompilerOptions, Entry, Error as CoreError,
     InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions, SnapshotOptions,
-    SnapshotStrategy,
+    SnapshotPathPattern, SnapshotStrategy,
 };
 
 #[napi(object)]
@@ -62,12 +62,27 @@ pub struct NativeSnapshotOptions {
     pub build_dependencies: NativeSnapshotStrategy,
     #[napi(js_name = "resolveBuildDependencies")]
     pub resolve_build_dependencies: NativeSnapshotStrategy,
+    #[napi(js_name = "managedPaths")]
+    pub managed_paths: Vec<NativeSnapshotPathPattern>,
+    #[napi(js_name = "immutablePaths")]
+    pub immutable_paths: Vec<NativeSnapshotPathPattern>,
+    #[napi(js_name = "unmanagedPaths")]
+    pub unmanaged_paths: Vec<NativeSnapshotPathPattern>,
 }
 
 #[napi(object)]
 pub struct NativeSnapshotStrategy {
     pub timestamp: bool,
     pub hash: bool,
+}
+
+#[napi(object)]
+pub struct NativeSnapshotPathPattern {
+    #[napi(js_name = "type")]
+    pub pattern_type: String,
+    pub value: Option<String>,
+    pub source: Option<String>,
+    pub flags: Option<String>,
 }
 
 #[napi(object)]
@@ -221,6 +236,9 @@ fn snapshot_options_from_native(options: NativeSnapshotOptions) -> SnapshotOptio
         resolve_build_dependencies: snapshot_strategy_from_native(
             options.resolve_build_dependencies,
         ),
+        managed_paths: snapshot_path_patterns_from_native(options.managed_paths),
+        immutable_paths: snapshot_path_patterns_from_native(options.immutable_paths),
+        unmanaged_paths: snapshot_path_patterns_from_native(options.unmanaged_paths),
     }
 }
 
@@ -229,6 +247,21 @@ fn snapshot_strategy_from_native(strategy: NativeSnapshotStrategy) -> SnapshotSt
         timestamp: strategy.timestamp,
         hash: strategy.hash,
     }
+}
+
+fn snapshot_path_patterns_from_native(
+    patterns: Vec<NativeSnapshotPathPattern>,
+) -> Vec<SnapshotPathPattern> {
+    patterns
+        .into_iter()
+        .filter_map(|pattern| match pattern.pattern_type.as_str() {
+            "path" => pattern.value.map(SnapshotPathPattern::path),
+            "regexp" => pattern.source.map(|source| {
+                SnapshotPathPattern::regex(source, pattern.flags.as_deref() == Some("i"))
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn infrastructure_logging_options_from_native(

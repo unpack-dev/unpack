@@ -36,4 +36,4 @@ pub use module::{Module, ModuleId, ModuleIdentity, ModuleType};
 pub use module_graph::{ModuleGraph, ModuleGraphConnection};
 pub use normal_module_factory::{FactorizedModule, NormalModuleFactory};
 pub use resolver::{ResolveOptions, ResolvedResource, UnpackResolver};
-pub use snapshot::{SnapshotOptions, SnapshotStrategy};
+pub use snapshot::{SnapshotOptions, SnapshotPathPattern, SnapshotStrategy};

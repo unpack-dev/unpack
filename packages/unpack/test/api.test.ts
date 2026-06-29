@@ -265,10 +265,16 @@ test("accepts filesystem cache option shape", async () => {
 
     assert.equal(first.err, null);
     assert.equal(first.stats?.hasErrors(), false);
-    assert.match(
-      await readFile(join(fixture, ".cache/unpack/test-cache/container.json"), "utf8"),
-      /UNPACK_PERSISTENT_CACHE/
-    );
+    const manifest = JSON.parse(
+      await readFile(join(fixture, ".cache/unpack/test-cache/container.json"), "utf8")
+    ) as {
+      magic?: string;
+      build_dependencies?: { files?: unknown[] };
+      resolve_build_dependencies?: { files?: unknown[] };
+    };
+    assert.equal(manifest.magic, "UNPACK_PERSISTENT_CACHE");
+    assert.equal(manifest.build_dependencies?.files?.length, 1);
+    assert.equal(manifest.resolve_build_dependencies?.files?.length, 1);
     assert.ok(await readFile(join(fixture, ".cache/unpack/test-cache/packs/modules.cbor")));
 
     const secondCompiler = unpack({

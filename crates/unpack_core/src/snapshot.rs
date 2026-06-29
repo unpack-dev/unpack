@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -103,6 +104,13 @@ impl FileSystemInfo {
     ) -> bool {
         snapshot.is_valid_sync(strategy)
     }
+
+    pub(crate) fn merge_snapshots<'a>(
+        &self,
+        snapshots: impl IntoIterator<Item = &'a Snapshot>,
+    ) -> Snapshot {
+        Snapshot::merge(snapshots)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +174,29 @@ impl Snapshot {
             }
         }
         true
+    }
+
+    pub(crate) fn has_exact_paths(&self, paths: impl IntoIterator<Item = PathBuf>) -> bool {
+        let paths = normalize_paths(paths);
+        self.files.len() == paths.len()
+            && self
+                .files
+                .iter()
+                .zip(paths.iter())
+                .all(|(file, path)| file.path == *path)
+    }
+
+    fn merge<'a>(snapshots: impl IntoIterator<Item = &'a Snapshot>) -> Self {
+        let mut files = BTreeMap::new();
+        for snapshot in snapshots {
+            for file in &snapshot.files {
+                files.insert(file.path.clone(), file.clone());
+            }
+        }
+
+        Self {
+            files: files.into_values().collect(),
+        }
     }
 }
 
@@ -376,6 +407,47 @@ mod tests {
         assert!(
             !file_system_info
                 .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_system_info_merges_snapshots_with_path_union_and_later_override()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let shared = temp.path().join("shared.js");
+        let extra = temp.path().join("extra.js");
+        let file_system_info = FileSystemInfo::new();
+
+        write(&shared, "export const value = 'before';")?;
+        let stale_shared = file_system_info
+            .create_snapshot(vec![shared.clone()], SnapshotStrategy::hash())
+            .await?;
+        write(&shared, "export const value = 'after';")?;
+        let fresh_shared = file_system_info
+            .create_snapshot(vec![shared.clone()], SnapshotStrategy::hash())
+            .await?;
+        write(&extra, "export const extra = true;")?;
+        let extra_snapshot = file_system_info
+            .create_snapshot(vec![extra.clone()], SnapshotStrategy::hash())
+            .await?;
+
+        let merged =
+            file_system_info.merge_snapshots([&stale_shared, &extra_snapshot, &fresh_shared]);
+
+        assert!(
+            file_system_info
+                .is_snapshot_valid(&merged, SnapshotStrategy::hash())
+                .await
+        );
+
+        write(&extra, "export const extra = false;")?;
+
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&merged, SnapshotStrategy::hash())
                 .await
         );
 

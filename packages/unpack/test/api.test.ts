@@ -216,13 +216,13 @@ test("development and none default module snapshots to timestamp only", async ()
 });
 
 test("omitted and production mode default resolve snapshots to timestamp plus hash", async () => {
-  await assertSameTimestampPackageMainEditEmits("after", {});
-  await assertSameTimestampPackageMainEditEmits("after", { mode: "production" });
+  await assertSameTimestampPackageExportsEditEmits("after", {});
+  await assertSameTimestampPackageExportsEditEmits("after", { mode: "production" });
 });
 
 test("development and none default resolve snapshots to timestamp only", async () => {
-  await assertSameTimestampPackageMainEditEmits("before", { mode: "development" });
-  await assertSameTimestampPackageMainEditEmits("before", { mode: "none" });
+  await assertSameTimestampPackageExportsEditEmits("before", { mode: "development" });
+  await assertSameTimestampPackageExportsEditEmits("before", { mode: "none" });
 });
 
 test("mode does not weaken build dependency snapshot defaults", async () => {
@@ -233,40 +233,39 @@ test("mode does not weaken build dependency snapshot defaults", async () => {
   });
 });
 
-test("managed package metadata changes invalidate cached module work", async () => {
-  const fixture = await createFixture({
-    "src/index.js": "import { value } from 'pkg'; export const result = value;",
-    "node_modules/pkg/package.json": '{"name":"pkg","version":"1.0.0","main":"index.js"}',
-    "node_modules/pkg/index.js": "export const value = 'before';"
+test("mode does not weaken resolve build dependency snapshot defaults", async () => {
+  await assertSameTimestampBuildDependencyEditEmits({
+    snapshot: {
+      buildDependencies: { timestamp: true, hash: false }
+    }
   });
-  const modulePath = join(fixture, "node_modules/pkg/index.js");
+});
+
+test("default managed node_modules snapshots invalidate on package version changes", async () => {
+  const fixture = await createNodeModulesFixture();
+  const moduleFile = join(fixture, "node_modules/pkg/index.js");
   const packageJson = join(fixture, "node_modules/pkg/package.json");
-  const stableTime = new Date("2020-01-01T00:00:00.000Z");
-  await utimes(modulePath, stableTime, stableTime);
-  await utimes(packageJson, stableTime, stableTime);
   const compiler = unpack({
     context: fixture,
-    mode: "development",
     entry: "./src/index.js",
-    cache: true
+    cache: true,
+    snapshot: {
+      module: { timestamp: false, hash: true }
+    }
   });
 
   try {
-    const first = await runExistingCompiler(compiler);
-    assert.equal(first.err, null);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
 
-    await writeFile(modulePath, "export const value = 'after';", { encoding: "utf8" });
-    await writeFile(
-      packageJson,
-      '{"name":"pkg","version":"2.0.0","main":"index.js"}',
-      { encoding: "utf8" }
-    );
-    await utimes(modulePath, stableTime, stableTime);
-    await utimes(packageJson, stableTime, stableTime);
+    await writeFile(moduleFile, "export const value = 'after';", { encoding: "utf8" });
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
 
-    const second = await runExistingCompiler(compiler);
-    assert.equal(second.err, null);
+    await writeFile(packageJson, JSON.stringify({ name: "pkg", version: "2.0.0" }), {
+      encoding: "utf8"
+    });
+    assert.equal((await runExistingCompiler(compiler)).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
   } finally {
     await closeCompiler(compiler);
@@ -274,38 +273,123 @@ test("managed package metadata changes invalidate cached module work", async () 
   }
 });
 
-test("unmanaged snapshot paths override managed defaults", async () => {
+test("unversioned managed packages fall back to module file snapshots", async () => {
   const fixture = await createFixture({
-    "src/index.js": "import { value } from 'pkg'; export const result = value;",
-    "node_modules/pkg/package.json": '{"name":"pkg","version":"1.0.0","main":"index.js"}',
+    "src/index.js": "import { value } from 'pkg/index.js'; export const result = value;",
+    "node_modules/pkg/package.json": JSON.stringify({ name: "pkg" }),
     "node_modules/pkg/index.js": "export const value = 'before';"
   });
-  const packageRoot = join(fixture, "node_modules/pkg");
-  const modulePath = join(packageRoot, "index.js");
+  const moduleFile = join(fixture, "node_modules/pkg/index.js");
   const stableTime = new Date("2020-01-01T00:00:00.000Z");
-  await utimes(modulePath, stableTime, stableTime);
+  await utimes(moduleFile, stableTime, stableTime);
   const compiler = unpack({
     context: fixture,
-    mode: "development",
     entry: "./src/index.js",
     cache: true,
     snapshot: {
-      module: { timestamp: true, hash: true },
+      module: { timestamp: false, hash: true }
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(moduleFile, "export const value = 'after';", { encoding: "utf8" });
+    await utimes(moduleFile, stableTime, stableTime);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("unmanaged path patterns override managed node_modules snapshots", async () => {
+  const fixture = await createNodeModulesFixture();
+  const moduleFile = join(fixture, "node_modules/pkg/index.js");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(moduleFile, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      module: { timestamp: false, hash: true },
+      unmanagedPaths: [join(fixture, "node_modules/pkg")]
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(moduleFile, "export const value = 'after';", { encoding: "utf8" });
+    await utimes(moduleFile, stableTime, stableTime);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("immutable path patterns bypass module snapshot file validation", async () => {
+  const fixture = await createNodeModulesFixture();
+  const moduleFile = join(fixture, "node_modules/pkg/index.js");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(moduleFile, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      module: { timestamp: false, hash: true },
+      immutablePaths: [/NODE_MODULES.PKG/i]
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(moduleFile, "export const value = 'after';", { encoding: "utf8" });
+    await utimes(moduleFile, stableTime, stableTime);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("unmanaged path patterns make resolver missing candidates invalidate managed packages", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from 'pkg/feature'; export const result = value;",
+    "node_modules/pkg/package.json": JSON.stringify({ name: "pkg", version: "1.0.0" }),
+    "node_modules/pkg/feature.js": "export const value = 'js';"
+  });
+  const packageRoot = join(fixture, "node_modules/pkg");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      resolve: { timestamp: true, hash: false },
       unmanagedPaths: [packageRoot]
     }
   });
 
   try {
-    const first = await runExistingCompiler(compiler);
-    assert.equal(first.err, null);
-    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /js/);
 
-    await writeFile(modulePath, "export const value = 'after';", { encoding: "utf8" });
-    await utimes(modulePath, stableTime, stableTime);
+    await writeFile(join(packageRoot, "feature.ts"), "export const value = 'ts';", {
+      encoding: "utf8"
+    });
 
-    const second = await runExistingCompiler(compiler);
-    assert.equal(second.err, null);
-    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /ts/);
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
@@ -325,16 +409,14 @@ test("missing resolver candidates appearing invalidate resolve records", async (
   });
 
   try {
-    const first = await runExistingCompiler(compiler);
-    assert.equal(first.err, null);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /js/);
 
     await writeFile(join(fixture, "src/dep.ts"), "export const value = 'ts';", {
       encoding: "utf8"
     });
 
-    const second = await runExistingCompiler(compiler);
-    assert.equal(second.err, null);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /ts/);
   } finally {
     await closeCompiler(compiler);
@@ -360,8 +442,7 @@ test("context directory candidate changes invalidate resolve records", async () 
   });
 
   try {
-    const first = await runExistingCompiler(compiler);
-    assert.equal(first.err, null);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
 
     await writeFile(packageJson, '{"main":"after.js"}', { encoding: "utf8" });
@@ -370,21 +451,12 @@ test("context directory candidate changes invalidate resolve records", async () 
     });
     await utimes(packageJson, stableTime, stableTime);
 
-    const second = await runExistingCompiler(compiler);
-    assert.equal(second.err, null);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
   }
-});
-
-test("mode does not weaken resolve build dependency snapshot defaults", async () => {
-  await assertSameTimestampBuildDependencyEditEmits({
-    snapshot: {
-      buildDependencies: { timestamp: true, hash: false }
-    }
-  });
 });
 
 test("accepts filesystem cache option shape", async () => {
@@ -421,10 +493,16 @@ test("accepts filesystem cache option shape", async () => {
 
     assert.equal(first.err, null);
     assert.equal(first.stats?.hasErrors(), false);
-    assert.match(
-      await readFile(join(fixture, ".cache/unpack/test-cache/container.json"), "utf8"),
-      /UNPACK_PERSISTENT_CACHE/
-    );
+    const manifest = JSON.parse(
+      await readFile(join(fixture, ".cache/unpack/test-cache/container.json"), "utf8")
+    ) as {
+      magic?: string;
+      build_dependencies?: { entries?: unknown[] };
+      resolve_build_dependencies?: { entries?: unknown[] };
+    };
+    assert.equal(manifest.magic, "UNPACK_PERSISTENT_CACHE");
+    assert.equal(manifest.build_dependencies?.entries?.length, 1);
+    assert.equal(manifest.resolve_build_dependencies?.entries?.length, 1);
     assert.ok(await readFile(join(fixture, ".cache/unpack/test-cache/packs/modules.cbor")));
 
     const secondCompiler = unpack({
@@ -564,6 +642,7 @@ test("stats exposes watch dependency sets", async () => {
     const result = await runExistingCompiler(compiler);
     assert.equal(result.err, null);
     const json = result.stats?.toJson();
+    const fixtureRoot = await realpath(fixture);
     const sourceRoot = await realpath(join(fixture, "src"));
     assert.ok(json);
     assert.equal(json.errors.length, 1);
@@ -571,7 +650,7 @@ test("stats exposes watch dependency sets", async () => {
       join(sourceRoot, "dep.js"),
       join(sourceRoot, "index.js")
     ]);
-    assert.deepEqual(json.watchDependencies.contexts, []);
+    assert.deepEqual(json.watchDependencies.contexts, [fixtureRoot, sourceRoot]);
     assert.ok(json.watchDependencies.missing.includes(join(sourceRoot, "missing")));
     assert.ok(json.watchDependencies.missing.includes(join(sourceRoot, "dep.ts")));
   } finally {
@@ -956,17 +1035,6 @@ test("cache and snapshot option validation throws synchronously", () => {
       unpack({
         entry: "./src/index.js",
         snapshot: {
-          // @ts-expect-error intentionally testing runtime validation
-          contextModule: { timestamp: true }
-        }
-      }),
-    /options.snapshot contains unknown option 'contextModule'/
-  );
-  assert.throws(
-    () =>
-      unpack({
-        entry: "./src/index.js",
-        snapshot: {
           resolve: {
             // @ts-expect-error intentionally testing runtime validation
             hash: "yes"
@@ -1067,18 +1135,39 @@ test("cache and snapshot option validation throws synchronously", () => {
       unpack({
         entry: "./src/index.js",
         snapshot: {
-          managedPaths: [/node_modules/g]
+          immutablePaths: [/node_modules/g]
         }
       }),
-    /options.snapshot.managedPaths\[0\] RegExp may only use the 'i' flag/
+    /options.snapshot.immutablePaths\[0\] RegExp flags must be empty or 'i'/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          immutablePaths: [/(?<=node_modules)pkg/]
+        }
+      }),
+    /snapshot path RegExp .* is not supported by Rust regex/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        snapshot: {
+          // @ts-expect-error intentionally testing runtime validation
+          unmanagedPaths: "/absolute/path"
+        }
+      }),
+    /options.snapshot.unmanagedPaths must be an array/
   );
   assert.doesNotThrow(() =>
     unpack({
       entry: "./src/index.js",
       snapshot: {
-        managedPaths: [join(process.cwd(), "node_modules"), /NODE_MODULES/i],
-        immutablePaths: [join(process.cwd(), ".immutable"), /immutable/],
-        unmanagedPaths: [join(process.cwd(), "node_modules/pkg")]
+        managedPaths: ["/absolute/path"],
+        immutablePaths: [/node_modules/i],
+        unmanagedPaths: []
       }
     })
   );
@@ -1198,37 +1287,54 @@ async function assertSameTimestampModuleEditEmits(
   }
 }
 
-async function assertSameTimestampPackageMainEditEmits(
+async function assertSameTimestampPackageExportsEditEmits(
   expected: string,
   options: Partial<Parameters<typeof unpack>[0]>
 ) {
   const fixture = await createFixture({
-    "src/index.js": "import { value } from './pkg'; export const result = value;",
-    "src/pkg/package.json": '{"main":"before.js"}',
-    "src/pkg/before.js": "export const value = 'before';",
-    "src/pkg/after.js": "export const value = 'after';"
+    "src/index.js": "import { value } from 'pkg/feature'; export const result = value;",
+    "node_modules/pkg/package.json": JSON.stringify({
+      name: "pkg",
+      version: "1.0.0",
+      exports: { "./feature": "./before.js" }
+    }),
+    "node_modules/pkg/before.js": "export const value = 'before';",
+    "node_modules/pkg/after.js": "export const value = 'after';"
   });
-  const packageJson = join(fixture, "src/pkg/package.json");
+  const packageRoot = join(fixture, "node_modules/pkg");
+  const packageJson = join(packageRoot, "package.json");
   const stableTime = new Date("2020-01-01T00:00:00.000Z");
   await utimes(packageJson, stableTime, stableTime);
   const compiler = unpack({
     context: fixture,
     entry: "./src/index.js",
     cache: true,
+    snapshot: {
+      unmanagedPaths: [packageRoot]
+    },
     ...options
   });
 
   try {
-    const first = await runExistingCompiler(compiler);
-    assert.equal(first.err, null);
-    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /const value = 'before'/);
 
-    await writeFile(packageJson, '{"main":"after.js"}', { encoding: "utf8" });
+    await writeFile(
+      packageJson,
+      JSON.stringify({
+        name: "pkg",
+        version: "1.0.0",
+        exports: { "./feature": "./after.js" }
+      }),
+      { encoding: "utf8" }
+    );
     await utimes(packageJson, stableTime, stableTime);
 
-    const second = await runExistingCompiler(compiler);
-    assert.equal(second.err, null);
-    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), new RegExp(expected));
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(
+      await readFile(join(fixture, "dist/main.js"), "utf8"),
+      new RegExp(`const value = '${expected}'`)
+    );
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
@@ -1293,6 +1399,14 @@ async function assertSameTimestampBuildDependencyEditEmits(
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
+}
+
+async function createNodeModulesFixture() {
+  return createFixture({
+    "src/index.js": "import { value } from 'pkg/index.js'; export const result = value;",
+    "node_modules/pkg/package.json": JSON.stringify({ name: "pkg", version: "1.0.0" }),
+    "node_modules/pkg/index.js": "export const value = 'before';"
+  });
 }
 
 async function runExistingCompiler(compiler: ReturnType<typeof unpack>) {

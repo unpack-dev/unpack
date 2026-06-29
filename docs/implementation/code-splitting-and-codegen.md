@@ -1,6 +1,6 @@
 # Code Splitting and Code Generation Implementation Plan
 
-This plan implements dynamic-import code splitting and webpack-shaped code generation in `unpack_core`. The first implementation targets Node-style output with CommonJS `require` chunk loading and does not implement split chunks, CommonJS module parsing, loader pipelines, browser JSONP loading, or webpack-compatible public APIs.
+This plan implements dynamic-import code splitting and webpack-shaped code generation in `unpack_core`. The first implementation targets Node-style output with CommonJS `require` chunk loading and does not yet implement split chunks, CommonJS module parsing, loader pipelines, browser JSONP loading, or broad webpack public API parity.
 
 ## Target Shape
 
@@ -210,7 +210,7 @@ Assertions:
 - Browser JSONP loading
 - CommonJS dependency parsing
 - Loader pipeline
-- Plugin API compatibility
+- Plugin API parity
 - Tree shaking and used exports
 - Export presence warnings/errors
 - Full namespace interop helpers

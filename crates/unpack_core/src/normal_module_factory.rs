@@ -171,7 +171,7 @@ mod tests {
         let factory = NormalModuleFactory::new(
             UnpackResolver::new(resolve_options),
             build_cache.normal_module_factory(),
-            FileSystemInfo::new(&crate::SnapshotOptions::default()),
+            FileSystemInfo::new(),
             SnapshotStrategy::timestamp(),
         );
         let dependency = Dependency::new(DependencyKind::StaticImport, "./dep");

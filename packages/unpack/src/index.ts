@@ -161,12 +161,15 @@ interface NormalizedSnapshotStrategy {
 type NormalizedSnapshotPathPattern =
   | {
       type: "path";
-      value: string;
+      path: string;
     }
   | {
       type: "regexp";
       source: string;
       flags: "" | "i";
+    }
+  | {
+      type: "nodeModules";
     };
 
 interface NormalizedInfrastructureLoggingOptions {
@@ -606,6 +609,8 @@ class WatchingImpl implements Watching {
       return;
     }
 
+    this.#clearRebuildTimer();
+    this.#closeWatchers();
     this.#running = true;
     let latestStats: Stats | undefined;
     await this.#runCompilation((err, stats) => {
@@ -617,7 +622,8 @@ class WatchingImpl implements Watching {
     this.#running = false;
 
     if (!this.#closed && latestStats) {
-      this.#replaceWatchers(latestStats.toJson().watchDependencies);
+      const latestJson = latestStats.toJson();
+      this.#replaceWatchers(latestJson.watchDependencies, latestJson.outputPath);
     }
 
     if (this.#closed) {
@@ -640,7 +646,7 @@ class WatchingImpl implements Watching {
     }
   }
 
-  #replaceWatchers(dependencies: WatchDependencySets): void {
+  #replaceWatchers(dependencies: WatchDependencySets, outputPath: string): void {
     this.#closeWatchers();
     const targets = watchTargets(dependencies).filter(
       (target) => !isIgnoredWatchPath(target.path, this.#watchOptions.ignored)
@@ -653,16 +659,49 @@ class WatchingImpl implements Watching {
       return;
     }
 
+    const directlyWatchedPaths = new Set(
+      targets
+        .filter((target) => target.kind !== "context")
+        .map((target) => target.path)
+    );
+    const contextWatchedPaths = new Set(
+      targets
+        .filter((target) => target.kind === "context")
+        .map((target) => target.path)
+    );
+    const targetSnapshots = new Map(
+      targets.map((target) => [target.path, pollSnapshot(target.path)])
+    );
     for (const target of targets) {
       try {
         this.#watchers.push(
           watchFileSystem(target.path, { persistent: false }, (_eventType, filename) => {
+            if (target.kind === "context" && !filename && this.#watchOptions.ignored.length > 0) {
+              return;
+            }
             const changedPath =
               target.kind === "context" && filename
                 ? resolve(target.path, filename.toString())
                 : target.path;
+            if (isOutputWatchPath(changedPath, outputPath)) {
+              return;
+            }
+            if (target.kind === "context" && contextWatchedPaths.has(changedPath)) {
+              return;
+            }
+            if (target.kind === "context" && directlyWatchedPaths.has(changedPath)) {
+              return;
+            }
             if (isIgnoredWatchPath(changedPath, this.#watchOptions.ignored)) {
               return;
+            }
+            if (target.kind !== "context") {
+              const previous = targetSnapshots.get(target.path);
+              const next = pollSnapshot(target.path);
+              targetSnapshots.set(target.path, next);
+              if (previous && pollSnapshotsEqual(previous, next)) {
+                return;
+              }
             }
             this.#queueRebuild();
           })
@@ -935,7 +974,7 @@ function normalizeSnapshotOptions(
       resolve: { ...moduleAndResolveDefaults },
       buildDependencies: { timestamp: true, hash: true },
       resolveBuildDependencies: { timestamp: true, hash: true },
-      managedPaths: [],
+      managedPaths: defaultManagedPaths(),
       immutablePaths: [],
       unmanagedPaths: []
     };
@@ -985,17 +1024,24 @@ function normalizeSnapshotOptions(
     ),
     managedPaths: normalizeSnapshotPathPatterns(
       snapshot.managedPaths,
-      "options.snapshot.managedPaths"
+      "options.snapshot.managedPaths",
+      defaultManagedPaths()
     ),
     immutablePaths: normalizeSnapshotPathPatterns(
       snapshot.immutablePaths,
-      "options.snapshot.immutablePaths"
+      "options.snapshot.immutablePaths",
+      []
     ),
     unmanagedPaths: normalizeSnapshotPathPatterns(
       snapshot.unmanagedPaths,
-      "options.snapshot.unmanagedPaths"
+      "options.snapshot.unmanagedPaths",
+      []
     )
   };
+}
+
+function defaultManagedPaths(): NormalizedSnapshotPathPattern[] {
+  return [{ type: "nodeModules" }];
 }
 
 function defaultModuleAndResolveSnapshotStrategy(mode: Mode): NormalizedSnapshotStrategy {
@@ -1029,54 +1075,40 @@ function normalizeSnapshotStrategy(
 }
 
 function normalizeSnapshotPathPatterns(
-  value: unknown,
-  name: string
+  patterns: unknown,
+  name: string,
+  defaults: NormalizedSnapshotPathPattern[]
 ): NormalizedSnapshotPathPattern[] {
-  if (value === undefined) {
-    return [];
+  if (patterns === undefined) {
+    return defaults.map((pattern) => ({ ...pattern }));
   }
 
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(patterns)) {
     throw new TypeError(`${name} must be an array`);
   }
 
-  return value.map((pattern, index) =>
-    normalizeSnapshotPathPattern(pattern, `${name}[${index}]`)
-  );
+  return patterns.map((pattern, index) => normalizeSnapshotPathPattern(pattern, `${name}[${index}]`));
 }
 
 function normalizeSnapshotPathPattern(
-  value: unknown,
+  pattern: unknown,
   name: string
 ): NormalizedSnapshotPathPattern {
-  if (typeof value === "string") {
-    const path = assertNonEmptyString(value, name);
-    if (!isAbsolute(path)) {
+  if (typeof pattern === "string") {
+    if (!isAbsolute(pattern)) {
       throw new TypeError(`${name} must be an absolute path`);
     }
-    return {
-      type: "path",
-      value: path
-    };
+    return { type: "path", path: pattern };
   }
 
-  if (value instanceof RegExp) {
-    const flags = normalizeSnapshotPathPatternFlags(value.flags, name);
-    return {
-      type: "regexp",
-      source: value.source.replaceAll("\\/", "/"),
-      flags
-    };
+  if (pattern instanceof RegExp) {
+    if (pattern.flags !== "" && pattern.flags !== "i") {
+      throw new TypeError(`${name} RegExp flags must be empty or 'i'`);
+    }
+    return { type: "regexp", source: pattern.source, flags: pattern.flags as "" | "i" };
   }
 
-  throw new TypeError(`${name} must be an absolute path string or RegExp`);
-}
-
-function normalizeSnapshotPathPatternFlags(flags: string, name: string): "" | "i" {
-  if (flags === "" || flags === "i") {
-    return flags;
-  }
-  throw new TypeError(`${name} RegExp may only use the 'i' flag`);
+  throw new TypeError(`${name} must be a string or RegExp`);
 }
 
 function normalizeInfrastructureLoggingOptions(
@@ -1312,8 +1344,20 @@ function isIgnoredWatchPath(path: string, ignored: WatchIgnoredMatcher[]): boole
   });
 }
 
+function isOutputWatchPath(path: string, outputPath: string): boolean {
+  const normalizedPath = normalizeWatchMatchPath(path);
+  const normalizedOutputPath = normalizeWatchMatchPath(outputPath);
+  return (
+    normalizedPath === normalizedOutputPath ||
+    normalizedPath.startsWith(`${normalizedOutputPath}/`)
+  );
+}
+
 function normalizeWatchMatchPath(path: string): string {
-  return path.replaceAll("\\", "/");
+  const normalizedPath = path.replaceAll("\\", "/");
+  return normalizedPath.startsWith("/private/var/")
+    ? normalizedPath.replace(/^\/private\/var\//, "/var/")
+    : normalizedPath;
 }
 
 function pollSnapshot(path: string): PollSnapshot {

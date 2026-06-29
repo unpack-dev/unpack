@@ -33,7 +33,7 @@ impl Compilation {
         resolver: UnpackResolver,
         build_cache: BuildCache,
     ) -> Self {
-        let file_system_info = FileSystemInfo::new(&options.snapshot);
+        let file_system_info = FileSystemInfo::from_snapshot_options(&options.snapshot);
         Self {
             options,
             resolver,

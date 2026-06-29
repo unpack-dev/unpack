@@ -1,6 +1,6 @@
 # Watch and Incremental Build Implementation Plan
 
-This plan implements watch, memory cache, and persistent filesystem cache across the Rust core, native Node binding, and JavaScript wrapper. The design is webpack-like without promising webpack API compatibility beyond the explicit JavaScript API shapes recorded in ADRs.
+This plan implements watch, memory cache, and persistent filesystem cache across the Rust core, native Node binding, and JavaScript wrapper. The design follows webpack's API and lifecycle shape as far as the current implementation slices allow; unsupported surfaces are staged scope, not a permanent product boundary.
 
 ## Target Shape
 

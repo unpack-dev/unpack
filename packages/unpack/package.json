@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@types/node": "26.0.1",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "webpack": "5.108.1"
   }
 }

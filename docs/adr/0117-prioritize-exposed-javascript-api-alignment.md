@@ -1,0 +1,3 @@
+# Prioritize exposed JavaScript API alignment
+
+Unpack's first implemented-surface alignment pass will focus on the exposed JavaScript API before generated runtime, code generation, or graph internals. The initial comparison against webpack should cover `unpack(options, callback?)`, `compiler.run`, `compiler.watch`, `compiler.close`, `Watching.invalidate`, `Watching.close`, `Stats.hasErrors`, `Stats.toJson`, and supported options such as `mode`, `cache`, `snapshot`, `infrastructureLogging`, and `watchOptions`, with emphasis on call shapes, defaults, validation errors, error timing, callback timing, and observable behavior.

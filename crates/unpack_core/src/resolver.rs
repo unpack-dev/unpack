@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeSet,
-    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -40,13 +39,18 @@ impl UnpackResolver {
             .resolve_with_context(directory, request, &mut context)
             .await
             .map_err(|error| Error::resolve(directory, request, error))?;
-
         let file_dependencies = context
             .file_dependencies
             .into_iter()
             .map(|path| normalize_resolver_dependency(path.as_path()))
             .collect::<BTreeSet<_>>();
-        let context_dependencies = resolver_context_dependencies(&file_dependencies);
+        let missing_dependencies = context
+            .missing_dependencies
+            .into_iter()
+            .map(|path| normalize_resolver_dependency(path.as_path()))
+            .collect::<BTreeSet<_>>();
+        let context_dependencies =
+            context_dependencies(directory, &file_dependencies, &missing_dependencies);
 
         Ok(ResolveResult {
             resource: ResolvedResource {
@@ -56,11 +60,7 @@ impl UnpackResolver {
             },
             file_dependencies,
             context_dependencies,
-            missing_dependencies: context
-                .missing_dependencies
-                .into_iter()
-                .map(|path| normalize_resolver_dependency(path.as_path()))
-                .collect(),
+            missing_dependencies,
         })
     }
 }
@@ -106,10 +106,38 @@ fn normalize_resolver_dependency(path: &Path) -> PathBuf {
     }
 }
 
-fn resolver_context_dependencies(file_dependencies: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+fn context_dependencies(
+    search_directory: &Path,
+    file_dependencies: &BTreeSet<PathBuf>,
+    missing_dependencies: &BTreeSet<PathBuf>,
+) -> BTreeSet<PathBuf> {
+    let search_directory = normalize_resolver_dependency(search_directory);
     file_dependencies
         .iter()
-        .filter(|path| path.file_name() == Some(OsStr::new("package.json")))
-        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .chain(missing_dependencies.iter())
+        .filter_map(|path| context_dependency(&search_directory, path))
         .collect()
+}
+
+fn context_dependency(search_directory: &Path, dependency: &Path) -> Option<PathBuf> {
+    if dependency
+        .file_name()
+        .is_some_and(|name| name == "node_modules")
+    {
+        return None;
+    }
+
+    let parent = dependency.parent()?;
+    if !parent.is_dir() {
+        return None;
+    }
+
+    let parent = normalize_resolver_dependency(parent);
+    (parent.starts_with(search_directory) || has_component(&parent, "node_modules"))
+        .then_some(parent)
+}
+
+fn has_component(path: &Path, name: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == name)
 }

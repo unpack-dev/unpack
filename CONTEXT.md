@@ -176,9 +176,17 @@ _Avoid_: Cache options, watch options
 Compiler-owned reusable build information that can be validated and reused across compilations.
 _Avoid_: Compilation cache, module graph reuse
 
+**Cache Facade**:
+A scoped access point to the build cache for one compiler subsystem or cache item family.
+_Avoid_: Specialized cache method, cache namespace
+
 **Cache Item**:
 A named unit of reusable build information stored in the build cache with its own validation data.
 _Avoid_: Cache blob, cached compilation part
+
+**Resolve Record**:
+A cache item that represents the validated result of resolving one dependency request from one issuer context.
+_Avoid_: Resolver cache entry, resolved path cache
 
 **Module Build Record**:
 A cache item that represents the validated result of building one module for reuse across compilations.
@@ -193,7 +201,7 @@ The configured validation method for a file snapshot, such as timestamp validati
 _Avoid_: Cache mode, watcher policy
 
 **Snapshot Category**:
-A class of filesystem inputs that can use its own snapshot strategy, such as module resources or build dependencies.
+A class of filesystem inputs that can use its own snapshot strategy, such as module resources, resolution inputs, or build dependencies.
 _Avoid_: Cache namespace, watcher group
 
 **Build Dependency**:

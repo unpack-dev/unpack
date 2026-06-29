@@ -1,15 +1,31 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
-use crate::{Dependency, ModuleIdentity, Result, UnpackResolver};
+use crate::{
+    Dependency, ModuleIdentity, Result, SnapshotStrategy, UnpackResolver,
+    build_cache::{NormalModuleFactoryCache, ResolveRecord, ResolveRequest},
+};
 
 #[derive(Debug, Clone)]
 pub struct NormalModuleFactory {
     resolver: UnpackResolver,
+    cache: NormalModuleFactoryCache,
+    resolve_snapshot_strategy: SnapshotStrategy,
 }
 
 impl NormalModuleFactory {
-    pub fn new(resolver: UnpackResolver) -> Self {
-        Self { resolver }
+    pub(crate) fn new(
+        resolver: UnpackResolver,
+        cache: NormalModuleFactoryCache,
+        resolve_snapshot_strategy: SnapshotStrategy,
+    ) -> Self {
+        Self {
+            resolver,
+            cache,
+            resolve_snapshot_strategy,
+        }
     }
 
     pub async fn factorize(
@@ -20,10 +36,31 @@ impl NormalModuleFactory {
         let request = dependency
             .request()
             .expect("module dependency should have a request");
-        let resolved = self.resolver.resolve(context, request).await?;
-        let identity = ModuleIdentity::from(resolved);
+        let resolve_request = ResolveRequest::new(context, request);
+        if let Some(record) = self.cache.get_resolve_record(&resolve_request) {
+            if record.is_valid(self.resolve_snapshot_strategy).await {
+                return Ok(FactorizedModule::from_resolve_record(record));
+            }
+        }
+
+        let resolved = self
+            .resolver
+            .resolve_with_dependencies(context, request)
+            .await?;
+        let identity = ModuleIdentity::from(resolved.resource);
         let resource = identity.resource.clone();
-        Ok(FactorizedModule { identity, resource })
+        let record = ResolveRecord::new(
+            identity,
+            resource,
+            resolved.file_dependencies,
+            resolved.missing_dependencies,
+            self.resolve_snapshot_strategy,
+        )
+        .await?;
+        self.cache
+            .store_resolve_record(resolve_request, record.clone());
+
+        Ok(FactorizedModule::from_resolve_record(record))
     }
 }
 
@@ -31,4 +68,17 @@ impl NormalModuleFactory {
 pub struct FactorizedModule {
     pub identity: ModuleIdentity,
     pub resource: PathBuf,
+    pub file_dependencies: BTreeSet<PathBuf>,
+    pub missing_dependencies: BTreeSet<PathBuf>,
+}
+
+impl FactorizedModule {
+    fn from_resolve_record(record: ResolveRecord) -> Self {
+        Self {
+            identity: record.identity().clone(),
+            resource: record.resource().to_path_buf(),
+            file_dependencies: record.file_dependencies().clone(),
+            missing_dependencies: record.missing_dependencies().clone(),
+        }
+    }
 }

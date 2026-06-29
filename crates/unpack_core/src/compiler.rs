@@ -83,6 +83,12 @@ impl Compiler {
         compilation.create_assets();
         Ok(compilation)
     }
+
+    pub fn flush_cache(&self) -> std::result::Result<(), String> {
+        self.build_cache
+            .flush_to_filesystem()
+            .map_err(|error| error.to_string())
+    }
 }
 
 fn default_resolve_options() -> ResolveOptions {
@@ -205,6 +211,7 @@ mod tests {
 
         let first_compiler = Compiler::new(options.clone());
         let first = first_compiler.run().await?;
+        first_compiler.flush_cache()?;
         assert_eq!(first.errors(), []);
         assert!(cache_location.join("container.json").exists());
         assert!(cache_location.join("packs/modules.cbor").exists());
@@ -240,7 +247,9 @@ mod tests {
             files: vec![config.clone()],
         }];
 
-        Compiler::new(options.clone()).run().await?;
+        let first_compiler = Compiler::new(options.clone());
+        first_compiler.run().await?;
+        first_compiler.flush_cache()?;
         assert_eq!(
             Compiler::new(options.clone())
                 .build_cache

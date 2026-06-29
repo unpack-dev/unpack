@@ -227,12 +227,14 @@ test("accepts filesystem cache option shape", async () => {
   };
 
   try {
-    const first = await runCompiler({
+    const firstCompiler = unpack({
       context: fixture,
       entry: "./src/index.js",
       cache: cacheOptions,
       snapshot
     });
+    const first = await runExistingCompiler(firstCompiler);
+    await closeCompiler(firstCompiler);
 
     assert.equal(first.err, null);
     assert.equal(first.stats?.hasErrors(), false);
@@ -242,14 +244,156 @@ test("accepts filesystem cache option shape", async () => {
     );
     assert.ok(await readFile(join(fixture, ".cache/unpack/test-cache/packs/modules.cbor")));
 
-    const second = await runCompiler({
+    const secondCompiler = unpack({
       context: fixture,
       entry: "./src/index.js",
       cache: cacheOptions,
       snapshot
     });
+    const second = await runExistingCompiler(secondCompiler);
+    await closeCompiler(secondCompiler);
     assert.equal(second.err, null);
     assert.deepEqual(second.stats?.toJson(), first.stats?.toJson());
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("filesystem cache flushes after idle timeout", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/idle");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeout: 30
+    }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+    await assert.rejects(readFile(join(cacheLocation, "container.json"), "utf8"));
+
+    await delay(100);
+    assert.match(
+      await readFile(join(cacheLocation, "container.json"), "utf8"),
+      /UNPACK_PERSISTENT_CACHE/
+    );
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("compiler close waits for pending filesystem cache flush", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/close");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeout: 60_000
+    }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+
+    await closeCompiler(compiler);
+    assert.match(
+      await readFile(join(cacheLocation, "container.json"), "utf8"),
+      /UNPACK_PERSISTENT_CACHE/
+    );
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch performs initial build and close keeps compiler reusable", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    const result = await first;
+    assert.equal(result.err, null);
+    assert.equal(result.stats?.hasErrors(), false);
+
+    await closeWatching(watching);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch invalidate triggers rebuild", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const entry = join(fixture, "src/index.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    const second = results.next();
+    await writeFile(entry, "export const value = 'after';", { encoding: "utf8" });
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(entry, changedTime, changedTime);
+    watching.invalidate();
+
+    assert.equal((await second).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch conflicts with run watch and compiler close", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+
+    assert.equal((await runExistingCompiler(compiler)).err?.name, "ConcurrentRunError");
+
+    const failedWatch = collectWatchResults();
+    const failed = failedWatch.next();
+    compiler.watch({}, failedWatch.handler);
+    assert.equal((await failed).err?.name, "ConcurrentRunError");
+
+    const closeResult = await closeCompilerResult(compiler);
+    assert.equal(closeResult?.name, "CompilerRunningError");
+
+    await closeWatching(watching);
+    await closeCompiler(compiler);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -406,6 +550,45 @@ async function closeCompiler(compiler: ReturnType<typeof unpack>) {
         resolve();
       }
     });
+  });
+}
+
+async function closeCompilerResult(compiler: ReturnType<typeof unpack>) {
+  return new Promise<Error | null>((resolve) => {
+    compiler.close((err) => {
+      resolve(err);
+    });
+  });
+}
+
+async function closeWatching(watching: ReturnType<ReturnType<typeof unpack>["watch"]>) {
+  await new Promise<void>((resolve, reject) => {
+    watching.close((err) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+function collectWatchResults() {
+  const resolvers: Array<(result: { err: Error | null; stats?: Stats }) => void> = [];
+  return {
+    handler: (err: Error | null, stats?: Stats) => {
+      resolvers.shift()?.({ err, stats });
+    },
+    next: () =>
+      new Promise<{ err: Error | null; stats?: Stats }>((resolve) => {
+        resolvers.push(resolve);
+      })
+  };
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
   });
 }
 

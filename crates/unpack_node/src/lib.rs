@@ -1,7 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use napi::{Env, Result, Task, bindgen_prelude::AsyncTask};
@@ -11,6 +14,8 @@ use unpack_core::{
     InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions, SnapshotOptions,
     SnapshotPathPattern, SnapshotStrategy,
 };
+
+const MAX_BLOCKING_THREADS: usize = 4;
 
 #[napi(object)]
 pub struct NativeEntry {
@@ -364,7 +369,13 @@ fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> Native
     let Some(compiler) = compiler else {
         return infrastructure_error("CompilerClosedError", "compiler is closed");
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .thread_name_fn(|| {
+            static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+            let id = THREAD_ID.fetch_add(1, Ordering::SeqCst);
+            format!("unpack-tokio-{id}")
+        })
         .enable_all()
         .build()
     {

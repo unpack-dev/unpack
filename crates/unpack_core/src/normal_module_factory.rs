@@ -112,6 +112,7 @@ impl NormalModuleFactory {
             identity,
             resource,
             resolved.file_dependencies,
+            resolved.context_dependencies,
             resolved.missing_dependencies,
             &self.file_system_info,
             self.resolve_snapshot_strategy,

@@ -1,0 +1,50 @@
+# Cross-Bundler Benchmark
+
+The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, and Turbopack on generated Benchmark Fixtures. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
+
+## Local Run
+
+Build the Unpack JavaScript API and run the benchmark:
+
+```sh
+pnpm benchmark:bundlers -- --workspace .benchmark-work/local
+```
+
+To run only the fast local smoke subset:
+
+```sh
+pnpm --filter @unpack-js/benchmarks bench -- --fixtures small --bundlers unpack,webpack,rspack,rolldown
+```
+
+Turbopack requires a fixed Next.js checkout:
+
+```sh
+git init .benchmark-tools/next.js
+git -C .benchmark-tools/next.js remote add origin https://github.com/vercel/next.js.git
+git -C .benchmark-tools/next.js fetch --depth=1 --filter=blob:none origin a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc
+git -C .benchmark-tools/next.js checkout --detach FETCH_HEAD
+
+pnpm --filter @unpack-js/benchmarks bench -- \
+  --turbopack-repo .benchmark-tools/next.js \
+  --turbopack-commit a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc
+```
+
+## Result Shape
+
+The runner emits a Markdown summary and can write the raw JSON report with `--output-json`.
+
+Important fields:
+
+- `cold_build_ms`: build time after clearing benchmark-owned output and cache state.
+- `warm_build_ms`: build time for the second run in the same job while preserving benchmark-owned cache state.
+- `output_bytes`: bytes emitted under the benchmark output path, excluding runner metadata.
+- `version_source`: the npm package version or fixed source commit used for the bundler.
+- `status`: `success`, `unsupported`, `setup_failed`, `build_failed`, `runtime_failed`, or a warm-build variant.
+
+Runtime verification is separate from build timing. A Bundle that builds but does not export the expected checksum is marked `runtime_failed` and should not be treated as a valid performance result.
+
+## CI
+
+The `Cross-Bundler Benchmarks` workflow runs on pull requests and manual dispatch. It writes the table to the GitHub Actions job summary and uploads the JSON report as an artifact.
+
+The workflow is intentionally non-blocking. Benchmark setup failures, external toolchain failures, or runtime verification failures should be visible in the workflow output without blocking unrelated code from merging.

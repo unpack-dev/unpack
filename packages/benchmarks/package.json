@@ -1,0 +1,16 @@
+{
+  "name": "@unpack-js/benchmarks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "node src/run.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@rspack/core": "2.1.1",
+    "@unpack-js/core": "workspace:*",
+    "rolldown": "1.1.3",
+    "webpack": "5.108.1"
+  }
+}

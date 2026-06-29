@@ -1,12 +1,12 @@
 # Unpack
 
-Unpack is a JavaScript bundling project that aims for webpack-like outcomes without treating webpack compatibility as part of its product contract.
+Unpack is a JavaScript bundling project that aims to align with webpack's bundling outcomes, public JavaScript API shape, and internal compilation model where practical.
 
 ## Language
 
 **Webpack-like**:
-Similar in purpose and workflow to webpack, but free to use its own public API, configuration model, loader model, and plugin model.
-_Avoid_: Webpack-compatible
+Aligned with webpack's purpose, workflow, public JavaScript API shape, configuration concepts, loader model, plugin model, naming, and internal compilation flow where practical. Deviations from webpack should be deliberate and documented.
+_Avoid_: Loosely webpack-inspired, Unpack-only API by default
 
 **Bundle**:
 The emitted JavaScript and related assets produced from an application's dependency graph.
@@ -21,12 +21,48 @@ The filesystem directory where a compiler run writes emitted assets for JavaScri
 _Avoid_: Dist directory, build folder
 
 **Webpack-shaped Output**:
-Bundle output whose file structure and runtime semantics resemble webpack output, including concepts such as module tables, module cache, entry bundles, and asynchronous chunk loading, without promising byte-for-byte output matching or webpack API compatibility.
-_Avoid_: Webpack-compatible output, snapshot-compatible webpack output
+Bundle output whose file structure and runtime semantics resemble webpack output, including concepts such as module tables, module cache, entry bundles, and asynchronous chunk loading. Byte-for-byte output matching is not required unless a test or feature explicitly chooses it.
+_Avoid_: Unpack-specific output, snapshot-compatible webpack output
 
 **JavaScript API**:
-The Node.js-facing programmable API for configuring and running Unpack from JavaScript.
-_Avoid_: Rust API, webpack-compatible API
+The Node.js-facing programmable API for configuring and running Unpack from JavaScript; it should follow webpack's public API shape and option names where practical.
+_Avoid_: Rust API, Unpack-only API
+
+**Exposed JavaScript API Surface**:
+The currently callable JavaScript API behavior, including `unpack(options, callback?)`, compiler lifecycle methods, watching lifecycle methods, stats reporting, and supported option normalization. It is the first priority for webpack alignment before generated runtime or graph internals.
+_Avoid_: Internal Rust API, future plugin API surface
+
+**JavaScript Lifecycle Alignment**:
+The webpack-aligned behavior of JavaScript API calls around synchronous validation, asynchronous callback timing, callback `err` values, returned `Stats`, and compiler or watching lifecycle conflicts. It is the first exposed API alignment area to stabilize.
+_Avoid_: Runtime code alignment, graph alignment
+
+**Lifecycle Alignment Matrix**:
+A comparison document for JavaScript lifecycle alignment that records each API scenario's webpack behavior, current Unpack behavior, classification, required tests, and required fixes. It should be produced before changing lifecycle behavior.
+_Avoid_: Ad hoc bug list, implementation-only TODO list
+
+**Documented Webpack Deviation**:
+A deliberate difference from webpack behavior that is recorded with its reason and boundary. Unrecorded differences in implemented webpack surfaces should be treated as alignment gaps to fix.
+_Avoid_: Accidental divergence, undocumented incompatibility
+
+**Webpack API Alignment**:
+The expectation that each exposed webpack-shaped JavaScript API or option should match webpack's call shape, defaults, error timing, callback semantics, and main observable behavior. Unimplemented webpack surfaces should fail loudly or be documented as alignment gaps rather than silently diverging.
+_Avoid_: Byte-for-byte webpack output, full webpack test-suite parity
+
+**Unsupported Webpack Option**:
+A webpack-supported JavaScript API option that Unpack recognizes as part of the webpack surface but has not implemented yet. It should produce a clear validation error instead of being ignored or accepted as a no-op.
+_Avoid_: Ignored option, placeholder option
+
+**Model-Backed Webpack Surface**:
+A webpack-shaped public API surface that is exposed only after Unpack's internal compilation model can support its observable behavior. It prevents public options, hooks, loaders, or plugin entrypoints from becoming no-op compatibility placeholders.
+_Avoid_: API-first compatibility, no-op webpack surface
+
+**Implemented Webpack Surface**:
+A webpack-shaped behavior, API, option, runtime helper, or internal compilation concept that Unpack already exposes or relies on. These surfaces should be aligned with webpack before adding new webpack feature areas.
+_Avoid_: Future feature surface, proposed webpack surface
+
+**Webpack Internal Alignment**:
+The expectation that Unpack's internal bundler concepts use webpack names, phase ordering, and responsibility boundaries where practical, while allowing Rust-native traits, enums, ownership, and concurrency. JavaScript object shapes and hook storage should only be copied when they affect exposed plugin or loader behavior.
+_Avoid_: Rust-only terminology, copying webpack JavaScript classes by default
 
 **Mode**:
 A JavaScript API option that selects a webpack-like default behavior profile, such as development, production, or none.
@@ -35,6 +71,14 @@ _Avoid_: Environment variable, target, optimization preset
 **JavaScript API Test**:
 A test authored from the JavaScript side that exercises Unpack through the public JavaScript API boundary.
 _Avoid_: Rust core test, internal facade test
+
+**Webpack Comparison Test**:
+A JavaScript API test that runs the same observable scenario against webpack and Unpack to verify behavior-level alignment. It is used for important exposed API behavior, not for byte-for-byte output matching or wholesale webpack test-suite parity.
+_Avoid_: Byte-for-byte snapshot test, full webpack conformance suite
+
+**Executable Webpack Reference**:
+A repo-managed, pinned webpack dependency used by comparison tests as the source of observable webpack behavior. Local webpack checkouts may help explain implementation details, but they should not be the required test oracle.
+_Avoid_: Personal webpack checkout, ad hoc installed webpack
 
 **Cross-Bundler Benchmark**:
 A performance comparison that runs the same benchmark fixture through Unpack and selected external bundlers. Its results are diagnostic signals, not merge gates or compatibility claims.

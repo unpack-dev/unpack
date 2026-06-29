@@ -122,8 +122,16 @@ interface NativeRunResult {
   stats?: NativeStatsJson | null;
 }
 
+interface NativeFlushResult {
+  error?: {
+    name: string;
+    message: string;
+  } | null;
+}
+
 interface NativeCompiler {
   run(): Promise<NativeRunResult>;
+  flushCache(): Promise<NativeFlushResult>;
   close(): void;
 }
 
@@ -137,10 +145,16 @@ const native = require("./unpack_node.node") as NativeBinding;
 class CompilerImpl implements Compiler {
   #closed = false;
   #running = false;
+  #idleFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  #pendingCacheFlush: Promise<NativeFlushResult> | undefined;
+  readonly #filesystemCache: boolean;
+  readonly #cacheIdleTimeout: number;
   readonly #nativeCompiler: NativeCompiler;
 
   constructor(options: NormalizedOptions) {
     this.#nativeCompiler = native.createCompiler(options);
+    this.#filesystemCache = options.cache.type === "filesystem";
+    this.#cacheIdleTimeout = options.cache.idleTimeout ?? 0;
   }
 
   run(callback: RunCallback): void {
@@ -176,6 +190,7 @@ class CompilerImpl implements Compiler {
           return;
         }
 
+        this.#scheduleIdleCacheFlush();
         callback(null, new StatsImpl(normalizeNativeStats(result.stats)));
       },
       (error: unknown) => {
@@ -198,11 +213,65 @@ class CompilerImpl implements Compiler {
     }
 
     try {
-      this.#nativeCompiler.close();
-      this.#closed = true;
-      defer(() => callback(null));
+      this.#clearIdleFlushTimer();
+      this.#flushCacheNow().then((flushError) => {
+        if (flushError) {
+          callback(flushError);
+          return;
+        }
+
+        try {
+          this.#nativeCompiler.close();
+          this.#closed = true;
+          callback(null);
+        } catch (error) {
+          callback(toError(error, "InfrastructureError"));
+        }
+      });
     } catch (error) {
       defer(() => callback(toError(error, "InfrastructureError")));
+    }
+  }
+
+  #scheduleIdleCacheFlush(): void {
+    if (!this.#filesystemCache || this.#closed) {
+      return;
+    }
+
+    this.#clearIdleFlushTimer();
+    this.#idleFlushTimer = setTimeout(() => {
+      this.#idleFlushTimer = undefined;
+      void this.#flushCacheNow();
+    }, this.#cacheIdleTimeout);
+  }
+
+  #clearIdleFlushTimer(): void {
+    if (this.#idleFlushTimer !== undefined) {
+      clearTimeout(this.#idleFlushTimer);
+      this.#idleFlushTimer = undefined;
+    }
+  }
+
+  async #flushCacheNow(): Promise<Error | null> {
+    if (!this.#filesystemCache) {
+      return null;
+    }
+
+    const flush = this.#pendingCacheFlush ?? this.#nativeCompiler.flushCache();
+    this.#pendingCacheFlush = flush;
+
+    try {
+      const result = await flush;
+      if (result.error) {
+        return namedError(result.error.name, result.error.message);
+      }
+      return null;
+    } catch (error) {
+      return toError(error, "InfrastructureError");
+    } finally {
+      if (this.#pendingCacheFlush === flush) {
+        this.#pendingCacheFlush = undefined;
+      }
     }
   }
 }

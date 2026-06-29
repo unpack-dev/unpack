@@ -100,6 +100,11 @@ pub struct NativeRunResult {
     pub stats: Option<NativeStatsJson>,
 }
 
+#[napi(object)]
+pub struct NativeFlushResult {
+    pub error: Option<NativeInfrastructureError>,
+}
+
 #[napi(js_name = "createCompiler")]
 pub fn create_compiler(options: NativeCompilerOptions) -> NativeCompiler {
     NativeCompiler::new(options)
@@ -118,6 +123,13 @@ impl NativeCompiler {
         AsyncTask::new(RunCompilerTask {
             compiler: self.compiler.clone(),
             output_path: self.output_path.clone(),
+        })
+    }
+
+    #[napi(js_name = "flushCache")]
+    pub fn flush_cache(&self) -> AsyncTask<FlushCacheTask> {
+        AsyncTask::new(FlushCacheTask {
+            compiler: self.compiler.clone(),
         })
     }
 
@@ -190,6 +202,10 @@ pub struct RunCompilerTask {
     output_path: PathBuf,
 }
 
+pub struct FlushCacheTask {
+    compiler: Option<Arc<Compiler>>,
+}
+
 impl Task for RunCompilerTask {
     type Output = NativeRunResult;
     type JsValue = NativeRunResult;
@@ -199,6 +215,36 @@ impl Task for RunCompilerTask {
             self.compiler.as_deref(),
             &self.output_path,
         ))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for FlushCacheTask {
+    type Output = NativeFlushResult;
+    type JsValue = NativeFlushResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let Some(compiler) = self.compiler.as_deref() else {
+            return Ok(NativeFlushResult {
+                error: Some(NativeInfrastructureError {
+                    name: "CompilerClosedError".to_string(),
+                    message: "compiler is closed".to_string(),
+                }),
+            });
+        };
+
+        Ok(match compiler.flush_cache() {
+            Ok(()) => NativeFlushResult { error: None },
+            Err(message) => NativeFlushResult {
+                error: Some(NativeInfrastructureError {
+                    name: "CacheFlushError".to_string(),
+                    message,
+                }),
+            },
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {

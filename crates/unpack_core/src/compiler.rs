@@ -51,17 +51,14 @@ impl CompilerOptions {
 #[derive(Debug, Clone)]
 pub struct Compiler {
     options: CompilerOptions,
-    resolver: UnpackResolver,
     build_cache: BuildCache,
 }
 
 impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
-        let resolver = UnpackResolver::new(options.resolve.clone());
         let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
         Self {
             options,
-            resolver,
             build_cache,
         }
     }
@@ -73,7 +70,7 @@ impl Compiler {
     pub fn create_compilation(&self) -> Compilation {
         Compilation::new(
             self.options.clone(),
-            self.resolver.clone(),
+            UnpackResolver::new(self.options.resolve.clone()),
             self.build_cache.clone(),
         )
     }

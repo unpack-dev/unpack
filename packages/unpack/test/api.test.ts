@@ -215,6 +215,16 @@ test("development and none default module snapshots to timestamp only", async ()
   await assertSameTimestampModuleEditEmits("before", { mode: "none" });
 });
 
+test("omitted and production mode default resolve snapshots to timestamp plus hash", async () => {
+  await assertSameTimestampPackageExportsEditEmits("after", {});
+  await assertSameTimestampPackageExportsEditEmits("after", { mode: "production" });
+});
+
+test("development and none default resolve snapshots to timestamp only", async () => {
+  await assertSameTimestampPackageExportsEditEmits("before", { mode: "development" });
+  await assertSameTimestampPackageExportsEditEmits("before", { mode: "none" });
+});
+
 test("mode does not weaken build dependency snapshot defaults", async () => {
   await assertSameTimestampBuildDependencyEditEmits({
     snapshot: {
@@ -380,6 +390,69 @@ test("unmanaged path patterns make resolver missing candidates invalidate manage
 
     assert.equal((await runExistingCompiler(compiler)).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /ts/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("missing resolver candidates appearing invalidate resolve records", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from './dep'; export const result = value;",
+    "src/dep.js": "export const value = 'js';"
+  });
+  const compiler = unpack({
+    context: fixture,
+    mode: "development",
+    entry: "./src/index.js",
+    cache: true
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /js/);
+
+    await writeFile(join(fixture, "src/dep.ts"), "export const value = 'ts';", {
+      encoding: "utf8"
+    });
+
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /ts/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("context directory candidate changes invalidate resolve records", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from './pkg'; export const result = value;",
+    "src/pkg/package.json": '{"main":"before.js"}',
+    "src/pkg/before.js": "export const value = 'before';",
+    "src/pkg/after.js": "export const value = 'after';"
+  });
+  const packageJson = join(fixture, "src/pkg/package.json");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(packageJson, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    mode: "development",
+    entry: "./src/index.js",
+    cache: true
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /before/);
+
+    await writeFile(packageJson, '{"main":"after.js"}', { encoding: "utf8" });
+    await writeFile(join(fixture, "src/pkg/unused.js"), "export const unused = true;", {
+      encoding: "utf8"
+    });
+    await utimes(packageJson, stableTime, stableTime);
+
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
@@ -1208,6 +1281,60 @@ async function assertSameTimestampModuleEditEmits(
     const second = await runExistingCompiler(compiler);
     assert.equal(second.err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), new RegExp(expected));
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+}
+
+async function assertSameTimestampPackageExportsEditEmits(
+  expected: string,
+  options: Partial<Parameters<typeof unpack>[0]>
+) {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from 'pkg/feature'; export const result = value;",
+    "node_modules/pkg/package.json": JSON.stringify({
+      name: "pkg",
+      version: "1.0.0",
+      exports: { "./feature": "./before.js" }
+    }),
+    "node_modules/pkg/before.js": "export const value = 'before';",
+    "node_modules/pkg/after.js": "export const value = 'after';"
+  });
+  const packageRoot = join(fixture, "node_modules/pkg");
+  const packageJson = join(packageRoot, "package.json");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(packageJson, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: true,
+    snapshot: {
+      unmanagedPaths: [packageRoot]
+    },
+    ...options
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /const value = 'before'/);
+
+    await writeFile(
+      packageJson,
+      JSON.stringify({
+        name: "pkg",
+        version: "1.0.0",
+        exports: { "./feature": "./after.js" }
+      }),
+      { encoding: "utf8" }
+    );
+    await utimes(packageJson, stableTime, stableTime);
+
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.match(
+      await readFile(join(fixture, "dist/main.js"), "utf8"),
+      new RegExp(`const value = '${expected}'`)
+    );
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });

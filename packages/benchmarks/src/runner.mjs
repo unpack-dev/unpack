@@ -3,7 +3,11 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { performance } from "node:perf_hooks";
 import { dirname, join, resolve, sep } from "node:path";
 
-import { createBenchmarkFixture, FIXTURE_SHAPES } from "./fixture.mjs";
+import {
+  applyWarmBuildMutation,
+  createBenchmarkFixture,
+  FIXTURE_SHAPES
+} from "./fixture.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -36,8 +40,8 @@ export async function runBenchmark(options = {}) {
   const results = [];
 
   for (const shape of shapes) {
-    const fixture = await createBenchmarkFixture(fixtureRoot, shape);
     for (const bundler of bundlerNames) {
+      const fixture = await createBenchmarkFixture(fixtureRoot, shape);
       const adapter = adapters[bundler];
       results.push(
         await runBundlerBenchmark({
@@ -130,10 +134,29 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     return resultFromPhases({ fixture, bundler, versionSource, cold });
   }
 
+  let warmFixture;
+  try {
+    warmFixture = await applyWarmBuildMutation(fixture);
+  } catch (error) {
+    return resultFromPhases({
+      fixture,
+      bundler,
+      versionSource,
+      cold,
+      warm: {
+        status: "build_failed",
+        build_ms: null,
+        output_bytes: await outputBytes(outputDir),
+        verify_ms: null,
+        message: `failed to modify warm build fixture: ${errorMessage(error)}`
+      }
+    });
+  }
+
   const warm = await timedBuild({
     adapter,
     phase: "warm",
-    fixture,
+    fixture: warmFixture,
     outputDir,
     cacheDir,
     persistentCache: true,
@@ -141,20 +164,27 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
   });
 
   if (warm.status !== "success") {
-    return resultFromPhases({ fixture, bundler, versionSource, cold, warm });
+    return resultFromPhases({ fixture: warmFixture, bundler, versionSource, cold, warm });
   }
 
   const noCache = await timedBuild({
     adapter,
     phase: "no-cache",
-    fixture,
+    fixture: warmFixture,
     outputDir: noCacheOutputDir,
     cacheDir: noCacheCacheDir,
     persistentCache: false,
     options
   });
 
-  return resultFromPhases({ fixture, bundler, versionSource, cold, warm, noCache });
+  return resultFromPhases({
+    fixture: warmFixture,
+    bundler,
+    versionSource,
+    cold,
+    warm,
+    noCache
+  });
 }
 
 async function timedBuild({

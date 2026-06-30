@@ -93,7 +93,7 @@ A benchmark measurement taken after clearing the output path and benchmark-owned
 _Avoid_: First run, clean test
 
 **Warm Build Measurement**:
-A benchmark measurement taken after a prior build in the same benchmark job while preserving benchmark-owned cache state that the tool under test can reuse.
+A benchmark measurement taken after a prior build in the same benchmark job and after applying a benchmark-owned source module change, while preserving benchmark-owned cache state that the tool under test can reuse.
 _Avoid_: Incremental rebuild, watch rebuild
 
 **Tracing**:

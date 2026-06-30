@@ -11,7 +11,7 @@ import { runBenchmark, toSummaryMarkdown } from "../src/runner.mjs";
 
 const execFileAsync = promisify(execFile);
 
-test("runner emits persistent-cache and no-cache measurements for a verified bundle", async () => {
+test("runner emits warm-after-change and no-cache measurements for a verified bundle", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
   const calls = [];
 
@@ -46,9 +46,44 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
         { phase: "no-cache", persistentCache: false }
       ]
     );
+    assert.match(calls[0].leaf0Source, /leaf0 = 1/);
+    assert.match(calls[1].leaf0Source, /leaf0 = 1001/);
+    assert.match(calls[2].leaf0Source, /leaf0 = 1001/);
+    assert.equal(calls[1].expectedChecksum - calls[0].expectedChecksum, 2000);
+    assert.equal(calls[2].expectedChecksum, calls[1].expectedChecksum);
     const summary = toSummaryMarkdown(report);
     assert.match(summary, /no_cache_build_ms/);
     assert.match(summary, /\\| small \\| fake \\| fake@1\\.0\\.0 \\|/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("runner resets the fixture before each bundler benchmark", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+  const firstCalls = [];
+  const secondCalls = [];
+
+  try {
+    const report = await runBenchmark({
+      workspaceDir: workspace,
+      fixtures: ["small"],
+      bundlers: ["first", "second"],
+      adapters: {
+        first: fakeAdapter({ calls: firstCalls }),
+        second: fakeAdapter({ calls: secondCalls })
+      }
+    });
+
+    assert.deepEqual(
+      report.results.map((result) => result.status),
+      ["success", "success"]
+    );
+    assert.match(firstCalls[0].leaf0Source, /leaf0 = 1/);
+    assert.match(firstCalls[1].leaf0Source, /leaf0 = 1001/);
+    assert.match(secondCalls[0].leaf0Source, /leaf0 = 1/);
+    assert.match(secondCalls[1].leaf0Source, /leaf0 = 1001/);
+    assert.equal(firstCalls[0].expectedChecksum, secondCalls[0].expectedChecksum);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -230,7 +265,16 @@ function fakeAdapter({ checksumOffset = 0, error, calls } = {}) {
     name: "fake",
     versionSource: () => "fake@1.0.0",
     async build({ fixture, outputDir, phase, persistentCache }) {
-      calls?.push({ phase, persistentCache });
+      const leaf0Source = await readFile(
+        join(fixture.context, "src", "features", "leaf0.js"),
+        "utf8"
+      );
+      calls?.push({
+        phase,
+        persistentCache,
+        expectedChecksum: fixture.expectedChecksum,
+        leaf0Source
+      });
       if (error) {
         throw error;
       }

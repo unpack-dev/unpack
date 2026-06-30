@@ -1,5 +1,8 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+
+const WARM_BUILD_MUTATION_FEATURE = 0;
+const WARM_BUILD_MUTATION_DELTA = 1000;
 
 export const FIXTURE_SHAPES = {
   small: {
@@ -63,6 +66,30 @@ export async function createBenchmarkFixture(rootDir, shape) {
   };
 }
 
+export async function applyWarmBuildMutation(fixture) {
+  if (fixture.warmBuildMutation) {
+    return fixture;
+  }
+
+  const feature = WARM_BUILD_MUTATION_FEATURE;
+  const path = join(fixture.context, `src/features/leaf${feature}.js`);
+  await writeSource(
+    path,
+    leafSource(feature, feature + 1 + WARM_BUILD_MUTATION_DELTA)
+  );
+
+  const modifiedAt = new Date(Date.now() + 1000);
+  await utimes(path, modifiedAt, modifiedAt);
+
+  return {
+    ...fixture,
+    expectedChecksum: fixture.expectedChecksum + WARM_BUILD_MUTATION_DELTA * 2,
+    warmBuildMutation: {
+      path
+    }
+  };
+}
+
 function entrySource(shape) {
   const source = [];
   for (let feature = 0; feature < shape.featureModules; feature += 1) {
@@ -115,8 +142,8 @@ function sharedSource(shared) {
   return `export const shared${shared} = ${shared + 1};\nexport const sharedValue${shared} = shared${shared} * 2;\n`;
 }
 
-function leafSource(feature) {
-  return `export const leaf${feature} = ${feature + 1};\n`;
+function leafSource(feature, value = feature + 1) {
+  return `export const leaf${feature} = ${value};\n`;
 }
 
 function reexportSource(feature) {

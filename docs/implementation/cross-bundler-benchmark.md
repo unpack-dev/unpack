@@ -34,6 +34,11 @@ fixed checkout so `turbopack-cli build` explicitly stops TurboTasks before
 process exit. Turbopack build sessions use shutdown-time persistent cache
 storage, so this flushes the cold build cache for the warm measurement.
 
+After a successful cold build, the runner modifies one generated source module
+before starting the warm build timer. The warm measurement therefore captures a
+build that can reuse persistent cache state while responding to a small module
+edit.
+
 ## Result Shape
 
 The runner emits a Markdown summary and can write the raw JSON report with `--output-json`.
@@ -41,7 +46,7 @@ The runner emits a Markdown summary and can write the raw JSON report with `--ou
 Important fields:
 
 - `cold_build_ms`: build time after clearing benchmark-owned output and persistent cache state.
-- `warm_build_ms`: build time for the second run in the same job while preserving benchmark-owned persistent cache state.
+- `warm_build_ms`: build time after changing one generated source module while preserving benchmark-owned persistent cache state from the cold build.
 - `no_cache_build_ms`: build time for an additional clean build with persistent cache disabled. Bundlers without a persistent-cache option run this as a separate clean one-shot build.
 - `output_bytes`: bytes emitted under the benchmark output path, excluding runner metadata.
 - `version_source`: the npm package version or fixed source commit used for the bundler.

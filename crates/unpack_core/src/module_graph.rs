@@ -83,6 +83,20 @@ impl ModuleGraph {
             })
             .map(|connection| connection.module)
     }
+
+    pub fn module_for_request(
+        &self,
+        origin_module: ModuleId,
+        origin_block: Option<usize>,
+        request: &str,
+    ) -> Option<ModuleId> {
+        self.outgoing_connections(origin_module)
+            .find(|connection| {
+                connection.origin_block == origin_block
+                    && connection.dependency.request() == Some(request)
+            })
+            .map(|connection| connection.module)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

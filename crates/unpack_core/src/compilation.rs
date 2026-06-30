@@ -103,9 +103,15 @@ impl Compilation {
             self.entries = std::mem::take(&mut state.entries).into_values().collect();
             self.errors = std::mem::take(&mut state.errors);
             self.watch_dependencies = WatchDependencies {
-                files: std::mem::take(&mut state.file_dependencies),
-                contexts: std::mem::take(&mut state.context_dependencies),
-                missing: std::mem::take(&mut state.missing_dependencies),
+                files: std::mem::take(&mut state.file_dependencies)
+                    .into_iter()
+                    .collect(),
+                contexts: std::mem::take(&mut state.context_dependencies)
+                    .into_iter()
+                    .collect(),
+                missing: std::mem::take(&mut state.missing_dependencies)
+                    .into_iter()
+                    .collect(),
             };
 
             if result.is_ok() {

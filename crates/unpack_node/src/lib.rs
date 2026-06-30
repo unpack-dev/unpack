@@ -2,7 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -373,20 +373,9 @@ fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> Native
     let Some(compiler) = compiler else {
         return infrastructure_error("CompilerClosedError", "compiler is closed");
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .max_blocking_threads(MAX_BLOCKING_THREADS)
-        .thread_name_fn(|| {
-            static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
-            let id = THREAD_ID.fetch_add(1, Ordering::SeqCst);
-            format!("unpack-tokio-{id}")
-        })
-        .enable_all()
-        .build()
-    {
+    let runtime = match shared_runtime() {
         Ok(runtime) => runtime,
-        Err(error) => {
-            return infrastructure_error("InfrastructureError", error.to_string());
-        }
+        Err(message) => return infrastructure_error("InfrastructureError", message),
     };
 
     let compilation = match runtime.block_on(compiler.run()) {
@@ -412,6 +401,27 @@ fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> Native
         }),
         logs,
     }
+}
+
+fn shared_runtime() -> std::result::Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: OnceLock<std::result::Result<tokio::runtime::Runtime, String>> =
+        OnceLock::new();
+
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .max_blocking_threads(MAX_BLOCKING_THREADS)
+                .thread_name_fn(|| {
+                    static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+                    let id = THREAD_ID.fetch_add(1, Ordering::SeqCst);
+                    format!("unpack-tokio-{id}")
+                })
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 fn emit_assets(output_path: &Path, assets: &[Asset]) -> std::result::Result<(), String> {

@@ -118,6 +118,7 @@ pub(crate) fn create_assets(
                 entry_module,
                 &module_render_ids,
             ),
+            options.sourcemap,
         ));
     }
 
@@ -134,20 +135,27 @@ pub(crate) fn create_assets(
         assets.extend(emit_asset(
             chunk.filename().to_string(),
             render_async_chunk_asset(module_graph, chunk_graph, chunk, &module_render_ids),
+            options.sourcemap,
         ));
     }
 
     assets
 }
 
-fn emit_asset(filename: String, mut source: ConcatSource) -> Vec<Asset> {
+fn emit_asset(filename: String, mut source: ConcatSource, sourcemap: bool) -> Vec<Asset> {
     let map_filename = format!("{filename}.map");
-    source.add(RawStringSource::from(format!(
-        "\n//# sourceMappingURL={map_filename}\n"
-    )));
+    if sourcemap {
+        source.add(RawStringSource::from(format!(
+            "\n//# sourceMappingURL={map_filename}\n"
+        )));
+    }
 
     let mut assets = Vec::new();
-    let mut source_map = source.map(&ObjectPool::default(), &MapOptions::new(false));
+    let mut source_map = if sourcemap {
+        source.map(&ObjectPool::default(), &MapOptions::new(false))
+    } else {
+        None
+    };
     if let Some(map) = &mut source_map {
         map.set_file(Some(filename.clone().into()));
     }

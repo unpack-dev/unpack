@@ -9,6 +9,7 @@ export interface UnpackOptions {
   output?: {
     path?: string;
   };
+  sourcemap?: boolean;
   cache?: CacheOptions;
   snapshot?: SnapshotOptions;
   infrastructureLogging?: InfrastructureLoggingOptions;
@@ -122,6 +123,7 @@ interface NormalizedOptions {
   context: string;
   entries: NormalizedEntry[];
   outputPath: string;
+  sourcemap: boolean;
   cache: NormalizedCacheOptions;
   snapshot: NormalizedSnapshotOptions;
   infrastructureLogging: NormalizedInfrastructureLoggingOptions;
@@ -807,7 +809,16 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
   assertPlainObject(options, "options");
   assertKnownKeys(
     options,
-    ["context", "mode", "entry", "output", "cache", "snapshot", "infrastructureLogging"],
+    [
+      "context",
+      "mode",
+      "entry",
+      "output",
+      "sourcemap",
+      "cache",
+      "snapshot",
+      "infrastructureLogging"
+    ],
     "options"
   );
 
@@ -833,6 +844,10 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     context: normalizedContext,
     entries: normalizeEntry(options.entry),
     outputPath,
+    sourcemap:
+      options.sourcemap === undefined
+        ? true
+        : assertBoolean(options.sourcemap, "options.sourcemap"),
     cache: normalizeCacheOptions(options.cache, normalizedContext),
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging)

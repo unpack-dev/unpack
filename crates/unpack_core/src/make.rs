@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -23,9 +23,9 @@ pub(crate) struct MakeState {
     pub module_graph: ModuleGraph,
     pub entries: BTreeMap<usize, ModuleId>,
     pub errors: Vec<Error>,
-    pub file_dependencies: BTreeSet<PathBuf>,
-    pub context_dependencies: BTreeSet<PathBuf>,
-    pub missing_dependencies: BTreeSet<PathBuf>,
+    pub file_dependencies: HashSet<PathBuf>,
+    pub context_dependencies: HashSet<PathBuf>,
+    pub missing_dependencies: HashSet<PathBuf>,
     modules_by_identity: HashMap<ModuleIdentity, ModuleId>,
 }
 
@@ -373,7 +373,7 @@ impl BuildTask {
             }
         }
 
-        let source = match tokio::fs::read_to_string(&self.resource).await {
+        let source = match std::fs::read_to_string(&self.resource) {
             Ok(source) => source,
             Err(error) => {
                 let error = Error::read(&self.resource, error);

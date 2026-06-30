@@ -94,7 +94,8 @@ pub(crate) fn create_assets(
     chunk_graph: &ChunkGraph,
     entries: &[ModuleId],
 ) -> Vec<Asset> {
-    let module_render_ids = module_render_ids(options.context.as_path(), module_graph);
+    let render_context = RenderPathContext::new(options.context.as_path());
+    let module_render_ids = module_render_ids(&render_context, module_graph);
     let mut assets = Vec::new();
 
     for (entry_index, group_id) in chunk_graph.entrypoints().iter().copied().enumerate() {
@@ -329,8 +330,8 @@ fn render_module_factory(
     let module_id = module.id();
     let module_render_id = &module_render_ids[&module_id];
     let mut source = ReplaceSource::new(OriginalSource::new(
-        module.source().to_string(),
-        module_render_id.to_string(),
+        module.source(),
+        module_render_id.as_str(),
     ));
     let mut init_fragments = Vec::new();
 
@@ -338,6 +339,7 @@ fn render_module_factory(
         apply_dependency_template(
             dependency,
             module_id,
+            None,
             None,
             module_graph,
             chunk_graph,
@@ -347,11 +349,12 @@ fn render_module_factory(
             &mut init_fragments,
         );
     }
-    for dependency in module.dependencies() {
+    for (dependency_index, dependency) in module.dependencies().iter().enumerate() {
         apply_dependency_template(
             dependency,
             module_id,
             None,
+            Some(dependency_index),
             module_graph,
             chunk_graph,
             module.exports_info(),
@@ -361,11 +364,12 @@ fn render_module_factory(
         );
     }
     for (block_index, block) in module.blocks().iter().enumerate() {
-        for dependency in block.dependencies() {
+        for (dependency_index, dependency) in block.dependencies().iter().enumerate() {
             apply_dependency_template(
                 dependency,
                 module_id,
                 Some(block_index),
+                Some(dependency_index),
                 module_graph,
                 chunk_graph,
                 module.exports_info(),
@@ -420,6 +424,7 @@ fn apply_dependency_template(
     dependency: &Dependency,
     module_id: ModuleId,
     origin_block: Option<usize>,
+    dependency_index: Option<usize>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     exports_info: &ExportsInfo,
@@ -434,6 +439,7 @@ fn apply_dependency_template(
         Dependency::HarmonyImportSideEffect(dep) => apply_harmony_import_side_effect_dependency(
             dep,
             module_id,
+            dependency_index,
             module_graph,
             module_render_ids,
             init_fragments,
@@ -441,6 +447,7 @@ fn apply_dependency_template(
         Dependency::HarmonyImportSpecifier(dep) => apply_harmony_import_specifier_dependency(
             dep,
             module_id,
+            dependency_index,
             module_graph,
             module_render_ids,
             source,
@@ -455,6 +462,7 @@ fn apply_dependency_template(
             apply_harmony_export_imported_specifier_dependency(
                 dep,
                 module_id,
+                dependency_index,
                 module_graph,
                 exports_info,
                 module_render_ids,
@@ -465,6 +473,7 @@ fn apply_dependency_template(
             dep,
             module_id,
             origin_block,
+            dependency_index,
             module_graph,
             chunk_graph,
             module_render_ids,
@@ -493,15 +502,15 @@ fn apply_export_header_dependency(dep: &HarmonyExportHeaderDependency, source: &
 fn apply_harmony_import_side_effect_dependency(
     dep: &HarmonyImportSideEffectDependency,
     module_id: ModuleId,
+    dependency_index: Option<usize>,
     module_graph: &ModuleGraph,
     module_render_ids: &HashMap<ModuleId, String>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
-    let Some(target) = module_graph.module_for_dependency(
-        module_id,
-        None,
-        &Dependency::HarmonyImportSideEffect(dep.clone()),
-    ) else {
+    let Some(dependency_index) = dependency_index else {
+        return;
+    };
+    let Some(target) = module_graph.module_for_dependency(module_id, None, dependency_index) else {
         return;
     };
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
@@ -516,15 +525,16 @@ fn apply_harmony_import_side_effect_dependency(
 fn apply_harmony_import_specifier_dependency(
     dep: &HarmonyImportSpecifierDependency,
     module_id: ModuleId,
+    dependency_index: Option<usize>,
     module_graph: &ModuleGraph,
     module_render_ids: &HashMap<ModuleId, String>,
     source: &mut ReplaceSource,
 ) {
-    let Some(_target) = module_graph.module_for_dependency(
-        module_id,
-        None,
-        &Dependency::HarmonyImportSpecifier(dep.clone()),
-    ) else {
+    let Some(dependency_index) = dependency_index else {
+        return;
+    };
+    let Some(_target) = module_graph.module_for_dependency(module_id, None, dependency_index)
+    else {
         return;
     };
     let expression = import_expression(
@@ -595,13 +605,17 @@ fn apply_harmony_export_expression_dependency(
 fn apply_harmony_export_imported_specifier_dependency(
     dep: &HarmonyExportImportedSpecifierDependency,
     module_id: ModuleId,
+    dependency_index: Option<usize>,
     module_graph: &ModuleGraph,
     exports_info: &ExportsInfo,
     module_render_ids: &HashMap<ModuleId, String>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
-    let dependency = Dependency::HarmonyExportImportedSpecifier(dep.clone());
-    let Some(_target) = module_graph.module_for_dependency(module_id, None, &dependency) else {
+    let Some(dependency_index) = dependency_index else {
+        return;
+    };
+    let Some(_target) = module_graph.module_for_dependency(module_id, None, dependency_index)
+    else {
         return;
     };
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
@@ -632,6 +646,7 @@ fn apply_import_dependency(
     dep: &ImportDependency,
     module_id: ModuleId,
     origin_block: Option<usize>,
+    dependency_index: Option<usize>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     module_render_ids: &HashMap<ModuleId, String>,
@@ -640,9 +655,11 @@ fn apply_import_dependency(
     let Some(block_index) = origin_block else {
         return;
     };
-    let dependency = Dependency::Import(dep.clone());
+    let Some(dependency_index) = dependency_index else {
+        return;
+    };
     let Some(target) =
-        module_graph.module_for_dependency(module_id, Some(block_index), &dependency)
+        module_graph.module_for_dependency(module_id, Some(block_index), dependency_index)
     else {
         return;
     };
@@ -674,7 +691,38 @@ fn replace(source: &mut ReplaceSource, range: SourceRange, content: String) {
     source.replace(range.start, range.end, content, None);
 }
 
-fn module_render_ids(context: &Path, module_graph: &ModuleGraph) -> HashMap<ModuleId, String> {
+#[derive(Debug, Clone)]
+struct RenderPathContext {
+    raw_context: PathBuf,
+    context: PathBuf,
+}
+
+impl RenderPathContext {
+    fn new(context: &Path) -> Self {
+        Self {
+            raw_context: context.to_path_buf(),
+            context: std::fs::canonicalize(context).unwrap_or_else(|_| context.to_path_buf()),
+        }
+    }
+
+    fn make_relative(&self, resource: &Path) -> String {
+        if let Ok(relative) = resource
+            .strip_prefix(&self.context)
+            .or_else(|_| resource.strip_prefix(&self.raw_context))
+        {
+            return normalize_path(relative);
+        }
+
+        let resource = std::fs::canonicalize(resource).unwrap_or_else(|_| PathBuf::from(resource));
+        let relative = resource.strip_prefix(&self.context).unwrap_or(&resource);
+        normalize_path(relative)
+    }
+}
+
+fn module_render_ids(
+    context: &RenderPathContext,
+    module_graph: &ModuleGraph,
+) -> HashMap<ModuleId, String> {
     module_graph
         .modules()
         .iter()
@@ -682,8 +730,8 @@ fn module_render_ids(context: &Path, module_graph: &ModuleGraph) -> HashMap<Modu
         .collect()
 }
 
-fn module_render_id(context: &Path, module: &Module) -> String {
-    let mut resource = make_relative(context, &module.identity().resource);
+fn module_render_id(context: &RenderPathContext, module: &Module) -> String {
+    let mut resource = context.make_relative(&module.identity().resource);
     if !resource.starts_with("./") {
         resource = format!("./{resource}");
     }
@@ -698,11 +746,8 @@ fn module_render_id(context: &Path, module: &Module) -> String {
     resource
 }
 
-fn make_relative(context: &Path, resource: &Path) -> String {
-    let context = std::fs::canonicalize(context).unwrap_or_else(|_| context.to_path_buf());
-    let resource = std::fs::canonicalize(resource).unwrap_or_else(|_| PathBuf::from(resource));
-    let relative = resource.strip_prefix(&context).unwrap_or(&resource);
-    relative.to_string_lossy().replace('\\', "/")
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn render_chunk_filename_map(chunk_graph: &ChunkGraph) -> String {

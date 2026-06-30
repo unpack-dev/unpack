@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -23,9 +23,9 @@ pub(crate) struct MakeState {
     pub module_graph: ModuleGraph,
     pub entries: BTreeMap<usize, ModuleId>,
     pub errors: Vec<Error>,
-    pub file_dependencies: BTreeSet<PathBuf>,
-    pub context_dependencies: BTreeSet<PathBuf>,
-    pub missing_dependencies: BTreeSet<PathBuf>,
+    pub file_dependencies: HashSet<PathBuf>,
+    pub context_dependencies: HashSet<PathBuf>,
+    pub missing_dependencies: HashSet<PathBuf>,
     modules_by_identity: HashMap<ModuleIdentity, ModuleId>,
 }
 
@@ -86,6 +86,7 @@ struct ProcessDependenciesTask {
 struct QueuedDependency {
     entry_index: Option<usize>,
     origin_block: Option<usize>,
+    origin_dependency_index: Option<usize>,
     dependency: Dependency,
 }
 
@@ -145,6 +146,7 @@ pub(crate) async fn run(
                 dependencies: vec![QueuedDependency {
                     entry_index: Some(entry_index),
                     origin_block: None,
+                    origin_dependency_index: None,
                     dependency: Dependency::new(DependencyKind::Entry, entry.request.clone()),
                 }],
             }),
@@ -303,7 +305,6 @@ impl AddTask {
                     state
                         .missing_dependencies
                         .extend(factorized.missing_dependencies.iter().cloned());
-                    state.file_dependencies.insert(resource.clone());
                     state.add_or_connect(self.origin_module, self.dependencies, identity.clone())
                 };
 
@@ -496,21 +497,24 @@ fn process_dependencies_task(
         .dependencies
         .iter()
         .cloned()
-        .map(|dependency| QueuedDependency {
+        .enumerate()
+        .map(|(dependency_index, dependency)| QueuedDependency {
             entry_index: None,
             origin_block: None,
+            origin_dependency_index: Some(dependency_index),
             dependency,
         })
         .collect::<Vec<_>>();
 
     for (block_index, block) in parsed.blocks.iter().enumerate() {
-        dependencies.extend(block.dependencies().iter().cloned().map(|dependency| {
-            QueuedDependency {
+        dependencies.extend(block.dependencies().iter().cloned().enumerate().map(
+            |(dependency_index, dependency)| QueuedDependency {
                 entry_index: None,
                 origin_block: Some(block_index),
+                origin_dependency_index: Some(dependency_index),
                 dependency,
-            }
-        }));
+            },
+        ));
     }
 
     if dependencies.is_empty() {
@@ -588,6 +592,7 @@ impl MakeState {
             self.module_graph.connect(
                 origin_module,
                 dependency.origin_block,
+                dependency.origin_dependency_index,
                 dependency.dependency,
                 module_id,
             );

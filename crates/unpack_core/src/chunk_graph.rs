@@ -174,6 +174,7 @@ impl ChunkGraph {
     ) -> Self {
         let mut graph = Self::default();
         let mut async_groups_by_target = HashMap::new();
+        let render_context = RenderPathContext::new(options.context.as_path());
 
         for (entry_index, entry_module) in entries.iter().copied().enumerate() {
             let entry_name = options
@@ -229,8 +230,7 @@ impl ChunkGraph {
                 {
                     group
                 } else {
-                    let render_id =
-                        chunk_render_id(options.context.as_path(), module_graph, target);
+                    let render_id = chunk_render_id(&render_context, module_graph, target);
                     let chunk = graph.add_chunk(render_id.clone(), format!("{render_id}.js"));
                     let group = graph.add_chunk_group(ChunkGroupKind::Async, Some(origin));
                     graph.connect_chunk_and_group(chunk, group);
@@ -379,20 +379,49 @@ fn import_block_target(module_graph: &ModuleGraph, origin: AsyncBlockOrigin) -> 
         .map(|connection| connection.module)
 }
 
-fn chunk_render_id(context: &Path, module_graph: &ModuleGraph, module: ModuleId) -> String {
+fn chunk_render_id(
+    context: &RenderPathContext,
+    module_graph: &ModuleGraph,
+    module: ModuleId,
+) -> String {
     let resource = module_graph
         .module(module)
         .map(|module| module.identity().resource.as_path())
         .unwrap_or_else(|| Path::new("chunk"));
-    let relative = make_relative(context, resource);
+    let relative = context.make_relative(resource);
     sanitize_chunk_id(&relative)
 }
 
-fn make_relative(context: &Path, resource: &Path) -> String {
-    let context = std::fs::canonicalize(context).unwrap_or_else(|_| context.to_path_buf());
-    let resource = std::fs::canonicalize(resource).unwrap_or_else(|_| PathBuf::from(resource));
-    let relative = resource.strip_prefix(&context).unwrap_or(&resource);
-    relative.to_string_lossy().replace('\\', "/")
+#[derive(Debug, Clone)]
+struct RenderPathContext {
+    raw_context: PathBuf,
+    context: PathBuf,
+}
+
+impl RenderPathContext {
+    fn new(context: &Path) -> Self {
+        Self {
+            raw_context: context.to_path_buf(),
+            context: std::fs::canonicalize(context).unwrap_or_else(|_| context.to_path_buf()),
+        }
+    }
+
+    fn make_relative(&self, resource: &Path) -> String {
+        if let Ok(relative) = resource
+            .strip_prefix(&self.context)
+            .or_else(|_| resource.strip_prefix(&self.raw_context))
+        {
+            return normalize_path(relative);
+        }
+
+        let resource = std::fs::canonicalize(resource).unwrap_or_else(|_| PathBuf::from(resource));
+        let relative = resource.strip_prefix(&self.context).unwrap_or(&resource);
+        normalize_path(relative)
+    }
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn sanitize_chunk_id(relative: &str) -> String {

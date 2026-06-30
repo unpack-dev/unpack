@@ -52,18 +52,6 @@ impl NormalModuleFactory {
             .request()
             .expect("module dependency should have a request");
         let resolve_request = ResolveRequest::new(context, request);
-        if let Some(record) = self.cache.get(&resolve_request) {
-            if record
-                .is_valid_with_cache(
-                    &self.file_system_info,
-                    self.resolve_snapshot_strategy,
-                    &self.snapshot_cache,
-                )
-                .await
-            {
-                return Ok(FactorizedModule::from_resolve_record(record));
-            }
-        }
 
         self.factorize_with_runtime_cache(context, request, resolve_request)
             .await
@@ -87,11 +75,34 @@ impl NormalModuleFactory {
         };
 
         cell.get_or_init(|| async {
-            self.factorize_uncached(context, request, resolve_request)
+            self.factorize_from_cache_or_uncached(context, request, resolve_request)
                 .await
         })
         .await
         .clone()
+    }
+
+    async fn factorize_from_cache_or_uncached(
+        &self,
+        context: &Path,
+        request: &str,
+        resolve_request: ResolveRequest,
+    ) -> Result<FactorizedModule> {
+        if let Some(record) = self.cache.get(&resolve_request) {
+            if record
+                .is_valid_with_cache(
+                    &self.file_system_info,
+                    self.resolve_snapshot_strategy,
+                    &self.snapshot_cache,
+                )
+                .await
+            {
+                return Ok(FactorizedModule::from_resolve_record(record));
+            }
+        }
+
+        self.factorize_uncached(context, request, resolve_request)
+            .await
     }
 
     async fn factorize_uncached(
@@ -205,6 +216,46 @@ mod tests {
                 .len(),
             1
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_factorize_cache_reuses_resolve_cache_hits()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        fs::write(temp.path().join("dep.js"), "export const value = 1;")?;
+
+        let mut resolve_options = ResolveOptions::default();
+        resolve_options.extensions = vec![".js".to_string()];
+        let build_cache =
+            BuildCache::new(CacheOptions::memory(), crate::SnapshotOptions::default());
+        let dependency = Dependency::new(DependencyKind::StaticImport, "./dep");
+
+        let first_factory = NormalModuleFactory::new(
+            UnpackResolver::new(resolve_options.clone()),
+            build_cache.normal_module_factory(),
+            FileSystemInfo::new(),
+            SnapshotStrategy::timestamp(),
+        );
+        first_factory.factorize(temp.path(), &dependency).await?;
+        assert_eq!(build_cache.stats().resolve_entries, 1);
+        assert_eq!(build_cache.stats().resolve_hits, 0);
+        assert_eq!(build_cache.stats().resolve_misses, 1);
+
+        let second_factory = NormalModuleFactory::new(
+            UnpackResolver::new(resolve_options),
+            build_cache.normal_module_factory(),
+            FileSystemInfo::new(),
+            SnapshotStrategy::timestamp(),
+        );
+        let first_hit = second_factory.factorize(temp.path(), &dependency).await?;
+        let second_hit = second_factory.factorize(temp.path(), &dependency).await?;
+
+        assert_eq!(first_hit, second_hit);
+        assert_eq!(build_cache.stats().resolve_entries, 1);
+        assert_eq!(build_cache.stats().resolve_hits, 1);
+        assert_eq!(build_cache.stats().resolve_misses, 1);
 
         Ok(())
     }

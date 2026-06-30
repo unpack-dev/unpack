@@ -17,6 +17,7 @@ export const adapters = {
     async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
       const { default: unpack } = await import("@unpack-js/core");
       const compiler = unpack({
+        mode: "none",
         context: fixture.context,
         entry: fixture.entry,
         output: { path: outputDir },

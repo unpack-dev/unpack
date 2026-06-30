@@ -1,8 +1,9 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs, io,
     path::{Path, PathBuf},
-    time::SystemTime,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::{Error, Result};
@@ -116,6 +117,12 @@ pub(crate) struct FileSystemInfo {
     unmanaged_paths: Vec<SnapshotPathPattern>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SnapshotCache {
+    context_timestamp_hashes: Arc<Mutex<HashMap<PathBuf, DirectoryTimestampHash>>>,
+    context_content_hashes: Arc<Mutex<HashMap<PathBuf, u64>>>,
+}
+
 impl FileSystemInfo {
     pub(crate) fn new() -> Self {
         Self::from_snapshot_options(&SnapshotOptions::default())
@@ -138,6 +145,7 @@ impl FileSystemInfo {
         Snapshot::create_file(path, source, strategy, self).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn create_resolve_snapshot(
         &self,
         files: impl IntoIterator<Item = PathBuf>,
@@ -145,7 +153,18 @@ impl FileSystemInfo {
         missing: impl IntoIterator<Item = PathBuf>,
         strategy: SnapshotStrategy,
     ) -> Result<Snapshot> {
-        Snapshot::create_resolve(files, contexts, missing, strategy, self).await
+        Snapshot::create_resolve(files, contexts, missing, strategy, self, None).await
+    }
+
+    pub(crate) async fn create_resolve_snapshot_with_cache(
+        &self,
+        files: impl IntoIterator<Item = PathBuf>,
+        contexts: impl IntoIterator<Item = PathBuf>,
+        missing: impl IntoIterator<Item = PathBuf>,
+        strategy: SnapshotStrategy,
+        cache: &SnapshotCache,
+    ) -> Result<Snapshot> {
+        Snapshot::create_resolve(files, contexts, missing, strategy, self, Some(cache)).await
     }
 
     #[cfg(test)]
@@ -170,7 +189,16 @@ impl FileSystemInfo {
         snapshot: &Snapshot,
         strategy: SnapshotStrategy,
     ) -> bool {
-        snapshot.is_valid(strategy, self).await
+        snapshot.is_valid(strategy, self, None).await
+    }
+
+    pub(crate) async fn is_snapshot_valid_with_cache(
+        &self,
+        snapshot: &Snapshot,
+        strategy: SnapshotStrategy,
+        cache: &SnapshotCache,
+    ) -> bool {
+        snapshot.is_valid(strategy, self, Some(cache)).await
     }
 
     pub(crate) fn is_snapshot_valid_sync(
@@ -269,6 +297,7 @@ impl Snapshot {
         missing: impl IntoIterator<Item = PathBuf>,
         strategy: SnapshotStrategy,
         file_system_info: &FileSystemInfo,
+        cache: Option<&SnapshotCache>,
     ) -> Result<Self> {
         let files = normalize_paths(files);
         let contexts = normalize_paths(contexts);
@@ -280,7 +309,9 @@ impl Snapshot {
                 .push(SnapshotEntry::create_file(&path, None, strategy, file_system_info).await?);
         }
         for path in contexts {
-            entries.push(SnapshotEntry::create_context(&path, strategy, file_system_info).await?);
+            entries.push(
+                SnapshotEntry::create_context(&path, strategy, file_system_info, cache).await?,
+            );
         }
         for path in missing {
             entries.push(SnapshotEntry::create_missing(&path, file_system_info));
@@ -325,9 +356,10 @@ impl Snapshot {
         &self,
         strategy: SnapshotStrategy,
         file_system_info: &FileSystemInfo,
+        cache: Option<&SnapshotCache>,
     ) -> bool {
         for entry in &self.entries {
-            if !entry.is_valid(strategy, file_system_info).await {
+            if !entry.is_valid(strategy, file_system_info, cache).await {
                 return false;
             }
         }
@@ -425,6 +457,7 @@ impl SnapshotEntry {
         path: &Path,
         strategy: SnapshotStrategy,
         file_system_info: &FileSystemInfo,
+        cache: Option<&SnapshotCache>,
     ) -> Result<Self> {
         if let Some(entry) = Self::classified_path_entry(path, file_system_info) {
             return Ok(entry);
@@ -432,7 +465,7 @@ impl SnapshotEntry {
 
         Ok(Self::Context(SnapshottedContext {
             path: path.to_path_buf(),
-            snapshot: ContextSnapshot::create(path, strategy).await?,
+            snapshot: ContextSnapshot::create(path, strategy, file_system_info, cache).await?,
         }))
     }
 
@@ -464,6 +497,7 @@ impl SnapshotEntry {
         &self,
         strategy: SnapshotStrategy,
         file_system_info: &FileSystemInfo,
+        cache: Option<&SnapshotCache>,
     ) -> bool {
         match self {
             Self::File(file) => {
@@ -472,7 +506,10 @@ impl SnapshotEntry {
             }
             Self::Context(context) => {
                 file_system_info.ordinary_snapshot_applies(&context.path)
-                    && context.snapshot.is_valid(&context.path, strategy).await
+                    && context
+                        .snapshot
+                        .is_valid(&context.path, strategy, file_system_info, cache)
+                        .await
             }
             Self::MissingExistence { path } => {
                 file_system_info.ordinary_snapshot_applies(path)
@@ -498,7 +535,12 @@ impl SnapshotEntry {
             }
             Self::Context(context) => {
                 file_system_info.ordinary_snapshot_applies(&context.path)
-                    && context.snapshot.is_valid_sync(&context.path, strategy)
+                    && context.snapshot.is_valid_sync(
+                        &context.path,
+                        strategy,
+                        file_system_info,
+                        None,
+                    )
             }
             Self::MissingExistence { path } => {
                 file_system_info.ordinary_snapshot_applies(path)
@@ -520,23 +562,35 @@ impl SnapshotEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ContextSnapshot {
     exists: bool,
-    modified: Option<SystemTime>,
-    entries_hash: Option<u64>,
+    #[serde(default)]
+    timestamp_hash: Option<u64>,
+    #[serde(default, alias = "entries_hash")]
+    content_hash: Option<u64>,
 }
 
 impl ContextSnapshot {
-    async fn create(path: &Path, strategy: SnapshotStrategy) -> Result<Self> {
-        Self::create_sync(path, strategy)
+    async fn create(
+        path: &Path,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+        cache: Option<&SnapshotCache>,
+    ) -> Result<Self> {
+        Self::create_sync(path, strategy, file_system_info, cache)
     }
 
-    fn create_sync(path: &Path, strategy: SnapshotStrategy) -> Result<Self> {
+    fn create_sync(
+        path: &Path,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+        cache: Option<&SnapshotCache>,
+    ) -> Result<Self> {
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(Self {
                     exists: false,
-                    modified: None,
-                    entries_hash: None,
+                    timestamp_hash: None,
+                    content_hash: None,
                 });
             }
             Err(error) => return Err(Error::read(path, error)),
@@ -545,36 +599,45 @@ impl ContextSnapshot {
         if !metadata.is_dir() {
             return Ok(Self {
                 exists: false,
-                modified: None,
-                entries_hash: None,
+                timestamp_hash: None,
+                content_hash: None,
             });
         }
 
-        let modified = if strategy.timestamp {
-            Some(
-                metadata
-                    .modified()
-                    .map_err(|error| Error::read(path, error))?,
-            )
+        let timestamp_hash = if strategy.timestamp {
+            Some(directory_timestamp_hash(path, file_system_info, cache)?.hash)
         } else {
             None
         };
-        let entries_hash = (strategy.timestamp || strategy.hash)
-            .then(|| directory_entries_hash(path))
+        let content_hash = strategy
+            .hash
+            .then(|| directory_content_hash(path, file_system_info, cache))
             .transpose()?;
 
         Ok(Self {
             exists: true,
-            modified,
-            entries_hash,
+            timestamp_hash,
+            content_hash,
         })
     }
 
-    async fn is_valid(&self, path: &Path, strategy: SnapshotStrategy) -> bool {
-        self.is_valid_sync(path, strategy)
+    async fn is_valid(
+        &self,
+        path: &Path,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+        cache: Option<&SnapshotCache>,
+    ) -> bool {
+        self.is_valid_sync(path, strategy, file_system_info, cache)
     }
 
-    fn is_valid_sync(&self, path: &Path, strategy: SnapshotStrategy) -> bool {
+    fn is_valid_sync(
+        &self,
+        path: &Path,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+        cache: Option<&SnapshotCache>,
+    ) -> bool {
         if !self.exists {
             return matches!(fs::metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound);
         }
@@ -587,16 +650,15 @@ impl ContextSnapshot {
         }
 
         if strategy.timestamp {
-            let Ok(modified) = metadata.modified() else {
-                return false;
-            };
-            if Some(modified) != self.modified {
-                return false;
+            match directory_timestamp_hash(path, file_system_info, cache) {
+                Ok(current) if Some(current.hash) == self.timestamp_hash => return true,
+                Ok(_) if strategy.hash => {}
+                _ => return false,
             }
         }
 
-        if (strategy.timestamp || strategy.hash)
-            && directory_entries_hash(path).ok() != self.entries_hash
+        if strategy.hash
+            && directory_content_hash(path, file_system_info, cache).ok() != self.content_hash
         {
             return false;
         }
@@ -842,28 +904,213 @@ fn normalize_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     paths
 }
 
-fn directory_entries_hash(path: &Path) -> Result<u64> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectoryTimestampHash {
+    hash: u64,
+    is_dir: bool,
+}
+
+fn directory_timestamp_hash(
+    path: &Path,
+    file_system_info: &FileSystemInfo,
+    cache: Option<&SnapshotCache>,
+) -> Result<DirectoryTimestampHash> {
+    if let Some(cache) = cache {
+        if let Some(hash) = cache
+            .context_timestamp_hashes
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .get(path)
+            .copied()
+        {
+            return Ok(hash);
+        }
+    }
+
+    let hash = directory_timestamp_hash_uncached(path, file_system_info, cache)?;
+    if let Some(cache) = cache {
+        cache
+            .context_timestamp_hashes
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .insert(path.to_path_buf(), hash);
+    }
+    Ok(hash)
+}
+
+fn directory_timestamp_hash_uncached(
+    path: &Path,
+    file_system_info: &FileSystemInfo,
+    cache: Option<&SnapshotCache>,
+) -> Result<DirectoryTimestampHash> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| Error::read(path, error))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(DirectoryTimestampHash {
+            hash: modified_time_hash(path, &metadata)?,
+            is_dir: false,
+        });
+    }
+
     let mut entries = fs::read_dir(path)
         .map_err(|error| Error::read(path, error))?
-        .map(|entry| {
-            let entry = entry.map_err(|error| Error::read(path, error))?;
-            let file_type = entry
-                .file_type()
-                .map_err(|error| Error::read(entry.path(), error))?;
-            let kind = if file_type.is_dir() {
-                "d"
-            } else if file_type.is_file() {
-                "f"
-            } else if file_type.is_symlink() {
-                "l"
-            } else {
-                "o"
-            };
-            Ok(format!("{}\0{kind}", entry.file_name().to_string_lossy()))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    entries.sort();
-    Ok(hash_bytes(entries.join("\0").as_bytes()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| Error::read(path, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    let mut hasher = StableHasher::new();
+    for entry in entries {
+        let child_path = entry.path();
+        if matches!(
+            file_system_info.classify_path(&child_path),
+            SnapshotPathClassification::Immutable
+        ) {
+            continue;
+        }
+
+        hasher.write_str(&entry.file_name().to_string_lossy());
+
+        if let SnapshotPathClassification::Managed(boundary) =
+            file_system_info.classify_path(&child_path)
+        {
+            if let Some(snapshot) = ManagedPathSnapshot::create(&child_path, &boundary) {
+                write_managed_timestamp_hash(&snapshot.state, &mut hasher);
+            }
+            continue;
+        }
+
+        match directory_timestamp_hash(&child_path, file_system_info, cache) {
+            Ok(child_hash) => {
+                hasher.write_str(if child_hash.is_dir { "d" } else { "f" });
+                hasher.write_u64(child_hash.hash);
+            }
+            Err(_) => hasher.write_str("n"),
+        }
+    }
+
+    Ok(DirectoryTimestampHash {
+        hash: hasher.finish(),
+        is_dir: true,
+    })
+}
+
+fn directory_content_hash(
+    path: &Path,
+    file_system_info: &FileSystemInfo,
+    cache: Option<&SnapshotCache>,
+) -> Result<u64> {
+    if let Some(cache) = cache {
+        if let Some(hash) = cache
+            .context_content_hashes
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .get(path)
+            .copied()
+        {
+            return Ok(hash);
+        }
+    }
+
+    let hash = directory_content_hash_uncached(path, file_system_info, cache)?;
+    if let Some(cache) = cache {
+        cache
+            .context_content_hashes
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .insert(path.to_path_buf(), hash);
+    }
+    Ok(hash)
+}
+
+fn directory_content_hash_uncached(
+    path: &Path,
+    file_system_info: &FileSystemInfo,
+    cache: Option<&SnapshotCache>,
+) -> Result<u64> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| Error::read(path, error))?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|error| Error::read(path, error))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| Error::read(path, error))?;
+        entries.sort_by_key(|entry| entry.file_name());
+
+        let mut hasher = StableHasher::new();
+        for entry in entries {
+            let child_path = entry.path();
+            if matches!(
+                file_system_info.classify_path(&child_path),
+                SnapshotPathClassification::Immutable
+            ) {
+                continue;
+            }
+
+            if let SnapshotPathClassification::Managed(boundary) =
+                file_system_info.classify_path(&child_path)
+            {
+                if let Some(snapshot) = ManagedPathSnapshot::create(&child_path, &boundary) {
+                    write_managed_content_hash(&snapshot.state, &mut hasher);
+                }
+                continue;
+            }
+
+            hasher.write_u64(directory_content_hash(
+                &child_path,
+                file_system_info,
+                cache,
+            )?);
+        }
+        return Ok(hasher.finish());
+    }
+
+    if metadata.file_type().is_symlink() {
+        let target = fs::canonicalize(path).map_err(|error| Error::read(path, error))?;
+        return Ok(hash_bytes(target.to_string_lossy().as_bytes()));
+    }
+
+    if metadata.is_file() {
+        let source = fs::read(path).map_err(|error| Error::read(path, error))?;
+        return Ok(hash_bytes(&source));
+    }
+
+    Ok(hash_bytes(&[]))
+}
+
+fn modified_time_hash(path: &Path, metadata: &fs::Metadata) -> Result<u64> {
+    let modified = metadata
+        .modified()
+        .map_err(|error| Error::read(path, error))?;
+    Ok(system_time_hash(modified))
+}
+
+fn system_time_hash(time: SystemTime) -> u64 {
+    let mut hasher = StableHasher::new();
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => {
+            hasher.write_str("+");
+            hasher.write_u64(duration.as_secs());
+            hasher.write_u64(u64::from(duration.subsec_nanos()));
+        }
+        Err(error) => {
+            let duration = error.duration();
+            hasher.write_str("-");
+            hasher.write_u64(duration.as_secs());
+            hasher.write_u64(u64::from(duration.subsec_nanos()));
+        }
+    }
+    hasher.finish()
+}
+
+fn write_managed_timestamp_hash(state: &ManagedItemState, hasher: &mut StableHasher) {
+    if let ManagedItemState::Package { version, .. } = state {
+        hasher.write_str("d");
+        hasher.write_str(version);
+    }
+}
+
+fn write_managed_content_hash(state: &ManagedItemState, hasher: &mut StableHasher) {
+    if let ManagedItemState::Package { version, .. } = state {
+        hasher.write_str(version);
+    }
 }
 
 fn managed_item_root(path: &Path, boundary: &ManagedPathBoundary) -> Option<PathBuf> {
@@ -954,12 +1201,40 @@ fn normalize_path_for_matching(path: &Path) -> String {
 }
 
 fn hash_bytes(source: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325;
-    for byte in source {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+    let mut hasher = StableHasher::new();
+    hasher.write(source);
+    hasher.finish()
+}
+
+struct StableHasher {
+    hash: u64,
+}
+
+impl StableHasher {
+    fn new() -> Self {
+        Self {
+            hash: 0xcbf29ce484222325,
+        }
     }
-    hash
+
+    fn write(&mut self, source: &[u8]) {
+        for byte in source {
+            self.hash ^= u64::from(*byte);
+            self.hash = self.hash.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn write_str(&mut self, source: &str) {
+        self.write(source.as_bytes());
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn finish(self) -> u64 {
+        self.hash
+    }
 }
 
 #[cfg(test)]
@@ -1032,7 +1307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_timestamp_snapshots_include_directory_entries()
+    async fn context_timestamp_snapshots_include_child_names()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let context = temp.path().join("src");
@@ -1054,6 +1329,69 @@ mod tests {
         assert!(
             !file_system_info
                 .is_snapshot_valid(&snapshot, SnapshotStrategy::timestamp())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn context_timestamp_snapshots_include_nested_child_timestamps()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = temp.path().join("src");
+        let nested = context.join("nested");
+        let dependency = nested.join("dep.js");
+        write(&dependency, "export const value = 'before';")?;
+        let context_mtime = FileTime::from_system_time(fs::metadata(&context)?.modified()?);
+        let nested_mtime = FileTime::from_system_time(fs::metadata(&nested)?.modified()?);
+        let file_system_info = FileSystemInfo::new();
+        let snapshot = file_system_info
+            .create_resolve_snapshot(
+                Vec::new(),
+                vec![context.clone()],
+                Vec::new(),
+                SnapshotStrategy::timestamp(),
+            )
+            .await?;
+
+        set_file_mtime(&dependency, FileTime::from_unix_time(2_000_000_000, 0))?;
+        set_file_mtime(&nested, nested_mtime)?;
+        set_file_mtime(&context, context_mtime)?;
+
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::timestamp())
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn context_hash_snapshots_include_nested_child_content()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = temp.path().join("src");
+        let dependency = context.join("nested/dep.js");
+        write(&dependency, "export const value = 'before';")?;
+        let original_mtime = FileTime::from_system_time(fs::metadata(&dependency)?.modified()?);
+        let file_system_info = FileSystemInfo::new();
+        let snapshot = file_system_info
+            .create_resolve_snapshot(
+                Vec::new(),
+                vec![context.clone()],
+                Vec::new(),
+                SnapshotStrategy::hash(),
+            )
+            .await?;
+
+        write(&dependency, "export const value = 'after';")?;
+        set_file_mtime(&dependency, original_mtime)?;
+
+        assert!(
+            !file_system_info
+                .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
                 .await
         );
 

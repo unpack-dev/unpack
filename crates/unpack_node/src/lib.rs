@@ -21,6 +21,24 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const MAX_BLOCKING_THREADS: usize = 4;
 
+#[cfg(not(target_family = "wasm"))]
+napi::ctor::declarative::ctor! {
+    #[ctor(unsafe)]
+    fn init_tokio_runtime() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .max_blocking_threads(MAX_BLOCKING_THREADS)
+            .thread_name_fn(|| {
+                static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+                let id = THREAD_ID.fetch_add(1, Ordering::SeqCst);
+                format!("unpack-tokio-{id}")
+            })
+            .enable_all()
+            .build()
+            .expect("create unpack tokio runtime failed");
+        napi::bindgen_prelude::create_custom_tokio_runtime(runtime);
+    }
+}
+
 #[napi(object)]
 pub struct NativeEntry {
     pub name: String,
@@ -172,11 +190,11 @@ pub struct NativeCompiler {
 #[napi]
 impl NativeCompiler {
     #[napi]
-    pub fn run(&self) -> AsyncTask<RunCompilerTask> {
-        AsyncTask::new(RunCompilerTask {
-            compiler: self.compiler.clone(),
-            output_path: self.output_path.clone(),
-        })
+    pub async fn run(&self) -> NativeRunResult {
+        let compiler = self.compiler.clone();
+        let output_path = self.output_path.clone();
+
+        run_compiler_inner(compiler, output_path).await
     }
 
     #[napi(js_name = "flushCache")]
@@ -316,29 +334,8 @@ fn infrastructure_logging_options_from_native(
     }
 }
 
-pub struct RunCompilerTask {
-    compiler: Option<Arc<Compiler>>,
-    output_path: PathBuf,
-}
-
 pub struct FlushCacheTask {
     compiler: Option<Arc<Compiler>>,
-}
-
-impl Task for RunCompilerTask {
-    type Output = NativeRunResult;
-    type JsValue = NativeRunResult;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        Ok(run_compiler_inner(
-            self.compiler.as_deref(),
-            &self.output_path,
-        ))
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
 }
 
 impl Task for FlushCacheTask {
@@ -371,27 +368,15 @@ impl Task for FlushCacheTask {
     }
 }
 
-fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> NativeRunResult {
+async fn run_compiler_inner(
+    compiler: Option<Arc<Compiler>>,
+    output_path: PathBuf,
+) -> NativeRunResult {
     let Some(compiler) = compiler else {
         return infrastructure_error("CompilerClosedError", "compiler is closed");
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .max_blocking_threads(MAX_BLOCKING_THREADS)
-        .thread_name_fn(|| {
-            static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
-            let id = THREAD_ID.fetch_add(1, Ordering::SeqCst);
-            format!("unpack-tokio-{id}")
-        })
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            return infrastructure_error("InfrastructureError", error.to_string());
-        }
-    };
 
-    let compilation = match runtime.block_on(compiler.run()) {
+    let compilation = match compiler.run().await {
         Ok(compilation) => compilation,
         Err(error) => {
             return infrastructure_error("InfrastructureError", error.to_string());
@@ -399,7 +384,7 @@ fn run_compiler_inner(compiler: Option<&Compiler>, output_path: &Path) -> Native
     };
 
     let logs = infrastructure_log_events(compilation.infrastructure_log_events());
-    if let Err(error) = emit_assets(output_path, compilation.assets()) {
+    if let Err(error) = emit_assets(&output_path, compilation.assets()) {
         return infrastructure_error_with_logs("OutputWriteError", error, logs);
     }
 

@@ -42,6 +42,10 @@ pub(crate) fn parse_module_dependencies(path: &Path, source: &str) -> Result<Par
 }
 
 fn parse_module_dependencies_sync(path: &Path, source: &str) -> Result<ParsedModule> {
+    if let Some(parsed) = parse_fast_module_dependencies(source) {
+        return Ok(parsed);
+    }
+
     let allocator = Allocator::new();
     let module = parse_file_as_module(
         &allocator,
@@ -65,6 +69,237 @@ fn parse_module_dependencies_sync(path: &Path, source: &str) -> Result<ParsedMod
     collect_dynamic_import_dependencies(path, &module, &mut parsed)?;
 
     Ok(parsed)
+}
+
+fn parse_fast_module_dependencies(source: &str) -> Option<ParsedModule> {
+    parse_fast_export_const_lines(source)
+        .or_else(|| parse_fast_named_reexport(source))
+        .or_else(|| parse_fast_star_reexport(source))
+}
+
+fn parse_fast_export_const_lines(source: &str) -> Option<ParsedModule> {
+    let mut parsed = ParsedModule::default();
+    let mut offset = 0usize;
+    let mut saw_export = false;
+
+    for segment in source.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        if line.trim().is_empty() {
+            offset += segment.len();
+            continue;
+        }
+        if !line.trim_end().ends_with(';') {
+            return None;
+        }
+
+        let leading = line.len() - line.trim_start().len();
+        let trimmed = &line[leading..];
+        const PREFIX: &str = "export const ";
+        if !trimmed.starts_with(PREFIX) {
+            return None;
+        }
+
+        let (name, _) = parse_export_const_statement(trimmed)?;
+
+        let statement_start = offset + leading;
+        let statement_end = offset + line.trim_end().len();
+        parsed
+            .presentational_dependencies
+            .push(Dependency::HarmonyExportHeader(
+                HarmonyExportHeaderDependency::new(
+                    Some(source_range(
+                        statement_start + "export ".len(),
+                        statement_end,
+                    )?),
+                    source_range(statement_start, statement_end)?,
+                ),
+            ));
+        parsed.dependencies.push(Dependency::HarmonyExportSpecifier(
+            HarmonyExportSpecifierDependency::new(name, name),
+        ));
+        saw_export = true;
+        offset += segment.len();
+    }
+
+    saw_export.then_some(parsed)
+}
+
+fn parse_fast_named_reexport(source: &str) -> Option<ParsedModule> {
+    let (statement, statement_start, statement_end) = single_statement(source)?;
+    let (request, imported, exported) = parse_named_reexport_statement(statement)?;
+    let range = source_range(statement_start, statement_end)?;
+
+    Some(reexport_parsed_module(
+        request,
+        vec![imported],
+        Some(exported),
+        false,
+        range,
+    ))
+}
+
+fn parse_fast_star_reexport(source: &str) -> Option<ParsedModule> {
+    let (statement, statement_start, statement_end) = single_statement(source)?;
+    let request = parse_star_reexport_statement(statement)?;
+    let range = source_range(statement_start, statement_end)?;
+    Some(reexport_parsed_module(
+        request,
+        Vec::new(),
+        None,
+        true,
+        range,
+    ))
+}
+
+fn reexport_parsed_module(
+    request: String,
+    ids: Vec<String>,
+    name: Option<String>,
+    is_star: bool,
+    range: SourceRange,
+) -> ParsedModule {
+    let mut parsed = ParsedModule::default();
+    parsed
+        .presentational_dependencies
+        .push(Dependency::Const(ConstDependency::new("", range)));
+    parsed
+        .dependencies
+        .push(Dependency::HarmonyImportSideEffect(
+            HarmonyImportSideEffectDependency::new(request.clone(), 1, Some(range)),
+        ));
+    parsed
+        .dependencies
+        .push(Dependency::HarmonyExportImportedSpecifier(
+            HarmonyExportImportedSpecifierDependency::new(
+                request,
+                1,
+                ids,
+                name,
+                is_star,
+                Some(range),
+            ),
+        ));
+    parsed
+}
+
+fn single_statement(source: &str) -> Option<(&str, usize, usize)> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') || !trimmed.ends_with(';') {
+        return None;
+    }
+    let start = source.find(trimmed)?;
+    let end = start + trimmed.len();
+    Some((trimmed, start, end))
+}
+
+fn parse_export_const_statement(statement: &str) -> Option<(&str, usize)> {
+    const PREFIX: &str = "export const ";
+    if !statement.starts_with(PREFIX) {
+        return None;
+    }
+
+    let after_prefix = &statement[PREFIX.len()..];
+    let name_len = js_identifier_len(after_prefix)?;
+    let name = &after_prefix[..name_len];
+    let after_name = &after_prefix[name_len..];
+    let equals_offset = PREFIX.len() + name_len + leading_whitespace_len(after_name);
+    if statement.as_bytes().get(equals_offset) != Some(&b'=') {
+        return None;
+    }
+    let expression_offset =
+        equals_offset + 1 + leading_whitespace_len(&statement[equals_offset + 1..]);
+    Some((name, expression_offset))
+}
+
+fn parse_named_reexport_statement(statement: &str) -> Option<(String, String, String)> {
+    const PREFIX: &str = "export {";
+    if !statement.starts_with(PREFIX) {
+        return None;
+    }
+
+    let close_brace = statement.find('}')?;
+    let specifier = statement[PREFIX.len()..close_brace].trim();
+    if specifier.is_empty() || specifier.contains(',') {
+        return None;
+    }
+    let (imported, exported) = parse_export_specifier(specifier)?;
+    let request = parse_reexport_request(statement[close_brace + 1..].trim_start())?;
+    Some((request, imported, exported))
+}
+
+fn parse_star_reexport_statement(statement: &str) -> Option<String> {
+    const PREFIX: &str = "export *";
+    if !statement.starts_with(PREFIX) {
+        return None;
+    }
+    parse_reexport_request(statement[PREFIX.len()..].trim_start())
+}
+
+fn parse_export_specifier(specifier: &str) -> Option<(String, String)> {
+    if let Some((imported, exported)) = specifier.split_once(" as ") {
+        let imported = imported.trim();
+        let exported = exported.trim();
+        if is_js_identifier(imported) && is_js_identifier(exported) {
+            Some((imported.to_string(), exported.to_string()))
+        } else {
+            None
+        }
+    } else if is_js_identifier(specifier) {
+        Some((specifier.to_string(), specifier.to_string()))
+    } else {
+        None
+    }
+}
+
+fn parse_reexport_request(statement_tail: &str) -> Option<String> {
+    const PREFIX: &str = "from ";
+    let tail = statement_tail.strip_prefix(PREFIX)?.trim_start();
+    let quote = tail.as_bytes().first().copied()?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let close = tail[1..].find(quote as char)? + 1;
+    if tail[close + 1..].trim() != ";" {
+        return None;
+    }
+    Some(tail[1..close].to_string())
+}
+
+fn leading_whitespace_len(value: &str) -> usize {
+    value.len() - value.trim_start().len()
+}
+
+fn js_identifier_len(value: &str) -> Option<usize> {
+    let mut chars = value.char_indices();
+    let (_, first) = chars.next()?;
+    if !is_js_identifier_start(first) {
+        return None;
+    }
+    for (index, ch) in chars {
+        if !is_js_identifier_continue(ch) {
+            return Some(index);
+        }
+    }
+    Some(value.len())
+}
+
+fn is_js_identifier(value: &str) -> bool {
+    js_identifier_len(value) == Some(value.len())
+}
+
+fn is_js_identifier_start(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+}
+
+fn is_js_identifier_continue(ch: char) -> bool {
+    is_js_identifier_start(ch) || ch.is_ascii_digit()
+}
+
+fn source_range(start: usize, end: usize) -> Option<SourceRange> {
+    Some(SourceRange::new(
+        start.try_into().ok()?,
+        end.try_into().ok()?,
+    ))
 }
 
 fn collect_module_decl_dependencies(

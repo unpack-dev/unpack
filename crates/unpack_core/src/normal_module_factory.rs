@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -112,9 +112,18 @@ impl NormalModuleFactory {
         let record = ResolveRecord::new(
             identity,
             resource,
-            resolved.file_dependencies,
-            resolved.context_dependencies,
-            resolved.missing_dependencies,
+            resolved
+                .file_dependencies
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            resolved
+                .context_dependencies
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            resolved
+                .missing_dependencies
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
             &self.file_system_info,
             self.resolve_snapshot_strategy,
         )
@@ -129,9 +138,9 @@ impl NormalModuleFactory {
 pub struct FactorizedModule {
     pub identity: ModuleIdentity,
     pub resource: PathBuf,
-    pub file_dependencies: BTreeSet<PathBuf>,
-    pub context_dependencies: BTreeSet<PathBuf>,
-    pub missing_dependencies: BTreeSet<PathBuf>,
+    pub file_dependencies: HashSet<PathBuf>,
+    pub context_dependencies: HashSet<PathBuf>,
+    pub missing_dependencies: HashSet<PathBuf>,
 }
 
 impl FactorizedModule {
@@ -139,9 +148,9 @@ impl FactorizedModule {
         Self {
             identity: record.identity().clone(),
             resource: record.resource().to_path_buf(),
-            file_dependencies: record.file_dependencies().clone(),
-            context_dependencies: record.context_dependencies().clone(),
-            missing_dependencies: record.missing_dependencies().clone(),
+            file_dependencies: record.file_dependencies().iter().cloned().collect(),
+            context_dependencies: record.context_dependencies().iter().cloned().collect(),
+            missing_dependencies: record.missing_dependencies().iter().cloned().collect(),
         }
     }
 }

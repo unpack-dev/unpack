@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -43,12 +43,12 @@ impl UnpackResolver {
             .file_dependencies
             .into_iter()
             .map(|path| normalize_resolver_dependency(path.as_path()))
-            .collect::<BTreeSet<_>>();
+            .collect::<HashSet<_>>();
         let missing_dependencies = context
             .missing_dependencies
             .into_iter()
             .map(|path| normalize_resolver_dependency(path.as_path()))
-            .collect::<BTreeSet<_>>();
+            .collect::<HashSet<_>>();
         let context_dependencies =
             context_dependencies(directory, &file_dependencies, &missing_dependencies);
 
@@ -68,9 +68,9 @@ impl UnpackResolver {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveResult {
     pub resource: ResolvedResource,
-    pub file_dependencies: BTreeSet<PathBuf>,
-    pub context_dependencies: BTreeSet<PathBuf>,
-    pub missing_dependencies: BTreeSet<PathBuf>,
+    pub file_dependencies: HashSet<PathBuf>,
+    pub context_dependencies: HashSet<PathBuf>,
+    pub missing_dependencies: HashSet<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,28 +90,37 @@ impl From<ResolvedResource> for ModuleIdentity {
 }
 
 fn normalize_resolver_dependency(path: &Path) -> PathBuf {
-    if let Ok(canonical) = fs::canonicalize(path) {
-        return canonical;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir if normalized.pop() => {}
+            _ => normalized.push(component.as_os_str()),
+        }
     }
+    normalize_platform_path(normalized)
+}
 
-    let Some(parent) = path.parent() else {
-        return path.to_path_buf();
-    };
-    let Ok(canonical_parent) = fs::canonicalize(parent) else {
-        return path.to_path_buf();
-    };
-    match path.file_name() {
-        Some(file_name) => canonical_parent.join(file_name),
-        None => canonical_parent,
+#[cfg(target_os = "macos")]
+fn normalize_platform_path(path: PathBuf) -> PathBuf {
+    if let Ok(relative) = path.strip_prefix("/var") {
+        return PathBuf::from("/private/var").join(relative);
     }
+    path
+}
+
+#[cfg(not(target_os = "macos"))]
+fn normalize_platform_path(path: PathBuf) -> PathBuf {
+    path
 }
 
 fn context_dependencies(
     search_directory: &Path,
-    file_dependencies: &BTreeSet<PathBuf>,
-    missing_dependencies: &BTreeSet<PathBuf>,
-) -> BTreeSet<PathBuf> {
-    let search_directory = normalize_resolver_dependency(search_directory);
+    file_dependencies: &HashSet<PathBuf>,
+    missing_dependencies: &HashSet<PathBuf>,
+) -> HashSet<PathBuf> {
+    let search_directory = fs::canonicalize(search_directory)
+        .unwrap_or_else(|_| normalize_resolver_dependency(search_directory));
     file_dependencies
         .iter()
         .chain(missing_dependencies.iter())

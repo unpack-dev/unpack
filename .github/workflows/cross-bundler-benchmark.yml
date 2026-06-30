@@ -1,6 +1,9 @@
 name: Cross-Bundler Benchmarks
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 

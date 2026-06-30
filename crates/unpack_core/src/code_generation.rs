@@ -349,12 +349,12 @@ fn render_module_factory(
             &mut init_fragments,
         );
     }
-    for (dependency_index, dependency) in module.dependencies().iter().enumerate() {
+    for (dependency_id, dependency) in module.dependencies().iter().enumerate() {
         apply_dependency_template(
             dependency,
             module_id,
             None,
-            Some(dependency_index),
+            Some(dependency_id),
             module_graph,
             chunk_graph,
             module.exports_info(),
@@ -364,12 +364,12 @@ fn render_module_factory(
         );
     }
     for (block_index, block) in module.blocks().iter().enumerate() {
-        for (dependency_index, dependency) in block.dependencies().iter().enumerate() {
+        for (dependency_id, dependency) in block.dependencies().iter().enumerate() {
             apply_dependency_template(
                 dependency,
                 module_id,
                 Some(block_index),
-                Some(dependency_index),
+                Some(dependency_id),
                 module_graph,
                 chunk_graph,
                 module.exports_info(),
@@ -424,7 +424,7 @@ fn apply_dependency_template(
     dependency: &Dependency,
     module_id: ModuleId,
     origin_block: Option<usize>,
-    dependency_index: Option<usize>,
+    dependency_id: Option<usize>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     exports_info: &ExportsInfo,
@@ -439,7 +439,7 @@ fn apply_dependency_template(
         Dependency::HarmonyImportSideEffect(dep) => apply_harmony_import_side_effect_dependency(
             dep,
             module_id,
-            dependency_index,
+            dependency_id,
             module_graph,
             module_render_ids,
             init_fragments,
@@ -447,7 +447,7 @@ fn apply_dependency_template(
         Dependency::HarmonyImportSpecifier(dep) => apply_harmony_import_specifier_dependency(
             dep,
             module_id,
-            dependency_index,
+            dependency_id,
             module_graph,
             module_render_ids,
             source,
@@ -462,7 +462,7 @@ fn apply_dependency_template(
             apply_harmony_export_imported_specifier_dependency(
                 dep,
                 module_id,
-                dependency_index,
+                dependency_id,
                 module_graph,
                 exports_info,
                 module_render_ids,
@@ -473,7 +473,7 @@ fn apply_dependency_template(
             dep,
             module_id,
             origin_block,
-            dependency_index,
+            dependency_id,
             module_graph,
             chunk_graph,
             module_render_ids,
@@ -502,15 +502,15 @@ fn apply_export_header_dependency(dep: &HarmonyExportHeaderDependency, source: &
 fn apply_harmony_import_side_effect_dependency(
     dep: &HarmonyImportSideEffectDependency,
     module_id: ModuleId,
-    dependency_index: Option<usize>,
+    dependency_id: Option<usize>,
     module_graph: &ModuleGraph,
     module_render_ids: &HashMap<ModuleId, String>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
-    let Some(dependency_index) = dependency_index else {
+    let Some(dependency_id) = dependency_id else {
         return;
     };
-    let Some(target) = module_graph.module_for_dependency(module_id, None, dependency_index) else {
+    let Some(target) = module_graph.module_for_dependency(module_id, None, dependency_id) else {
         return;
     };
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
@@ -525,16 +525,15 @@ fn apply_harmony_import_side_effect_dependency(
 fn apply_harmony_import_specifier_dependency(
     dep: &HarmonyImportSpecifierDependency,
     module_id: ModuleId,
-    dependency_index: Option<usize>,
+    dependency_id: Option<usize>,
     module_graph: &ModuleGraph,
     module_render_ids: &HashMap<ModuleId, String>,
     source: &mut ReplaceSource,
 ) {
-    let Some(dependency_index) = dependency_index else {
+    let Some(dependency_id) = dependency_id else {
         return;
     };
-    let Some(_target) = module_graph.module_for_dependency(module_id, None, dependency_index)
-    else {
+    let Some(_target) = module_graph.module_for_dependency(module_id, None, dependency_id) else {
         return;
     };
     let expression = import_expression(
@@ -605,17 +604,16 @@ fn apply_harmony_export_expression_dependency(
 fn apply_harmony_export_imported_specifier_dependency(
     dep: &HarmonyExportImportedSpecifierDependency,
     module_id: ModuleId,
-    dependency_index: Option<usize>,
+    dependency_id: Option<usize>,
     module_graph: &ModuleGraph,
     exports_info: &ExportsInfo,
     module_render_ids: &HashMap<ModuleId, String>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
-    let Some(dependency_index) = dependency_index else {
+    let Some(dependency_id) = dependency_id else {
         return;
     };
-    let Some(_target) = module_graph.module_for_dependency(module_id, None, dependency_index)
-    else {
+    let Some(_target) = module_graph.module_for_dependency(module_id, None, dependency_id) else {
         return;
     };
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
@@ -646,7 +644,7 @@ fn apply_import_dependency(
     dep: &ImportDependency,
     module_id: ModuleId,
     origin_block: Option<usize>,
-    dependency_index: Option<usize>,
+    dependency_id: Option<usize>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     module_render_ids: &HashMap<ModuleId, String>,
@@ -655,11 +653,11 @@ fn apply_import_dependency(
     let Some(block_index) = origin_block else {
         return;
     };
-    let Some(dependency_index) = dependency_index else {
+    let Some(dependency_id) = dependency_id else {
         return;
     };
     let Some(target) =
-        module_graph.module_for_dependency(module_id, Some(block_index), dependency_index)
+        module_graph.module_for_dependency(module_id, Some(block_index), dependency_id)
     else {
         return;
     };

@@ -29,7 +29,7 @@ impl ModuleGraph {
         &mut self,
         origin_module: Option<ModuleId>,
         origin_block: Option<usize>,
-        origin_dependency_index: Option<usize>,
+        origin_dependency_id: Option<usize>,
         dependency: Dependency,
         module: ModuleId,
     ) {
@@ -37,17 +37,17 @@ impl ModuleGraph {
         self.connections.push(ModuleGraphConnection {
             origin_module,
             origin_block,
-            origin_dependency_index,
+            origin_dependency_id,
             dependency,
             module,
         });
         if let Some(origin_module) = origin_module {
             self.outgoing[origin_module.index()].push(connection_id);
-            if let Some(dependency_index) = origin_dependency_index {
+            if let Some(dependency_id) = origin_dependency_id {
                 self.outgoing_by_location[origin_module.index()].insert(
                     DependencyLocation {
                         block: origin_block,
-                        index: dependency_index,
+                        dependency_id,
                     },
                     connection_id,
                 );
@@ -90,11 +90,11 @@ impl ModuleGraph {
         &self,
         origin_module: ModuleId,
         origin_block: Option<usize>,
-        dependency_index: usize,
+        dependency_id: usize,
     ) -> Option<ModuleId> {
         let location = DependencyLocation {
             block: origin_block,
-            index: dependency_index,
+            dependency_id,
         };
         self.outgoing_by_location
             .get(origin_module.index())?
@@ -106,14 +106,14 @@ impl ModuleGraph {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DependencyLocation {
     block: Option<usize>,
-    index: usize,
+    dependency_id: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleGraphConnection {
     pub origin_module: Option<ModuleId>,
     pub origin_block: Option<usize>,
-    pub origin_dependency_index: Option<usize>,
+    pub origin_dependency_id: Option<usize>,
     pub dependency: Dependency,
     pub module: ModuleId,
 }

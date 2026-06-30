@@ -8,7 +8,7 @@ use tokio::sync::OnceCell;
 use crate::{
     Dependency, ModuleIdentity, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{NormalModuleFactoryCache, ResolveRecord, ResolveRequest},
-    snapshot::FileSystemInfo,
+    snapshot::{FileSystemInfo, SnapshotCache},
 };
 
 #[derive(Debug, Clone)]
@@ -18,6 +18,7 @@ pub struct NormalModuleFactory {
     file_system_info: FileSystemInfo,
     resolve_snapshot_strategy: SnapshotStrategy,
     runtime_factorize_cache: RuntimeFactorizeCache,
+    snapshot_cache: SnapshotCache,
 }
 
 // Per-compilation singleflight cache; separate from BuildCache so cache:false
@@ -38,6 +39,7 @@ impl NormalModuleFactory {
             file_system_info,
             resolve_snapshot_strategy,
             runtime_factorize_cache: Arc::new(Mutex::new(HashMap::new())),
+            snapshot_cache: SnapshotCache::default(),
         }
     }
 
@@ -52,7 +54,11 @@ impl NormalModuleFactory {
         let resolve_request = ResolveRequest::new(context, request);
         if let Some(record) = self.cache.get(&resolve_request) {
             if record
-                .is_valid(&self.file_system_info, self.resolve_snapshot_strategy)
+                .is_valid_with_cache(
+                    &self.file_system_info,
+                    self.resolve_snapshot_strategy,
+                    &self.snapshot_cache,
+                )
                 .await
             {
                 return Ok(FactorizedModule::from_resolve_record(record));
@@ -109,7 +115,7 @@ impl NormalModuleFactory {
                 missing_dependencies: resolved.missing_dependencies,
             });
         }
-        let record = ResolveRecord::new(
+        let record = ResolveRecord::new_with_cache(
             identity,
             resource,
             resolved
@@ -126,6 +132,7 @@ impl NormalModuleFactory {
                 .collect::<BTreeSet<_>>(),
             &self.file_system_info,
             self.resolve_snapshot_strategy,
+            &self.snapshot_cache,
         )
         .await?;
         self.cache.store(resolve_request, record.clone());

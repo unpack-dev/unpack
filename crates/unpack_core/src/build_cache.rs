@@ -10,7 +10,7 @@ use std::{
 use crate::{
     ModuleIdentity, SnapshotOptions, SnapshotStrategy,
     parser::ParsedModule,
-    snapshot::{FileSystemInfo, Snapshot},
+    snapshot::{FileSystemInfo, Snapshot, SnapshotCache},
 };
 use serde::{Deserialize, Serialize};
 
@@ -186,6 +186,7 @@ pub(crate) struct ResolveRecord {
 }
 
 impl ResolveRecord {
+    #[cfg(test)]
     pub(crate) async fn new(
         identity: ModuleIdentity,
         resource: PathBuf,
@@ -201,6 +202,35 @@ impl ResolveRecord {
                 context_dependencies.iter().cloned(),
                 missing_dependencies.iter().cloned(),
                 strategy,
+            )
+            .await?;
+        Ok(Self {
+            identity,
+            resource,
+            file_dependencies,
+            context_dependencies,
+            missing_dependencies,
+            snapshot,
+        })
+    }
+
+    pub(crate) async fn new_with_cache(
+        identity: ModuleIdentity,
+        resource: PathBuf,
+        file_dependencies: BTreeSet<PathBuf>,
+        context_dependencies: BTreeSet<PathBuf>,
+        missing_dependencies: BTreeSet<PathBuf>,
+        file_system_info: &FileSystemInfo,
+        strategy: SnapshotStrategy,
+        snapshot_cache: &SnapshotCache,
+    ) -> crate::Result<Self> {
+        let snapshot = file_system_info
+            .create_resolve_snapshot_with_cache(
+                file_dependencies.iter().cloned(),
+                context_dependencies.iter().cloned(),
+                missing_dependencies.iter().cloned(),
+                strategy,
+                snapshot_cache,
             )
             .await?;
         Ok(Self {
@@ -233,6 +263,7 @@ impl ResolveRecord {
         &self.missing_dependencies
     }
 
+    #[cfg(test)]
     pub(crate) async fn is_valid(
         &self,
         file_system_info: &FileSystemInfo,
@@ -240,6 +271,17 @@ impl ResolveRecord {
     ) -> bool {
         file_system_info
             .is_snapshot_valid(&self.snapshot, strategy)
+            .await
+    }
+
+    pub(crate) async fn is_valid_with_cache(
+        &self,
+        file_system_info: &FileSystemInfo,
+        strategy: SnapshotStrategy,
+        snapshot_cache: &SnapshotCache,
+    ) -> bool {
+        file_system_info
+            .is_snapshot_valid_with_cache(&self.snapshot, strategy, snapshot_cache)
             .await
     }
 }

@@ -389,10 +389,18 @@ fn chunk_render_id(context: &Path, module_graph: &ModuleGraph, module: ModuleId)
 }
 
 fn make_relative(context: &Path, resource: &Path) -> String {
+    if let Ok(relative) = resource.strip_prefix(context) {
+        return normalize_render_path(relative);
+    }
+
     let context = std::fs::canonicalize(context).unwrap_or_else(|_| context.to_path_buf());
     let resource = std::fs::canonicalize(resource).unwrap_or_else(|_| PathBuf::from(resource));
     let relative = resource.strip_prefix(&context).unwrap_or(&resource);
-    relative.to_string_lossy().replace('\\', "/")
+    normalize_render_path(relative)
+}
+
+fn normalize_render_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn sanitize_chunk_id(relative: &str) -> String {

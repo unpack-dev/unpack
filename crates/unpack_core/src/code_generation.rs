@@ -152,7 +152,7 @@ fn emit_asset(filename: String, mut source: ConcatSource, sourcemap: bool) -> Ve
 
     let mut assets = Vec::new();
     let mut source_map = if sourcemap {
-        source.map(&ObjectPool::default(), &MapOptions::default())
+        source.map(&ObjectPool::default(), &MapOptions::new(false))
     } else {
         None
     };
@@ -379,7 +379,7 @@ fn render_module_factory(
     let init = render_init_fragments(init_fragments);
     let mut factory = ConcatSource::default();
     factory.add(RawStringSource::from(format!(
-        "((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {{\n\"use strict\";\n__webpack_require__.r(__webpack_exports__);\n{init}"
+        "((__unused, __webpack_exports__, __webpack_require__) => {{\n\"use strict\";\n__webpack_require__.r(__webpack_exports__);\n{init}"
     )));
     factory.add(source);
     factory.add(RawStringSource::from("\n})".to_string()));
@@ -389,7 +389,7 @@ fn render_module_factory(
 fn render_failed_module_factory(error: &Error) -> ConcatSource {
     let mut factory = ConcatSource::default();
     factory.add(RawStringSource::from(format!(
-        "((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {{\n\"use strict\";\nthrow new Error({});\n}})",
+        "((__unused, __webpack_exports__, __webpack_require__) => {{\n\"use strict\";\nthrow new Error({});\n}})",
         json_string(&error.to_string())
     )));
     factory
@@ -438,13 +438,9 @@ fn apply_dependency_template(
             module_render_ids,
             init_fragments,
         ),
-        Dependency::HarmonyImportSpecifier(dep) => apply_harmony_import_specifier_dependency(
-            dep,
-            module_id,
-            module_graph,
-            module_render_ids,
-            source,
-        ),
+        Dependency::HarmonyImportSpecifier(dep) => {
+            apply_harmony_import_specifier_dependency(dep, source)
+        }
         Dependency::HarmonyExportSpecifier(dep) => {
             apply_harmony_export_specifier_dependency(dep, exports_info, init_fragments)
         }
@@ -452,14 +448,7 @@ fn apply_dependency_template(
             apply_harmony_export_expression_dependency(dep, exports_info, source, init_fragments)
         }
         Dependency::HarmonyExportImportedSpecifier(dep) => {
-            apply_harmony_export_imported_specifier_dependency(
-                dep,
-                module_id,
-                module_graph,
-                exports_info,
-                module_render_ids,
-                init_fragments,
-            )
+            apply_harmony_export_imported_specifier_dependency(dep, exports_info, init_fragments)
         }
         Dependency::Import(dep) => apply_import_dependency(
             dep,
@@ -497,11 +486,7 @@ fn apply_harmony_import_side_effect_dependency(
     module_render_ids: &HashMap<ModuleId, String>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
-    let Some(target) = module_graph.module_for_dependency(
-        module_id,
-        None,
-        &Dependency::HarmonyImportSideEffect(dep.clone()),
-    ) else {
+    let Some(target) = module_graph.module_for_request(module_id, None, &dep.module.request) else {
         return;
     };
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
@@ -509,24 +494,14 @@ fn apply_harmony_import_side_effect_dependency(
     push_init_fragment(
         init_fragments,
         InitFragmentStage::HarmonyImport,
-        format!("/* harmony import */ var {import_var} = __webpack_require__({target_id});\n"),
+        format!("var {import_var}=__webpack_require__({target_id});\n"),
     );
 }
 
 fn apply_harmony_import_specifier_dependency(
     dep: &HarmonyImportSpecifierDependency,
-    module_id: ModuleId,
-    module_graph: &ModuleGraph,
-    module_render_ids: &HashMap<ModuleId, String>,
     source: &mut ReplaceSource,
 ) {
-    let Some(_target) = module_graph.module_for_dependency(
-        module_id,
-        None,
-        &Dependency::HarmonyImportSpecifier(dep.clone()),
-    ) else {
-        return;
-    };
     let expression = import_expression(
         &dep.module.request,
         dep.module.source_order.unwrap_or(0),
@@ -538,7 +513,6 @@ fn apply_harmony_import_specifier_dependency(
         expression
     };
     replace(source, dep.usage_range, expression);
-    let _ = module_render_ids;
 }
 
 fn apply_harmony_export_specifier_dependency(
@@ -551,7 +525,7 @@ fn apply_harmony_export_specifier_dependency(
         init_fragments,
         InitFragmentStage::HarmonyExport,
         format!(
-            "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({}) }});\n",
+            "__webpack_require__.d(__webpack_exports__,{{{}:()=>({})}});\n",
             property_name(used_name),
             dep.id
         ),
@@ -572,13 +546,13 @@ fn apply_harmony_export_expression_dependency(
         replace(
             source,
             SourceRange::new(dep.statement_range.start, dep.range.start),
-            "/* harmony default export */ ".to_string(),
+            String::new(),
         );
     } else {
         replace(
             source,
             SourceRange::new(dep.statement_range.start, dep.range.start),
-            "/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = ".to_string(),
+            "const __WEBPACK_DEFAULT_EXPORT__ = ".to_string(),
         );
     }
     let used_name = exports_info.get_used_name("default").unwrap_or("default");
@@ -586,7 +560,7 @@ fn apply_harmony_export_expression_dependency(
         init_fragments,
         InitFragmentStage::HarmonyExport,
         format!(
-            "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({binding}) }});\n",
+            "__webpack_require__.d(__webpack_exports__,{{{}:()=>({binding})}});\n",
             property_name(used_name)
         ),
     );
@@ -594,23 +568,17 @@ fn apply_harmony_export_expression_dependency(
 
 fn apply_harmony_export_imported_specifier_dependency(
     dep: &HarmonyExportImportedSpecifierDependency,
-    module_id: ModuleId,
-    module_graph: &ModuleGraph,
     exports_info: &ExportsInfo,
-    module_render_ids: &HashMap<ModuleId, String>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
-    let dependency = Dependency::HarmonyExportImportedSpecifier(dep.clone());
-    let Some(_target) = module_graph.module_for_dependency(module_id, None, &dependency) else {
-        return;
-    };
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
     if dep.is_star {
+        let import_key = "__webpack_key__";
         push_init_fragment(
             init_fragments,
             InitFragmentStage::HarmonyStarReexport,
             format!(
-                "/* harmony reexport (unknown) */ for(const __WEBPACK_IMPORT_KEY__ in {import_var}) if(__WEBPACK_IMPORT_KEY__ !== \"default\" && __WEBPACK_IMPORT_KEY__ !== \"__esModule\") __webpack_require__.d(__webpack_exports__, {{ [__WEBPACK_IMPORT_KEY__]: () => ({import_var}[__WEBPACK_IMPORT_KEY__]) }});\n"
+                "for(const {import_key} in {import_var})if({import_key}!==\"default\"&&{import_key}!==\"__esModule\")__webpack_require__.d(__webpack_exports__,{{[{import_key}]:()=>({import_var}[{import_key}])}});\n"
             ),
         );
     } else if let Some(name) = &dep.name {
@@ -620,12 +588,11 @@ fn apply_harmony_export_imported_specifier_dependency(
             init_fragments,
             InitFragmentStage::HarmonyExport,
             format!(
-                "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({expression}) }});\n",
+                "__webpack_require__.d(__webpack_exports__,{{{}:()=>({expression})}});\n",
                 property_name(used_name),
             ),
         );
     }
-    let _ = module_render_ids;
 }
 
 fn apply_import_dependency(
@@ -640,9 +607,8 @@ fn apply_import_dependency(
     let Some(block_index) = origin_block else {
         return;
     };
-    let dependency = Dependency::Import(dep.clone());
     let Some(target) =
-        module_graph.module_for_dependency(module_id, Some(block_index), &dependency)
+        module_graph.module_for_request(module_id, Some(block_index), &dep.module.request)
     else {
         return;
     };
@@ -675,10 +641,11 @@ fn replace(source: &mut ReplaceSource, range: SourceRange, content: String) {
 }
 
 fn module_render_ids(context: &Path, module_graph: &ModuleGraph) -> HashMap<ModuleId, String> {
+    let context = normalize_render_context(context);
     module_graph
         .modules()
         .iter()
-        .map(|module| (module.id(), module_render_id(context, module)))
+        .map(|module| (module.id(), module_render_id(&context, module)))
         .collect()
 }
 
@@ -699,10 +666,22 @@ fn module_render_id(context: &Path, module: &Module) -> String {
 }
 
 fn make_relative(context: &Path, resource: &Path) -> String {
+    if let Ok(relative) = resource.strip_prefix(context) {
+        return normalize_render_path(relative);
+    }
+
     let context = std::fs::canonicalize(context).unwrap_or_else(|_| context.to_path_buf());
     let resource = std::fs::canonicalize(resource).unwrap_or_else(|_| PathBuf::from(resource));
     let relative = resource.strip_prefix(&context).unwrap_or(&resource);
-    relative.to_string_lossy().replace('\\', "/")
+    normalize_render_path(relative)
+}
+
+fn normalize_render_context(context: &Path) -> PathBuf {
+    std::fs::canonicalize(context).unwrap_or_else(|_| context.to_path_buf())
+}
+
+fn normalize_render_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn render_chunk_filename_map(chunk_graph: &ChunkGraph) -> String {
@@ -719,10 +698,9 @@ fn render_chunk_filename_map(chunk_graph: &ChunkGraph) -> String {
         .join(", ")
 }
 
-fn import_var(request: &str, source_order: usize) -> String {
-    let ident = sanitize_identifier(request);
+fn import_var(_request: &str, source_order: usize) -> String {
     let index = source_order.saturating_sub(1);
-    format!("_{ident}__WEBPACK_IMPORTED_MODULE_{index}__")
+    format!("__webpack_i{index}__")
 }
 
 fn import_expression(request: &str, source_order: usize, ids: &[String]) -> String {
@@ -736,21 +714,6 @@ fn export_access_expression(base: &str, ids: &[String]) -> String {
         expression.push_str(&property_access(id));
     }
     expression
-}
-
-fn sanitize_identifier(value: &str) -> String {
-    let mut ident = value
-        .trim_start_matches("./")
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect::<String>();
-    if ident.is_empty() {
-        ident.push_str("module");
-    }
-    if ident.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        ident.insert(0, '_');
-    }
-    ident
 }
 
 fn property_access(property: &str) -> String {
@@ -779,10 +742,17 @@ fn is_identifier(value: &str) -> bool {
 }
 
 fn json_string(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    format!("\"{escaped}\"")
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }

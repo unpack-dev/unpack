@@ -55,7 +55,7 @@ impl NormalModuleFactory {
                 .is_valid(&self.file_system_info, self.resolve_snapshot_strategy)
                 .await
             {
-                return Ok(FactorizedModule::from_resolve_record(record));
+                return Ok(FactorizedModule::from_resolve_record(&record));
             }
         }
 
@@ -128,9 +128,10 @@ impl NormalModuleFactory {
             self.resolve_snapshot_strategy,
         )
         .await?;
-        self.cache.store(resolve_request, record.clone());
+        let factorized = FactorizedModule::from_resolve_record(&record);
+        self.cache.store(resolve_request, record);
 
-        Ok(FactorizedModule::from_resolve_record(record))
+        Ok(factorized)
     }
 }
 
@@ -144,7 +145,7 @@ pub struct FactorizedModule {
 }
 
 impl FactorizedModule {
-    fn from_resolve_record(record: ResolveRecord) -> Self {
+    fn from_resolve_record(record: &ResolveRecord) -> Self {
         Self {
             identity: record.identity().clone(),
             resource: record.resource().to_path_buf(),

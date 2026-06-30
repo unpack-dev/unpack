@@ -120,7 +120,7 @@ struct BuildCacheInner {
 
 #[derive(Debug)]
 struct CacheStore<K, V> {
-    records: HashMap<K, V>,
+    records: HashMap<K, Arc<V>>,
     hits: usize,
     misses: usize,
 }
@@ -138,9 +138,8 @@ impl<K, V> Default for CacheStore<K, V> {
 impl<K, V> CacheStore<K, V>
 where
     K: Eq + Hash,
-    V: Clone,
 {
-    fn get(&mut self, key: &K) -> Option<V> {
+    fn get(&mut self, key: &K) -> Option<Arc<V>> {
         let record = self.records.get(key).cloned();
         if record.is_some() {
             self.hits += 1;
@@ -151,7 +150,7 @@ where
     }
 
     fn store(&mut self, key: K, value: V) {
-        self.records.insert(key, value);
+        self.records.insert(key, Arc::new(value));
     }
 
     #[cfg(test)]
@@ -264,8 +263,8 @@ impl ModuleBuildRecord {
         &self.parsed
     }
 
-    pub(crate) fn into_parts(self) -> (ParsedModule, String) {
-        (self.parsed, self.source)
+    pub(crate) fn cloned_parts(&self) -> (ParsedModule, String) {
+        (self.parsed.clone(), self.source.clone())
     }
 
     pub(crate) async fn is_valid(
@@ -357,13 +356,12 @@ impl BuildCache {
 impl<K, V> CacheFacade<K, V>
 where
     K: Eq + Hash,
-    V: Clone,
 {
     pub(crate) fn is_enabled(&self) -> bool {
         self.build_cache.options.kind != CacheKind::Disabled
     }
 
-    pub(crate) fn get(&self, key: &K) -> Option<V> {
+    pub(crate) fn get(&self, key: &K) -> Option<Arc<V>> {
         if !self.is_enabled() {
             return None;
         }
@@ -419,14 +417,22 @@ impl BuildCache {
             .inner
             .lock()
             .expect("build cache mutex should not be poisoned");
-        inner.resolve_records.records = pack.resolve_records.into_iter().collect();
-        inner.module_builds.records = pack.module_builds.into_iter().collect();
+        inner.resolve_records.records = pack
+            .resolve_records
+            .into_iter()
+            .map(|(request, record)| (request, Arc::new(record)))
+            .collect();
+        inner.module_builds.records = pack
+            .module_builds
+            .into_iter()
+            .map(|(identity, record)| (identity, Arc::new(record)))
+            .collect();
     }
 
     fn write_filesystem_cache(
         &self,
-        resolve_records: &HashMap<ResolveRequest, ResolveRecord>,
-        module_builds: &HashMap<ModuleIdentity, ModuleBuildRecord>,
+        resolve_records: &HashMap<ResolveRequest, Arc<ResolveRecord>>,
+        module_builds: &HashMap<ModuleIdentity, Arc<ModuleBuildRecord>>,
     ) -> io::Result<()> {
         let Some(cache_location) = &self.options.cache_location else {
             return Ok(());
@@ -444,11 +450,11 @@ impl BuildCache {
             cache_version: cache_version.clone(),
             resolve_records: resolve_records
                 .iter()
-                .map(|(request, record)| (request.clone(), record.clone()))
+                .map(|(request, record)| (request.clone(), (**record).clone()))
                 .collect(),
             module_builds: module_builds
                 .iter()
-                .map(|(identity, record)| (identity.clone(), record.clone()))
+                .map(|(identity, record)| (identity.clone(), (**record).clone()))
                 .collect(),
         };
         let pack_payload = cbor4ii::serde::to_vec(Vec::new(), &pack)

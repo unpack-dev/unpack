@@ -365,7 +365,7 @@ impl BuildTask {
             {
                 let process_dependencies =
                     process_dependencies_task(self.module_id, &issuer_context, record.parsed());
-                let (parsed, source) = record.into_parts();
+                let (parsed, source) = record.cloned_parts();
                 state
                     .lock()
                     .await

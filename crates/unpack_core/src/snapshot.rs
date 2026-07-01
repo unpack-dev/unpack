@@ -119,8 +119,73 @@ pub(crate) struct FileSystemInfo {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SnapshotCache {
+    file_metadata: Arc<Mutex<HashMap<PathBuf, CachedFileMetadata>>>,
+    file_hashes: Arc<Mutex<HashMap<PathBuf, CachedFileHash>>>,
     context_timestamp_hashes: Arc<Mutex<HashMap<PathBuf, DirectoryTimestampHash>>>,
     context_content_hashes: Arc<Mutex<HashMap<PathBuf, u64>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachedFileMetadata {
+    Missing,
+    Present { modified: SystemTime },
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachedFileHash {
+    Hash(u64),
+    Error,
+}
+
+impl SnapshotCache {
+    async fn file_metadata(&self, path: &Path) -> CachedFileMetadata {
+        if let Some(metadata) = self
+            .file_metadata
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .get(path)
+            .copied()
+        {
+            return metadata;
+        }
+
+        let metadata = match tokio::fs::metadata(path).await {
+            Ok(metadata) => metadata
+                .modified()
+                .map(|modified| CachedFileMetadata::Present { modified })
+                .unwrap_or(CachedFileMetadata::Error),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => CachedFileMetadata::Missing,
+            Err(_) => CachedFileMetadata::Error,
+        };
+        self.file_metadata
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .insert(path.to_path_buf(), metadata);
+        metadata
+    }
+
+    async fn file_hash(&self, path: &Path) -> CachedFileHash {
+        if let Some(hash) = self
+            .file_hashes
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .get(path)
+            .copied()
+        {
+            return hash;
+        }
+
+        let hash = match tokio::fs::read(path).await {
+            Ok(source) => CachedFileHash::Hash(hash_bytes(&source)),
+            Err(_) => CachedFileHash::Error,
+        };
+        self.file_hashes
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .insert(path.to_path_buf(), hash);
+        hash
+    }
 }
 
 impl FileSystemInfo {
@@ -184,6 +249,7 @@ impl FileSystemInfo {
         Snapshot::create_sync(paths, strategy, self)
     }
 
+    #[cfg(test)]
     pub(crate) async fn is_snapshot_valid(
         &self,
         snapshot: &Snapshot,
@@ -502,7 +568,7 @@ impl SnapshotEntry {
         match self {
             Self::File(file) => {
                 file_system_info.ordinary_snapshot_applies(&file.path)
-                    && file.snapshot.is_valid(&file.path, strategy).await
+                    && file.snapshot.is_valid(&file.path, strategy, cache).await
             }
             Self::Context(context) => {
                 file_system_info.ordinary_snapshot_applies(&context.path)
@@ -513,7 +579,7 @@ impl SnapshotEntry {
             }
             Self::MissingExistence { path } => {
                 file_system_info.ordinary_snapshot_applies(path)
-                    && MissingExistenceSnapshot::is_valid(path).await
+                    && MissingExistenceSnapshot::is_valid(path, cache).await
             }
             Self::ImmutablePath { path } => {
                 file_system_info.classify_path(path) == SnapshotPathClassification::Immutable
@@ -670,7 +736,10 @@ impl ContextSnapshot {
 struct MissingExistenceSnapshot;
 
 impl MissingExistenceSnapshot {
-    async fn is_valid(path: &Path) -> bool {
+    async fn is_valid(path: &Path, cache: Option<&SnapshotCache>) -> bool {
+        if let Some(cache) = cache {
+            return matches!(cache.file_metadata(path).await, CachedFileMetadata::Missing);
+        }
         Self::is_valid_sync(path)
     }
 
@@ -750,21 +819,42 @@ impl FileSnapshot {
         })
     }
 
-    pub(crate) async fn is_valid(&self, path: &Path, strategy: SnapshotStrategy) -> bool {
+    pub(crate) async fn is_valid(
+        &self,
+        path: &Path,
+        strategy: SnapshotStrategy,
+        cache: Option<&SnapshotCache>,
+    ) -> bool {
         if !self.exists {
             return !strategy.timestamp && !strategy.hash
-                || matches!(
-                    tokio::fs::metadata(path).await,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound
-                );
+                || match cache {
+                    Some(cache) => {
+                        matches!(cache.file_metadata(path).await, CachedFileMetadata::Missing)
+                    }
+                    None => {
+                        matches!(
+                            tokio::fs::metadata(path).await,
+                            Err(error) if error.kind() == io::ErrorKind::NotFound
+                        )
+                    }
+                };
         }
 
         if strategy.timestamp {
-            let Ok(metadata) = tokio::fs::metadata(path).await else {
-                return false;
-            };
-            let Ok(modified) = metadata.modified() else {
-                return false;
+            let modified = match cache {
+                Some(cache) => match cache.file_metadata(path).await {
+                    CachedFileMetadata::Present { modified } => modified,
+                    CachedFileMetadata::Missing | CachedFileMetadata::Error => return false,
+                },
+                None => {
+                    let Ok(metadata) = tokio::fs::metadata(path).await else {
+                        return false;
+                    };
+                    let Ok(modified) = metadata.modified() else {
+                        return false;
+                    };
+                    modified
+                }
             };
             if Some(modified) != self.modified {
                 return false;
@@ -772,10 +862,19 @@ impl FileSnapshot {
         }
 
         if strategy.hash {
-            let Ok(source) = tokio::fs::read(path).await else {
-                return false;
+            let source_hash = match cache {
+                Some(cache) => match cache.file_hash(path).await {
+                    CachedFileHash::Hash(hash) => hash,
+                    CachedFileHash::Error => return false,
+                },
+                None => {
+                    let Ok(source) = tokio::fs::read(path).await else {
+                        return false;
+                    };
+                    hash_bytes(&source)
+                }
             };
-            if Some(hash_bytes(&source)) != self.source_hash {
+            if Some(source_hash) != self.source_hash {
                 return false;
             }
         }

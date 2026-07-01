@@ -309,13 +309,14 @@ impl ModuleBuildRecord {
         (self.parsed.clone(), self.source.clone())
     }
 
-    pub(crate) async fn is_valid(
+    pub(crate) async fn is_valid_with_cache(
         &self,
         file_system_info: &FileSystemInfo,
         strategy: SnapshotStrategy,
+        snapshot_cache: &SnapshotCache,
     ) -> bool {
         file_system_info
-            .is_snapshot_valid(&self.snapshot, strategy)
+            .is_snapshot_valid_with_cache(&self.snapshot, strategy, snapshot_cache)
             .await
     }
 }

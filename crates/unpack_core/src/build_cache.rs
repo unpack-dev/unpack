@@ -8,9 +8,8 @@ use std::{
 };
 
 use crate::{
-    ModuleIdentity, SnapshotOptions, SnapshotStrategy,
+    Asset, CompilerOptions, ModuleIdentity, SnapshotOptions, SnapshotStrategy, WatchDependencies,
     cache_hash::stable_hash,
-    code_generation::Asset,
     parser::ParsedModule,
     snapshot::{FileSystemInfo, Snapshot, SnapshotCache},
 };
@@ -19,6 +18,7 @@ use serde::{Deserialize, Serialize};
 const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
 const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
 const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
+const DEFAULT_COMPILATION_FILE: &str = "packs/compilation.cbor";
 const MANIFEST_FILE: &str = "container.json";
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,7 @@ pub(crate) struct BuildCache {
     options: CacheOptions,
     build_dependency_snapshot_strategy: SnapshotStrategy,
     resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    compilation_snapshot_strategy: SnapshotStrategy,
     file_system_info: FileSystemInfo,
     inner: Arc<Mutex<BuildCacheInner>>,
 }
@@ -38,7 +39,6 @@ pub(crate) struct CacheFacade<K, V> {
 
 pub(crate) type NormalModuleFactoryCache = CacheFacade<ResolveRequest, ResolveRecord>;
 pub(crate) type ModuleBuildCache = CacheFacade<ModuleIdentity, ModuleBuildRecord>;
-pub(crate) type AssetGenerationCache = CacheFacade<AssetGenerationKey, AssetGenerationRecord>;
 
 type CacheStoreAccessor<K, V> = for<'a> fn(&'a mut BuildCacheInner) -> &'a mut CacheStore<K, V>;
 
@@ -122,7 +122,9 @@ pub struct BuildDependency {
 struct BuildCacheInner {
     resolve_records: CacheStore<ResolveRequest, ResolveRecord>,
     module_builds: CacheStore<ModuleIdentity, ModuleBuildRecord>,
-    asset_generations: CacheStore<AssetGenerationKey, AssetGenerationRecord>,
+    cached_compilation: Option<Arc<CachedCompilationRecord>>,
+    filesystem_manifest: Option<CacheManifest>,
+    records_restored: bool,
     dirty: bool,
 }
 
@@ -325,41 +327,89 @@ impl ModuleBuildRecord {
         self.source_hash
     }
 
-    pub(crate) async fn is_valid(
+    pub(crate) async fn is_valid_with_cache(
         &self,
         file_system_info: &FileSystemInfo,
         strategy: SnapshotStrategy,
+        snapshot_cache: &SnapshotCache,
     ) -> bool {
         file_system_info
-            .is_snapshot_valid(&self.snapshot, strategy)
+            .is_snapshot_valid_with_cache(&self.snapshot, strategy, snapshot_cache)
             .await
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct AssetGenerationKey {
-    digest: u64,
-}
-
-impl AssetGenerationKey {
-    pub(crate) fn new(digest: u64) -> Self {
-        Self { digest }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct AssetGenerationRecord {
+pub(crate) struct CachedCompilationRecord {
+    key: CachedCompilationKey,
     assets: Vec<Asset>,
+    file_dependencies: BTreeSet<PathBuf>,
+    context_dependencies: BTreeSet<PathBuf>,
+    missing_dependencies: BTreeSet<PathBuf>,
+    snapshot: Snapshot,
 }
 
-impl AssetGenerationRecord {
-    pub(crate) fn new(assets: Vec<Asset>) -> Self {
-        Self { assets }
+impl CachedCompilationRecord {
+    fn key_matches(&self, options: &CompilerOptions) -> bool {
+        self.key == CachedCompilationKey::from_options(options)
     }
 
     pub(crate) fn assets(&self) -> &[Asset] {
         &self.assets
     }
+
+    pub(crate) fn file_dependencies(&self) -> &BTreeSet<PathBuf> {
+        &self.file_dependencies
+    }
+
+    pub(crate) fn context_dependencies(&self) -> &BTreeSet<PathBuf> {
+        &self.context_dependencies
+    }
+
+    pub(crate) fn missing_dependencies(&self) -> &BTreeSet<PathBuf> {
+        &self.missing_dependencies
+    }
+
+    async fn is_valid(
+        &self,
+        file_system_info: &FileSystemInfo,
+        strategy: SnapshotStrategy,
+        snapshot_cache: &SnapshotCache,
+    ) -> bool {
+        file_system_info
+            .is_snapshot_valid_with_cache(&self.snapshot, strategy, snapshot_cache)
+            .await
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CachedCompilationKey {
+    context: PathBuf,
+    entries: Vec<CachedCompilationEntry>,
+    sourcemap: bool,
+}
+
+impl CachedCompilationKey {
+    fn from_options(options: &CompilerOptions) -> Self {
+        Self {
+            context: options.context.clone(),
+            entries: options
+                .entries
+                .iter()
+                .map(|entry| CachedCompilationEntry {
+                    name: entry.name.clone(),
+                    request: entry.request.clone(),
+                })
+                .collect(),
+            sourcemap: options.sourcemap,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CachedCompilationEntry {
+    name: String,
+    request: String,
 }
 
 impl BuildCache {
@@ -367,10 +417,12 @@ impl BuildCache {
         let build_dependency_snapshot_strategy = snapshot_options.build_dependencies;
         let resolve_build_dependency_snapshot_strategy =
             snapshot_options.resolve_build_dependencies;
+        let compilation_snapshot_strategy = snapshot_options.module;
         let cache = Self {
             options,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
+            compilation_snapshot_strategy,
             file_system_info: FileSystemInfo::from_snapshot_options(&snapshot_options),
             inner: Arc::new(Mutex::new(BuildCacheInner::default())),
         };
@@ -392,11 +444,73 @@ impl BuildCache {
         }
     }
 
-    pub(crate) fn asset_generations(&self) -> AssetGenerationCache {
-        CacheFacade {
-            build_cache: self.clone(),
-            store: asset_generations,
+    pub(crate) async fn cached_compilation(
+        &self,
+        options: &CompilerOptions,
+    ) -> Option<Arc<CachedCompilationRecord>> {
+        if self.options.kind != CacheKind::Filesystem || !self.options.readonly {
+            return None;
         }
+
+        let record = self
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .cached_compilation
+            .clone()?;
+        if !record.key_matches(options) {
+            return None;
+        }
+
+        let snapshot_cache = SnapshotCache::default();
+        record
+            .is_valid(
+                &self.file_system_info,
+                self.compilation_snapshot_strategy,
+                &snapshot_cache,
+            )
+            .await
+            .then_some(record)
+    }
+
+    pub(crate) async fn store_compilation(
+        &self,
+        options: &CompilerOptions,
+        assets: &[Asset],
+        watch_dependencies: &WatchDependencies,
+    ) -> crate::Result<()> {
+        if self.options.kind != CacheKind::Filesystem || self.options.readonly {
+            return Ok(());
+        }
+
+        let snapshot_cache = SnapshotCache::default();
+        let snapshot = self
+            .file_system_info
+            .create_resolve_snapshot_with_cache(
+                watch_dependencies.files().iter().cloned(),
+                watch_dependencies.contexts().iter().cloned(),
+                watch_dependencies.missing().iter().cloned(),
+                self.compilation_snapshot_strategy,
+                &snapshot_cache,
+            )
+            .await?;
+
+        let record = CachedCompilationRecord {
+            key: CachedCompilationKey::from_options(options),
+            assets: assets.to_vec(),
+            file_dependencies: watch_dependencies.files().clone(),
+            context_dependencies: watch_dependencies.contexts().clone(),
+            missing_dependencies: watch_dependencies.missing().clone(),
+            snapshot,
+        };
+
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        inner.cached_compilation = Some(Arc::new(record));
+        inner.dirty = true;
+        Ok(())
     }
 
     pub(crate) fn flush_to_filesystem(&self) -> io::Result<()> {
@@ -404,7 +518,7 @@ impl BuildCache {
             return Ok(());
         }
 
-        let (resolve_records, module_builds, asset_generations) = {
+        let (resolve_records, module_builds, cached_compilation) = {
             let inner = self
                 .inner
                 .lock()
@@ -415,11 +529,15 @@ impl BuildCache {
             (
                 inner.resolve_records.records.clone(),
                 inner.module_builds.records.clone(),
-                inner.asset_generations.records.clone(),
+                inner.cached_compilation.clone(),
             )
         };
 
-        self.write_filesystem_cache(&resolve_records, &module_builds, &asset_generations)?;
+        self.write_filesystem_cache(
+            &resolve_records,
+            &module_builds,
+            cached_compilation.as_deref(),
+        )?;
 
         self.inner
             .lock()
@@ -441,9 +559,6 @@ impl BuildCache {
             module_entries: inner.module_builds.entries(),
             module_hits: inner.module_builds.hits,
             module_misses: inner.module_builds.misses,
-            asset_entries: inner.asset_generations.entries(),
-            asset_hits: inner.asset_generations.hits,
-            asset_misses: inner.asset_generations.misses,
         }
     }
 }
@@ -460,6 +575,8 @@ where
         if !self.is_enabled() {
             return None;
         }
+
+        self.build_cache.restore_records_from_filesystem_if_needed();
 
         let mut inner = self
             .build_cache
@@ -503,10 +620,55 @@ impl BuildCache {
             return;
         }
 
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        inner.filesystem_manifest = Some(manifest.clone());
+        inner.cached_compilation = manifest
+            .compilation_file
+            .as_deref()
+            .and_then(|compilation_file| read_compilation_pack(cache_location, compilation_file))
+            .and_then(|pack| {
+                (pack.magic == CACHE_MAGIC && pack.cache_version == self.cache_version())
+                    .then(|| Arc::new(pack.compilation))
+            });
+        drop(inner);
+
+        if !self.options.readonly {
+            self.restore_records_from_filesystem_if_needed();
+        }
+    }
+
+    fn restore_records_from_filesystem_if_needed(&self) {
+        if self.options.kind != CacheKind::Filesystem {
+            return;
+        }
+        let Some(cache_location) = &self.options.cache_location else {
+            self.mark_records_restored();
+            return;
+        };
+        let manifest = {
+            let inner = self
+                .inner
+                .lock()
+                .expect("build cache mutex should not be poisoned");
+            if inner.records_restored {
+                return;
+            }
+            inner.filesystem_manifest.clone()
+        };
+        let Some(manifest) = manifest else {
+            self.mark_records_restored();
+            return;
+        };
+
         let Some(pack) = read_pack(cache_location, &manifest.pack_file) else {
+            self.mark_records_restored();
             return;
         };
         if pack.magic != CACHE_MAGIC || pack.cache_version != self.cache_version() {
+            self.mark_records_restored();
             return;
         }
 
@@ -524,18 +686,21 @@ impl BuildCache {
             .into_iter()
             .map(|(identity, record)| (identity, Arc::new(record)))
             .collect();
-        inner.asset_generations.records = pack
-            .asset_generations
-            .into_iter()
-            .map(|(key, record)| (key, Arc::new(record)))
-            .collect();
+        inner.records_restored = true;
+    }
+
+    fn mark_records_restored(&self) {
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .records_restored = true;
     }
 
     fn write_filesystem_cache(
         &self,
         resolve_records: &HashMap<ResolveRequest, Arc<ResolveRecord>>,
         module_builds: &HashMap<ModuleIdentity, Arc<ModuleBuildRecord>>,
-        asset_generations: &HashMap<AssetGenerationKey, Arc<AssetGenerationRecord>>,
+        cached_compilation: Option<&CachedCompilationRecord>,
     ) -> io::Result<()> {
         let Some(cache_location) = &self.options.cache_location else {
             return Ok(());
@@ -559,10 +724,6 @@ impl BuildCache {
                 .iter()
                 .map(|(identity, record)| (identity.clone(), (**record).clone()))
                 .collect(),
-            asset_generations: asset_generations
-                .iter()
-                .map(|(key, record)| (*key, (**record).clone()))
-                .collect(),
         };
         let pack_payload = cbor4ii::serde::to_vec(Vec::new(), &pack)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -570,10 +731,33 @@ impl BuildCache {
         pack_bytes.extend(pack_payload);
         fs::write(pack_path, pack_bytes)?;
 
+        let compilation_file = if let Some(cached_compilation) = cached_compilation {
+            let compilation_file = PathBuf::from(DEFAULT_COMPILATION_FILE);
+            let compilation_path = cache_location.join(&compilation_file);
+            if let Some(parent) = compilation_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let compilation_pack = CachedCompilationPackDto {
+                magic: CACHE_MAGIC.to_string(),
+                cache_version: cache_version.clone(),
+                compilation: cached_compilation.clone(),
+            };
+            let compilation_payload = cbor4ii::serde::to_vec(Vec::new(), &compilation_pack)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let mut compilation_bytes = PACK_MAGIC.to_vec();
+            compilation_bytes.extend(compilation_payload);
+            fs::write(compilation_path, compilation_bytes)?;
+            Some(compilation_file)
+        } else {
+            None
+        };
+
         let manifest = CacheManifest {
             magic: CACHE_MAGIC.to_string(),
             cache_version,
             pack_file: pack_file.to_string_lossy().replace('\\', "/"),
+            compilation_file: compilation_file
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
             build_dependencies: self
                 .build_dependency_snapshot(self.build_dependency_snapshot_strategy)?,
             resolve_build_dependencies: self
@@ -649,11 +833,22 @@ fn read_pack(cache_location: &Path, pack_file: &str) -> Option<CachePackDto> {
     cbor4ii::serde::from_slice(payload).ok()
 }
 
+fn read_compilation_pack(
+    cache_location: &Path,
+    compilation_file: &str,
+) -> Option<CachedCompilationPackDto> {
+    let bytes = fs::read(cache_location.join(compilation_file)).ok()?;
+    let payload = bytes.strip_prefix(PACK_MAGIC)?;
+    cbor4ii::serde::from_slice(payload).ok()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CacheManifest {
     magic: String,
     cache_version: String,
     pack_file: String,
+    #[serde(default)]
+    compilation_file: Option<String>,
     build_dependencies: Snapshot,
     resolve_build_dependencies: Snapshot,
 }
@@ -664,8 +859,13 @@ struct CachePackDto {
     cache_version: String,
     resolve_records: Vec<(ResolveRequest, ResolveRecord)>,
     module_builds: Vec<(ModuleIdentity, ModuleBuildRecord)>,
-    #[serde(default)]
-    asset_generations: Vec<(AssetGenerationKey, AssetGenerationRecord)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedCompilationPackDto {
+    magic: String,
+    cache_version: String,
+    compilation: CachedCompilationRecord,
 }
 
 #[cfg(test)]
@@ -677,9 +877,6 @@ pub(crate) struct BuildCacheStats {
     pub module_entries: usize,
     pub module_hits: usize,
     pub module_misses: usize,
-    pub asset_entries: usize,
-    pub asset_hits: usize,
-    pub asset_misses: usize,
 }
 
 fn resolve_records(inner: &mut BuildCacheInner) -> &mut CacheStore<ResolveRequest, ResolveRecord> {
@@ -697,27 +894,21 @@ mod tests {
     use crate::{ModuleIdentity, snapshot::FileSystemInfo};
 
     #[test]
-    fn cache_pack_without_asset_generations_deserializes_with_empty_asset_cache()
+    fn module_build_record_without_source_hash_deserializes_with_empty_hash()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        #[derive(Serialize)]
-        struct OldCachePackDto {
-            magic: String,
-            cache_version: String,
-            resolve_records: Vec<(ResolveRequest, ResolveRecord)>,
-            module_builds: Vec<(ModuleIdentity, ModuleBuildRecord)>,
-        }
+        let record: ModuleBuildRecord = serde_json::from_value(serde_json::json!({
+            "parsed": {
+                "dependencies": [],
+                "blocks": [],
+                "presentational_dependencies": []
+            },
+            "source": "export const value = 1;",
+            "snapshot": {
+                "entries": []
+            }
+        }))?;
 
-        let old_pack = OldCachePackDto {
-            magic: CACHE_MAGIC.to_string(),
-            cache_version: "old".to_string(),
-            resolve_records: Vec::new(),
-            module_builds: Vec::new(),
-        };
-        let payload = cbor4ii::serde::to_vec(Vec::new(), &old_pack)?;
-        let pack: CachePackDto = cbor4ii::serde::from_slice(&payload)?;
-
-        assert_eq!(pack.magic, CACHE_MAGIC);
-        assert!(pack.asset_generations.is_empty());
+        assert_eq!(record.source_hash(), None);
 
         Ok(())
     }
@@ -767,10 +958,4 @@ fn module_builds(
     inner: &mut BuildCacheInner,
 ) -> &mut CacheStore<ModuleIdentity, ModuleBuildRecord> {
     &mut inner.module_builds
-}
-
-fn asset_generations(
-    inner: &mut BuildCacheInner,
-) -> &mut CacheStore<AssetGenerationKey, AssetGenerationRecord> {
-    &mut inner.asset_generations
 }

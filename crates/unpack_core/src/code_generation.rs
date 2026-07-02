@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use rspack_sources::{
@@ -13,8 +12,6 @@ use crate::{
     HarmonyExportHeaderDependency, HarmonyExportImportedSpecifierDependency,
     HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
     HarmonyImportSpecifierDependency, ImportDependency, Module, ModuleGraph, ModuleId, SourceRange,
-    build_cache::{AssetGenerationCache, AssetGenerationKey, AssetGenerationRecord},
-    cache_hash::StableHasher,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,46 +94,9 @@ pub(crate) fn create_assets(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     entries: &[ModuleId],
-    asset_cache: &AssetGenerationCache,
 ) -> Vec<Asset> {
     let render_context = RenderPathContext::new(options.context.as_path());
     let module_render_ids = module_render_ids(&render_context, module_graph);
-
-    let cache_key = asset_cache.is_enabled().then(|| {
-        asset_generation_key(
-            options,
-            module_graph,
-            chunk_graph,
-            entries,
-            &module_render_ids,
-        )
-    });
-    if let Some(key) = cache_key {
-        if let Some(record) = asset_cache.get(&key) {
-            return record.assets().to_vec();
-        }
-    }
-
-    let assets = render_assets(
-        options,
-        module_graph,
-        chunk_graph,
-        entries,
-        &module_render_ids,
-    );
-    if let Some(key) = cache_key {
-        asset_cache.store(key, AssetGenerationRecord::new(assets.clone()));
-    }
-    assets
-}
-
-fn render_assets(
-    options: &CompilerOptions,
-    module_graph: &ModuleGraph,
-    chunk_graph: &ChunkGraph,
-    entries: &[ModuleId],
-    module_render_ids: &HashMap<ModuleId, String>,
-) -> Vec<Asset> {
     let mut assets = Vec::new();
 
     for (entry_index, group_id) in chunk_graph.entrypoints().iter().copied().enumerate() {
@@ -182,85 +142,6 @@ fn render_assets(
     }
 
     assets
-}
-
-fn asset_generation_key(
-    options: &CompilerOptions,
-    module_graph: &ModuleGraph,
-    chunk_graph: &ChunkGraph,
-    entries: &[ModuleId],
-    module_render_ids: &HashMap<ModuleId, String>,
-) -> AssetGenerationKey {
-    let mut hasher = StableHasher::default();
-    "unpack.asset_generation.v1".hash(&mut hasher);
-    options.context.hash(&mut hasher);
-    options.sourcemap.hash(&mut hasher);
-    options.entries.len().hash(&mut hasher);
-    for entry in &options.entries {
-        entry.name.hash(&mut hasher);
-        entry.request.hash(&mut hasher);
-    }
-    entries.hash(&mut hasher);
-
-    for module in module_graph.modules() {
-        module.id().hash(&mut hasher);
-        module.identity().hash(&mut hasher);
-        module_render_ids.get(&module.id()).hash(&mut hasher);
-        module.source_hash().hash(&mut hasher);
-        module.source_len().hash(&mut hasher);
-        module.dependencies().hash(&mut hasher);
-        module.presentational_dependencies().hash(&mut hasher);
-        module.blocks().hash(&mut hasher);
-        for export in module.exports_info().provided_exports() {
-            export.hash(&mut hasher);
-        }
-        module
-            .build_error()
-            .map(ToString::to_string)
-            .hash(&mut hasher);
-    }
-
-    for connection in module_graph.connections() {
-        connection.origin_module.hash(&mut hasher);
-        connection
-            .origin_module
-            .and_then(|module_id| module_graph.module(module_id))
-            .map(Module::identity)
-            .hash(&mut hasher);
-        connection.origin_block.hash(&mut hasher);
-        connection.origin_dependency_id.hash(&mut hasher);
-        connection.dependency.hash(&mut hasher);
-        connection.module.hash(&mut hasher);
-        module_graph
-            .module(connection.module)
-            .map(Module::identity)
-            .hash(&mut hasher);
-    }
-
-    chunk_graph.entrypoints().hash(&mut hasher);
-    for group in chunk_graph.chunk_groups() {
-        group.id().hash(&mut hasher);
-        match group.kind() {
-            ChunkGroupKind::Entrypoint { name } => {
-                0u8.hash(&mut hasher);
-                name.hash(&mut hasher);
-            }
-            ChunkGroupKind::Async => 1u8.hash(&mut hasher),
-        }
-        group.chunks().hash(&mut hasher);
-        group.parents().hash(&mut hasher);
-        group.children().hash(&mut hasher);
-        group.origin().hash(&mut hasher);
-    }
-    for chunk in chunk_graph.chunks() {
-        chunk.id().hash(&mut hasher);
-        chunk.render_id().hash(&mut hasher);
-        chunk.filename().hash(&mut hasher);
-        chunk.groups().hash(&mut hasher);
-        chunk_graph.chunk_modules(chunk.id()).hash(&mut hasher);
-    }
-
-    AssetGenerationKey::new(hasher.finish())
 }
 
 fn emit_asset(filename: String, mut source: ConcatSource, sourcemap: bool) -> Vec<Asset> {

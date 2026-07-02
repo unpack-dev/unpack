@@ -16,7 +16,7 @@ use crate::{
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     cache_hash::stable_hash,
     parser::{ParsedModule, parse_module_dependencies},
-    snapshot::FileSystemInfo,
+    snapshot::{FileSystemInfo, SnapshotCache},
 };
 
 #[derive(Debug, Default)]
@@ -36,6 +36,7 @@ struct MakeServices {
     module_build_cache: ModuleBuildCache,
     module_snapshot_strategy: SnapshotStrategy,
     file_system_info: FileSystemInfo,
+    snapshot_cache: SnapshotCache,
     semaphore: Arc<Semaphore>,
 }
 
@@ -123,16 +124,19 @@ pub(crate) async fn run(
     file_system_info: FileSystemInfo,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
+    let snapshot_cache = SnapshotCache::default();
     let services = MakeServices {
         normal_module_factory: NormalModuleFactory::new(
             resolver,
             build_cache.normal_module_factory(),
             file_system_info.clone(),
             options.snapshot.resolve,
+            snapshot_cache.clone(),
         ),
         module_build_cache: build_cache.module_builds(),
         file_system_info,
         module_snapshot_strategy: options.snapshot.module,
+        snapshot_cache,
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
 
@@ -358,9 +362,10 @@ impl BuildTask {
 
         if let Some(record) = services.module_build_cache.get(&self.identity) {
             if record
-                .is_valid(
+                .is_valid_with_cache(
                     &services.file_system_info,
                     services.module_snapshot_strategy,
+                    &services.snapshot_cache,
                 )
                 .await
             {

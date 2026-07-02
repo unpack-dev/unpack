@@ -79,10 +79,28 @@ impl Compiler {
 
     pub async fn run(&self) -> Result<Compilation> {
         async {
+            if let Some(cached) = self.build_cache.cached_compilation(&self.options).await {
+                return Ok(Compilation::from_cached(
+                    self.options.clone(),
+                    UnpackResolver::new(self.options.resolve.clone()),
+                    self.build_cache.clone(),
+                    &cached,
+                ));
+            }
+
             let mut compilation = self.create_compilation();
             compilation.make().await?;
             compilation.build_chunk_graph();
             compilation.create_assets();
+            if compilation.errors().is_empty() {
+                self.build_cache
+                    .store_compilation(
+                        &self.options,
+                        compilation.assets(),
+                        compilation.watch_dependencies(),
+                    )
+                    .await?;
+            }
             Ok(compilation)
         }
         .instrument(tracing::trace_span!("Compiler::run"))
@@ -228,6 +246,7 @@ mod tests {
         assert_eq!(first.errors(), []);
         assert!(cache_location.join("container.json").exists());
         assert!(cache_location.join("packs/modules.cbor").exists());
+        assert!(cache_location.join("packs/compilation.cbor").exists());
         let manifest = fs::read_to_string(cache_location.join("container.json"))?;
         assert!(manifest.contains("UNPACK_PERSISTENT_CACHE"));
         assert!(manifest.contains("test-version"));
@@ -248,80 +267,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_cache_restores_asset_generation_records_for_later_compiler_instances()
+    async fn filesystem_cache_readonly_uses_cached_compilation_without_module_pack()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         write(
             temp.path().join("index.js"),
             r#"
-                import { value } from "./dep";
-                export const result = value;
+                import "./dep";
+                export const result = "ok";
             "#,
         )?;
         write(temp.path().join("dep.js"), "export const value = 1;")?;
-        let cache_location = temp.path().join(".cache/unpack/default");
+        let cache_temp = tempfile::tempdir()?;
+        let cache_location = cache_temp.path().join("default");
 
         let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
         options.cache = CacheOptions::filesystem();
-        options.cache.cache_location = Some(cache_location);
-        options.cache.version = Some("asset-generation-cache-test".to_string());
+        options.cache.cache_location = Some(cache_location.clone());
 
         let first_compiler = Compiler::new(options.clone());
         let first = first_compiler.run().await?;
-        let first_cache = first_compiler.build_cache.stats();
-        assert_eq!(first_cache.asset_entries, 1);
-        assert_eq!(first_cache.asset_hits, 0);
-        assert_eq!(first_cache.asset_misses, 1);
         first_compiler.flush_cache()?;
 
-        let second_compiler = Compiler::new(options);
-        assert_eq!(second_compiler.build_cache.stats().asset_entries, 1);
+        let module_pack = cache_location.join("packs/modules.cbor");
+        assert!(module_pack.exists());
+        assert!(cache_location.join("packs/compilation.cbor").exists());
+        fs::remove_file(module_pack)?;
 
-        let second = second_compiler.run().await?;
-        let second_cache = second_compiler.build_cache.stats();
-        assert_eq!(second_cache.asset_hits, 1);
-        assert_eq!(second_cache.asset_misses, 0);
+        let mut readonly_options = options;
+        readonly_options.cache.readonly = true;
+        let readonly_compiler = Compiler::new(readonly_options);
+        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 0);
+        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 0);
+
+        let second = readonly_compiler.run().await?;
         assert_eq!(asset_sources(&first), asset_sources(&second));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn asset_generation_cache_key_changes_when_module_source_changes()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let entry = temp.path().join("index.js");
-        write(&entry, "export const value = 'before';")?;
-
-        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
-        options.snapshot.module = crate::SnapshotStrategy::hash();
-        let compiler = Compiler::new(options);
-
-        let first = compiler.run().await?;
-        assert!(
-            asset_sources(&first)
-                .get("main.js")
-                .expect("main asset should exist")
-                .contains("before")
-        );
-        let first_cache = compiler.build_cache.stats();
-        assert_eq!(first_cache.asset_entries, 1);
-        assert_eq!(first_cache.asset_hits, 0);
-        assert_eq!(first_cache.asset_misses, 1);
-
-        write(&entry, "export const value = 'after';")?;
-
-        let second = compiler.run().await?;
-        assert!(
-            asset_sources(&second)
-                .get("main.js")
-                .expect("main asset should exist")
-                .contains("after")
-        );
-        let second_cache = compiler.build_cache.stats();
-        assert_eq!(second_cache.asset_entries, 2);
-        assert_eq!(second_cache.asset_hits, 0);
-        assert_eq!(second_cache.asset_misses, 2);
+        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 0);
+        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 0);
 
         Ok(())
     }
@@ -358,10 +340,13 @@ mod tests {
         let mut readonly_options = options;
         readonly_options.cache.readonly = true;
         let readonly_compiler = Compiler::new(readonly_options);
-        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 2);
-        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 2);
+        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 0);
+        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 0);
 
         let second = readonly_compiler.run().await?;
+        let readonly_cache = readonly_compiler.build_cache.stats();
+        assert_eq!(readonly_cache.resolve_entries, 2);
+        assert_eq!(readonly_cache.module_entries, 2);
         readonly_compiler.flush_cache()?;
         assert!(
             asset_sources(&second)

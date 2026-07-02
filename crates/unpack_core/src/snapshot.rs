@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -121,6 +121,8 @@ pub(crate) struct FileSystemInfo {
 pub(crate) struct SnapshotCache {
     context_timestamp_hashes: Arc<Mutex<HashMap<PathBuf, DirectoryTimestampHash>>>,
     context_content_hashes: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    snapshot_validity: Arc<Mutex<HashMap<Snapshot, bool>>>,
+    snapshot_optimization: Arc<Mutex<SnapshotOptimization>>,
 }
 
 impl FileSystemInfo {
@@ -258,7 +260,7 @@ impl Default for FileSystemInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SnapshotPathClassification {
     Unmanaged,
     Immutable,
@@ -266,15 +268,19 @@ enum SnapshotPathClassification {
     Unclassified,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ManagedPathBoundary {
     NodeModules,
     Path(PathBuf),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+const MIN_COMMON_SNAPSHOT_SIZE: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     entries: Vec<SnapshotEntry>,
+    #[serde(default)]
+    children: Vec<Snapshot>,
 }
 
 impl Snapshot {
@@ -288,6 +294,7 @@ impl Snapshot {
             entries: vec![
                 SnapshotEntry::create_file(path, Some(source), strategy, file_system_info).await?,
             ],
+            children: Vec::new(),
         })
     }
 
@@ -317,7 +324,14 @@ impl Snapshot {
             entries.push(SnapshotEntry::create_missing(&path, file_system_info));
         }
 
-        Ok(Self { entries })
+        let mut snapshot = Self {
+            entries,
+            children: Vec::new(),
+        };
+        if let Some(cache) = cache {
+            cache.optimize_snapshot(&mut snapshot);
+        }
+        Ok(snapshot)
     }
 
     #[cfg(test)]
@@ -332,7 +346,10 @@ impl Snapshot {
             entries
                 .push(SnapshotEntry::create_file(&path, None, strategy, file_system_info).await?);
         }
-        Ok(Self { entries })
+        Ok(Self {
+            entries,
+            children: Vec::new(),
+        })
     }
 
     fn create_sync(
@@ -349,7 +366,10 @@ impl Snapshot {
                 file_system_info,
             )?);
         }
-        Ok(Self { entries })
+        Ok(Self {
+            entries,
+            children: Vec::new(),
+        })
     }
 
     async fn is_valid(
@@ -358,15 +378,38 @@ impl Snapshot {
         file_system_info: &FileSystemInfo,
         cache: Option<&SnapshotCache>,
     ) -> bool {
-        for entry in &self.entries {
-            if !entry.is_valid(strategy, file_system_info, cache).await {
+        if let Some(valid) = cache.and_then(|cache| cache.snapshot_validity(self)) {
+            return valid;
+        }
+
+        for child in &self.children {
+            if !Box::pin(child.is_valid(strategy, file_system_info, cache)).await {
+                if let Some(cache) = cache {
+                    cache.store_snapshot_validity(self, false);
+                }
                 return false;
             }
+        }
+        for entry in &self.entries {
+            if !entry.is_valid(strategy, file_system_info, cache).await {
+                if let Some(cache) = cache {
+                    cache.store_snapshot_validity(self, false);
+                }
+                return false;
+            }
+        }
+        if let Some(cache) = cache {
+            cache.store_snapshot_validity(self, true);
         }
         true
     }
 
     fn is_valid_sync(&self, strategy: SnapshotStrategy, file_system_info: &FileSystemInfo) -> bool {
+        for child in &self.children {
+            if !child.is_valid_sync(strategy, file_system_info) {
+                return false;
+            }
+        }
         for entry in &self.entries {
             if !entry.is_valid_sync(strategy, file_system_info) {
                 return false;
@@ -377,29 +420,129 @@ impl Snapshot {
 
     pub(crate) fn has_exact_paths(&self, paths: impl IntoIterator<Item = PathBuf>) -> bool {
         let paths = normalize_paths(paths);
-        self.entries.len() == paths.len()
-            && self
-                .entries
-                .iter()
-                .zip(paths.iter())
-                .all(|(entry, path)| entry.path() == path)
+        let mut snapshot_paths = Vec::new();
+        self.collect_paths(&mut snapshot_paths);
+        snapshot_paths.sort();
+        snapshot_paths.dedup();
+        snapshot_paths == paths
     }
 
     fn merge<'a>(snapshots: impl IntoIterator<Item = &'a Snapshot>) -> Self {
         let mut entries = BTreeMap::new();
         for snapshot in snapshots {
-            for entry in &snapshot.entries {
+            for entry in snapshot.entries_recursive() {
                 entries.insert(entry.path().to_path_buf(), entry.clone());
             }
         }
 
         Self {
             entries: entries.into_values().collect(),
+            children: Vec::new(),
+        }
+    }
+
+    fn entries_recursive(&self) -> Vec<&SnapshotEntry> {
+        let mut entries = Vec::new();
+        self.collect_entries(&mut entries);
+        entries
+    }
+
+    fn collect_entries<'a>(&'a self, entries: &mut Vec<&'a SnapshotEntry>) {
+        entries.extend(self.entries.iter());
+        for child in &self.children {
+            child.collect_entries(entries);
+        }
+    }
+
+    fn collect_paths(&self, paths: &mut Vec<PathBuf>) {
+        paths.extend(self.entries.iter().map(|entry| entry.path().to_path_buf()));
+        for child in &self.children {
+            child.collect_paths(paths);
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default)]
+struct SnapshotOptimization {
+    seen_entries: HashMap<PathBuf, SnapshotEntry>,
+    shared_snapshots: HashMap<Vec<SnapshotEntry>, Snapshot>,
+}
+
+impl SnapshotOptimization {
+    fn optimize(&mut self, snapshot: &mut Snapshot) {
+        if snapshot.entries.len() < MIN_COMMON_SNAPSHOT_SIZE {
+            self.remember(snapshot);
+            return;
+        }
+
+        let mut common_entries = snapshot
+            .entries
+            .iter()
+            .filter(|entry| {
+                self.seen_entries
+                    .get(entry.path())
+                    .is_some_and(|seen| seen == *entry)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        common_entries.sort_by_key(|entry| entry.path().to_path_buf());
+        common_entries.dedup_by(|left, right| left.path() == right.path());
+
+        if common_entries.len() >= MIN_COMMON_SNAPSHOT_SIZE {
+            let common_paths = common_entries
+                .iter()
+                .map(|entry| entry.path().to_path_buf())
+                .collect::<HashSet<_>>();
+            let child = self
+                .shared_snapshots
+                .entry(common_entries.clone())
+                .or_insert_with(|| Snapshot {
+                    entries: common_entries,
+                    children: Vec::new(),
+                })
+                .clone();
+            snapshot
+                .entries
+                .retain(|entry| !common_paths.contains(entry.path()));
+            snapshot.children.push(child);
+        }
+
+        self.remember(snapshot);
+    }
+
+    fn remember(&mut self, snapshot: &Snapshot) {
+        for entry in snapshot.entries_recursive() {
+            self.seen_entries
+                .insert(entry.path().to_path_buf(), entry.clone());
+        }
+    }
+}
+
+impl SnapshotCache {
+    fn optimize_snapshot(&self, snapshot: &mut Snapshot) {
+        self.snapshot_optimization
+            .lock()
+            .expect("snapshot optimization mutex should not be poisoned")
+            .optimize(snapshot);
+    }
+
+    fn snapshot_validity(&self, snapshot: &Snapshot) -> Option<bool> {
+        self.snapshot_validity
+            .lock()
+            .expect("snapshot validity mutex should not be poisoned")
+            .get(snapshot)
+            .copied()
+    }
+
+    fn store_snapshot_validity(&self, snapshot: &Snapshot, valid: bool) {
+        self.snapshot_validity
+            .lock()
+            .expect("snapshot validity mutex should not be poisoned")
+            .insert(snapshot.clone(), valid);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum SnapshotEntry {
     File(SnapshottedFile),
     Context(SnapshottedContext),
@@ -559,7 +702,7 @@ impl SnapshotEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct ContextSnapshot {
     exists: bool,
     #[serde(default)]
@@ -679,7 +822,7 @@ impl MissingExistenceSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct FileSnapshot {
     exists: bool,
     modified: Option<SystemTime>,
@@ -835,7 +978,7 @@ impl FileSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct ManagedPathSnapshot {
     path: PathBuf,
     root: PathBuf,
@@ -858,7 +1001,7 @@ impl ManagedPathSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum ManagedItemState {
     NodeModules,
     GroupingFolder,
@@ -885,13 +1028,13 @@ impl ManagedItemState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct SnapshottedFile {
     path: PathBuf,
     snapshot: FileSnapshot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct SnapshottedContext {
     path: PathBuf,
     snapshot: ContextSnapshot,
@@ -1637,6 +1780,141 @@ mod tests {
                 .is_snapshot_valid(&merged, SnapshotStrategy::hash())
                 .await
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn snapshot_cache_extracts_shared_child_snapshots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let shared_a = temp.path().join("shared-a.js");
+        let shared_b = temp.path().join("shared-b.js");
+        let shared_c = temp.path().join("shared-c.js");
+        let unique_a = temp.path().join("unique-a.js");
+        let unique_b = temp.path().join("unique-b.js");
+        for path in [&shared_a, &shared_b, &shared_c, &unique_a, &unique_b] {
+            write(path, "export const value = true;")?;
+        }
+        let file_system_info = FileSystemInfo::new();
+        let cache = SnapshotCache::default();
+
+        let first = file_system_info
+            .create_resolve_snapshot_with_cache(
+                vec![
+                    shared_a.clone(),
+                    shared_b.clone(),
+                    shared_c.clone(),
+                    unique_a.clone(),
+                ],
+                Vec::new(),
+                Vec::new(),
+                SnapshotStrategy::timestamp(),
+                &cache,
+            )
+            .await?;
+        let second = file_system_info
+            .create_resolve_snapshot_with_cache(
+                vec![shared_a, shared_b, shared_c, unique_b],
+                Vec::new(),
+                Vec::new(),
+                SnapshotStrategy::timestamp(),
+                &cache,
+            )
+            .await?;
+
+        assert_eq!(first.children.len(), 0);
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(second.children.len(), 1);
+        assert_eq!(second.children[0].entries.len(), MIN_COMMON_SNAPSHOT_SIZE);
+        assert!(
+            file_system_info
+                .is_snapshot_valid_with_cache(&second, SnapshotStrategy::timestamp(), &cache)
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn snapshot_validity_cache_reuses_shared_child_results()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let shared_a = temp.path().join("shared-a.js");
+        let shared_b = temp.path().join("shared-b.js");
+        let shared_c = temp.path().join("shared-c.js");
+        let unique_a = temp.path().join("unique-a.js");
+        let unique_b = temp.path().join("unique-b.js");
+        let unique_c = temp.path().join("unique-c.js");
+        for path in [
+            &shared_a, &shared_b, &shared_c, &unique_a, &unique_b, &unique_c,
+        ] {
+            write(path, "export const value = true;")?;
+        }
+        let file_system_info = FileSystemInfo::new();
+        let cache = SnapshotCache::default();
+
+        let _first = file_system_info
+            .create_resolve_snapshot_with_cache(
+                vec![
+                    shared_a.clone(),
+                    shared_b.clone(),
+                    shared_c.clone(),
+                    unique_a,
+                ],
+                Vec::new(),
+                Vec::new(),
+                SnapshotStrategy::timestamp(),
+                &cache,
+            )
+            .await?;
+        let second = file_system_info
+            .create_resolve_snapshot_with_cache(
+                vec![
+                    shared_a.clone(),
+                    shared_b.clone(),
+                    shared_c.clone(),
+                    unique_b,
+                ],
+                Vec::new(),
+                Vec::new(),
+                SnapshotStrategy::timestamp(),
+                &cache,
+            )
+            .await?;
+        let third = file_system_info
+            .create_resolve_snapshot_with_cache(
+                vec![shared_a, shared_b, shared_c, unique_c],
+                Vec::new(),
+                Vec::new(),
+                SnapshotStrategy::timestamp(),
+                &cache,
+            )
+            .await?;
+
+        assert_eq!(second.children, third.children);
+        assert!(
+            file_system_info
+                .is_snapshot_valid_with_cache(&second, SnapshotStrategy::timestamp(), &cache)
+                .await
+        );
+        let cached_after_second = cache
+            .snapshot_validity
+            .lock()
+            .expect("snapshot validity mutex should not be poisoned")
+            .len();
+        assert!(
+            file_system_info
+                .is_snapshot_valid_with_cache(&third, SnapshotStrategy::timestamp(), &cache)
+                .await
+        );
+        let cached_after_third = cache
+            .snapshot_validity
+            .lock()
+            .expect("snapshot validity mutex should not be poisoned")
+            .len();
+
+        assert_eq!(cached_after_third, cached_after_second + 1);
 
         Ok(())
     }

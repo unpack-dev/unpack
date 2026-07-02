@@ -49,6 +49,7 @@ pub struct CacheOptions {
     pub build_dependencies: Vec<BuildDependency>,
     pub max_memory_generations: Option<u32>,
     pub idle_timeout: Option<u32>,
+    pub readonly: bool,
 }
 
 impl Default for CacheOptions {
@@ -68,6 +69,7 @@ impl CacheOptions {
             build_dependencies: Vec::new(),
             max_memory_generations: None,
             idle_timeout: None,
+            readonly: false,
         }
     }
 
@@ -81,6 +83,7 @@ impl CacheOptions {
             build_dependencies: Vec::new(),
             max_memory_generations: None,
             idle_timeout: None,
+            readonly: false,
         }
     }
 
@@ -94,6 +97,7 @@ impl CacheOptions {
             build_dependencies: Vec::new(),
             max_memory_generations: None,
             idle_timeout: None,
+            readonly: false,
         }
     }
 }
@@ -351,7 +355,7 @@ impl BuildCache {
     }
 
     pub(crate) fn flush_to_filesystem(&self) -> io::Result<()> {
-        if self.options.kind != CacheKind::Filesystem {
+        if self.options.kind != CacheKind::Filesystem || self.options.readonly {
             return Ok(());
         }
 
@@ -427,7 +431,9 @@ where
             .lock()
             .expect("build cache mutex should not be poisoned");
         (self.store)(&mut inner).store(key, value);
-        if self.build_cache.options.kind == CacheKind::Filesystem {
+        if self.build_cache.options.kind == CacheKind::Filesystem
+            && !self.build_cache.options.readonly
+        {
             inner.dirty = true;
         }
     }

@@ -39,11 +39,15 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
     assert.equal(typeof report.results[0].no_cache_build_ms, "number");
     assert.ok(report.results[0].output_bytes > 0);
     assert.deepEqual(
-      calls.map(({ phase, persistentCache }) => ({ phase, persistentCache })),
+      calls.map(({ phase, persistentCache, cacheReadonly }) => ({
+        phase,
+        persistentCache,
+        cacheReadonly
+      })),
       [
-        { phase: "cold", persistentCache: true },
-        { phase: "warm", persistentCache: true },
-        { phase: "no-cache", persistentCache: false }
+        { phase: "cold", persistentCache: true, cacheReadonly: false },
+        { phase: "warm", persistentCache: true, cacheReadonly: true },
+        { phase: "no-cache", persistentCache: false, cacheReadonly: false }
       ]
     );
     const summary = toSummaryMarkdown(report);
@@ -229,8 +233,8 @@ function fakeAdapter({ checksumOffset = 0, error, calls } = {}) {
   return {
     name: "fake",
     versionSource: () => "fake@1.0.0",
-    async build({ fixture, outputDir, phase, persistentCache }) {
-      calls?.push({ phase, persistentCache });
+    async build({ fixture, outputDir, phase, persistentCache, cacheReadonly }) {
+      calls?.push({ phase, persistentCache, cacheReadonly });
       if (error) {
         throw error;
       }

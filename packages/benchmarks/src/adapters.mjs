@@ -14,7 +14,7 @@ export const adapters = {
   unpack: {
     name: "unpack",
     versionSource: () => `@unpack-js/core@${packageVersion("@unpack-js/core")}`,
-    async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
+    async build({ fixture, outputDir, cacheDir, persistentCache = true, cacheReadonly = false }) {
       const { default: unpack } = await import("@unpack-js/core");
       const compiler = unpack({
         mode: "none",
@@ -26,7 +26,8 @@ export const adapters = {
           ? {
               type: "filesystem",
               cacheLocation: cacheDir,
-              idleTimeout: 0
+              idleTimeout: 0,
+              readonly: cacheReadonly
             }
           : false
       });
@@ -51,7 +52,7 @@ export const adapters = {
   webpack: {
     name: "webpack",
     versionSource: () => `webpack@${packageVersion("webpack")}`,
-    async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
+    async build({ fixture, outputDir, cacheDir, persistentCache = true, cacheReadonly = false }) {
       const webpackModule = await import("webpack");
       const webpack = webpackModule.default ?? webpackModule;
       const compiler = webpack({
@@ -59,7 +60,8 @@ export const adapters = {
         cache: persistentCache
           ? {
               type: "filesystem",
-              cacheDirectory: cacheDir
+              cacheDirectory: cacheDir,
+              readonly: cacheReadonly
             }
           : false
       });

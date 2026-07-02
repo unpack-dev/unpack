@@ -124,6 +124,7 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     outputDir,
     cacheDir,
     persistentCache: true,
+    cacheReadonly: false,
     options
   });
   if (cold.status !== "success") {
@@ -137,6 +138,7 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     outputDir,
     cacheDir,
     persistentCache: true,
+    cacheReadonly: true,
     options
   });
 
@@ -151,6 +153,7 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     outputDir: noCacheOutputDir,
     cacheDir: noCacheCacheDir,
     persistentCache: false,
+    cacheReadonly: false,
     options
   });
 
@@ -164,6 +167,7 @@ async function timedBuild({
   outputDir,
   cacheDir,
   persistentCache,
+  cacheReadonly = false,
   options
 }) {
   if (phase === "cold" || phase === "no-cache") {
@@ -182,6 +186,7 @@ async function timedBuild({
       cacheDir,
       phase,
       persistentCache,
+      cacheReadonly,
       options
     });
   } catch (error) {

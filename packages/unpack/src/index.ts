@@ -28,6 +28,7 @@ export type CacheOptions =
       buildDependencies?: Record<string, string[]>;
       maxMemoryGenerations?: number;
       idleTimeout?: number;
+      readonly?: boolean;
     };
 
 export interface SnapshotOptions {
@@ -138,6 +139,7 @@ interface NormalizedCacheOptions {
   buildDependencies: NormalizedBuildDependency[];
   maxMemoryGenerations?: number;
   idleTimeout?: number;
+  readonly: boolean;
 }
 
 interface NormalizedBuildDependency {
@@ -262,14 +264,15 @@ class CompilerImpl implements Compiler {
   #watching: WatchingImpl | undefined;
   #idleFlushTimer: ReturnType<typeof setTimeout> | undefined;
   #pendingCacheFlush: Promise<NativeFlushResult> | undefined;
-  readonly #filesystemCache: boolean;
+  readonly #writableFilesystemCache: boolean;
   readonly #cacheIdleTimeout: number;
   readonly #infrastructureLoggingLevel: InfrastructureLoggingLevel;
   readonly #nativeCompiler: NativeCompiler;
 
   constructor(options: NormalizedOptions) {
     this.#nativeCompiler = native.createCompiler(options);
-    this.#filesystemCache = options.cache.type === "filesystem";
+    this.#writableFilesystemCache =
+      options.cache.type === "filesystem" && !options.cache.readonly;
     this.#cacheIdleTimeout = options.cache.idleTimeout ?? 0;
     this.#infrastructureLoggingLevel = options.infrastructureLogging.level;
   }
@@ -465,7 +468,7 @@ class CompilerImpl implements Compiler {
   }
 
   #scheduleIdleCacheFlush(): void {
-    if (!this.#filesystemCache || this.#closed) {
+    if (!this.#writableFilesystemCache || this.#closed) {
       return;
     }
 
@@ -484,7 +487,7 @@ class CompilerImpl implements Compiler {
   }
 
   async #flushCacheNow(): Promise<Error | null> {
-    if (!this.#filesystemCache) {
+    if (!this.#writableFilesystemCache) {
       return null;
     }
 
@@ -881,14 +884,16 @@ function normalizeCacheOptions(
   if (cache === undefined || cache === true) {
     return {
       type: "memory",
-      buildDependencies: []
+      buildDependencies: [],
+      readonly: false
     };
   }
 
   if (cache === false) {
     return {
       type: "disabled",
-      buildDependencies: []
+      buildDependencies: [],
+      readonly: false
     };
   }
 
@@ -906,7 +911,8 @@ function normalizeCacheOptions(
       "version",
       "buildDependencies",
       "maxMemoryGenerations",
-      "idleTimeout"
+      "idleTimeout",
+      "readonly"
     ],
     "options.cache"
   );
@@ -926,6 +932,10 @@ function normalizeCacheOptions(
         ? resolve(cacheDirectory, name ?? "default")
         : undefined
       : normalizePath(cache.cacheLocation, "options.cache.cacheLocation", context);
+  const readonly =
+    cache.readonly === undefined
+      ? false
+      : assertBoolean(cache.readonly, "options.cache.readonly");
 
   return {
     type,
@@ -951,7 +961,8 @@ function normalizeCacheOptions(
             cache.idleTimeout,
             "options.cache.idleTimeout"
           )
-        })
+        }),
+    readonly
   };
 }
 

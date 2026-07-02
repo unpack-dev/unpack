@@ -499,7 +499,8 @@ test("accepts filesystem cache option shape", async () => {
       config: ["./config/build.js"]
     },
     maxMemoryGenerations: 2,
-    idleTimeout: 10
+    idleTimeout: 10,
+    readonly: false
   };
   const snapshot = {
     module: { timestamp: true, hash: false },
@@ -601,6 +602,35 @@ test("compiler close waits for pending filesystem cache flush", async () => {
       await readFile(join(cacheLocation, "container.json"), "utf8"),
       /UNPACK_PERSISTENT_CACHE/
     );
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("filesystem cache readonly skips persistent writes", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/readonly");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeout: 0,
+      readonly: true
+    }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+    await delay(50);
+
+    await closeCompiler(compiler);
+    await assert.rejects(readFile(join(cacheLocation, "container.json"), "utf8"));
+    await assert.rejects(readFile(join(cacheLocation, "packs/modules.cbor"), "utf8"));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -1053,6 +1083,18 @@ test("cache and snapshot option validation throws synchronously", () => {
         }
       }),
     /options.cache contains unknown option 'unknown'/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        cache: {
+          type: "filesystem",
+          // @ts-expect-error intentionally testing runtime validation
+          readonly: "yes"
+        }
+      }),
+    /options.cache.readonly must be a boolean/
   );
   assert.throws(
     () =>

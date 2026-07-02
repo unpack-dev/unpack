@@ -58,7 +58,7 @@ Runtime verification is separate from build timing. A Bundle that builds but doe
 
 ## CI
 
-The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. It writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack phase timing summary to a new pull request issue comment, and uploads the JSON report, Markdown summary, tracing summary, and raw tracing log as artifacts.
+The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. It writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, tracing summary, and raw tracing log as artifacts.
 
 The workflow builds the Unpack native addon with `UNPACK_NATIVE_PROFILE=release` so benchmark results compare optimized native builds.
 

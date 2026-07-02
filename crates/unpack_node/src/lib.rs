@@ -74,6 +74,8 @@ pub struct NativeCacheOptions {
     pub max_memory_generations: Option<u32>,
     #[napi(js_name = "idleTimeout")]
     pub idle_timeout: Option<u32>,
+    #[napi(js_name = "readonly")]
+    pub readonly: Option<bool>,
 }
 
 #[napi(object)]
@@ -254,6 +256,7 @@ fn cache_options_from_native(options: NativeCacheOptions) -> CacheOptions {
         .collect();
     cache.max_memory_generations = options.max_memory_generations;
     cache.idle_timeout = options.idle_timeout;
+    cache.readonly = options.readonly.unwrap_or(false);
     cache
 }
 

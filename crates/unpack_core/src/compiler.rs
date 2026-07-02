@@ -248,6 +248,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_cache_readonly_restores_but_skips_persistent_updates()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(
+            temp.path().join("index.js"),
+            r#"
+                import { value } from "./dep";
+                export const result = value;
+            "#,
+        )?;
+        write(temp.path().join("dep.js"), "export const value = 'before';")?;
+        let cache_location = temp.path().join(".cache/unpack/default");
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location.clone());
+        options.snapshot.module = crate::SnapshotStrategy::hash();
+
+        let first_compiler = Compiler::new(options.clone());
+        first_compiler.run().await?;
+        first_compiler.flush_cache()?;
+        let manifest_path = cache_location.join("container.json");
+        let pack_path = cache_location.join("packs/modules.cbor");
+        let manifest_before = fs::read(&manifest_path)?;
+        let pack_before = fs::read(&pack_path)?;
+
+        write(temp.path().join("dep.js"), "export const value = 'after';")?;
+
+        let mut readonly_options = options;
+        readonly_options.cache.readonly = true;
+        let readonly_compiler = Compiler::new(readonly_options);
+        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 2);
+        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 2);
+
+        let second = readonly_compiler.run().await?;
+        readonly_compiler.flush_cache()?;
+        assert!(
+            asset_sources(&second)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("after")
+        );
+        assert_eq!(fs::read(&manifest_path)?, manifest_before);
+        assert_eq!(fs::read(&pack_path)?, pack_before);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filesystem_cache_readonly_does_not_create_persistent_cache()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(temp.path().join("index.js"), "export const value = 1;")?;
+        let cache_location = temp.path().join(".cache/unpack/default");
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location.clone());
+        options.cache.readonly = true;
+
+        let compiler = Compiler::new(options);
+        compiler.run().await?;
+        compiler.flush_cache()?;
+
+        assert!(!cache_location.join("container.json").exists());
+        assert!(!cache_location.join("packs/modules.cbor").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn filesystem_cache_rejects_invalid_build_dependency_snapshots()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

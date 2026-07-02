@@ -20,6 +20,7 @@ export function parseUnpackTracingSummary(log) {
     const header = parseTracingHeader(line);
     if (header) {
       current = {
+        bundler: header.bundler,
         fixture: header.fixture,
         build: header.phase
       };
@@ -57,18 +58,20 @@ export function filterUnpackTracingSummaryRows(rows, options = {}) {
 export function toUnpackTracingSummaryMarkdown(rows, options = {}) {
   if (rows.length === 0) {
     const fixture = options.fixture ? ` for fixture \`${options.fixture}\`` : "";
-    return `No Unpack tracing phase timings were captured${fixture}.\n`;
+    return `No bundler phase timings were captured${fixture}.\n`;
   }
 
   const lines = [
-    "Durations are Rust tracing span close elapsed times.",
+    "Durations are phase elapsed times captured by benchmark tracing.",
     "",
     [
       "fixture",
+      "bundler",
       "build",
       ...PHASE_COLUMNS.map(([, label]) => `${label} ms`)
     ].join(" | ").replace(/^/, "| ").replace(/$/, " |"),
     [
+      "---",
       "---",
       "---",
       ...PHASE_COLUMNS.map(() => "---:")
@@ -79,6 +82,7 @@ export function toUnpackTracingSummaryMarkdown(rows, options = {}) {
     lines.push(
       [
         row.fixture,
+        row.bundler,
         row.build,
         ...PHASE_COLUMNS.map(([key]) => formatMs(row[key]))
       ].join(" | ").replace(/^/, "| ").replace(/$/, " |")
@@ -89,7 +93,8 @@ export function toUnpackTracingSummaryMarkdown(rows, options = {}) {
 }
 
 function parseTracingHeader(line) {
-  if (!line.startsWith("[unpack tracing]")) {
+  const match = line.match(/^\[(unpack|webpack) tracing\]/);
+  if (!match) {
     return null;
   }
 
@@ -103,7 +108,7 @@ function parseTracingHeader(line) {
   if (!fixture || !phase) {
     return null;
   }
-  return { fixture, phase };
+  return { bundler: match[1], fixture, phase };
 }
 
 function parseSpanClose(line) {
@@ -127,22 +132,25 @@ function parseSpanClose(line) {
 }
 
 function phaseKey(name) {
-  if (name === "Compiler::run") {
+  if (name === "Compiler::run" || name === "Webpack::run") {
     return "compilerRun";
   }
-  if (name.includes("Compilation::make")) {
+  if (name.includes("Compilation::make") || name === "Webpack::make") {
     return "make";
   }
-  if (name.includes("Compilation::build_chunk_graph")) {
+  if (
+    name.includes("Compilation::build_chunk_graph") ||
+    name === "Webpack::build_chunk_graph"
+  ) {
     return "chunkGraph";
   }
-  if (name.includes("Compilation::create_assets")) {
+  if (name.includes("Compilation::create_assets") || name === "Webpack::create_assets") {
     return "createAssets";
   }
-  if (name === "unpack_node::emit_assets") {
+  if (name === "unpack_node::emit_assets" || name === "Webpack::emit_assets") {
     return "emitAssets";
   }
-  if (name === "Compiler::flush_cache") {
+  if (name === "Compiler::flush_cache" || name === "Webpack::flush_cache") {
     return "flushCache";
   }
   return null;

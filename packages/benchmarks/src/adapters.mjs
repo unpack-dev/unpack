@@ -1,6 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { performance } from "node:perf_hooks";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -63,9 +64,22 @@ export const adapters = {
   webpack: {
     name: "webpack",
     versionSource: () => `webpack@${packageVersion("webpack")}`,
-    async build({ fixture, outputDir, cacheDir, persistentCache = true, cacheReadonly = false }) {
+    async build({
+      fixture,
+      outputDir,
+      cacheDir,
+      phase,
+      persistentCache = true,
+      cacheReadonly = false
+    }) {
       const webpackModule = await import("webpack");
       const webpack = webpackModule.default ?? webpackModule;
+      const tracing = createWebpackPhaseTracing({
+        fixture,
+        phase,
+        persistentCache,
+        cacheReadonly
+      });
       const compiler = webpack({
         ...webpackLikeConfig({ fixture, outputDir }),
         cache: persistentCache
@@ -74,14 +88,15 @@ export const adapters = {
               cacheDirectory: cacheDir,
               readonly: cacheReadonly
             }
-          : false
+          : false,
+        plugins: [tracing.plugin]
       });
 
       try {
         const stats = await runWebpackCompiler(compiler);
         assertWebpackStats(stats, "webpack");
       } finally {
-        await closeWebpackCompiler(compiler);
+        await tracing.close(compiler);
       }
 
       return { entryFile: join(outputDir, "main.js") };
@@ -386,6 +401,88 @@ function configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly
       `filter=${filter}`
     ].join(" ") + "\n"
   );
+}
+
+function createWebpackPhaseTracing({ fixture, phase, persistentCache, cacheReadonly }) {
+  const pluginName = "UnpackBenchmarkWebpackPhaseTracingPlugin";
+  const started = new Map();
+  const durations = new Map();
+
+  function start(name) {
+    if (!started.has(name)) {
+      started.set(name, performance.now());
+    }
+  }
+
+  function end(name) {
+    const startTime = started.get(name);
+    if (startTime === undefined) {
+      return;
+    }
+    started.delete(name);
+    durations.set(name, (durations.get(name) ?? 0) + performance.now() - startTime);
+  }
+
+  function print() {
+    process.stderr.write(
+      [
+        "[webpack tracing]",
+        `fixture=${fixture.name}`,
+        `phase=${phase}`,
+        `persistent_cache=${persistentCache ? "on" : "off"}`,
+        `cache_readonly=${cacheReadonly ? "on" : "off"}`
+      ].join(" ") + "\n"
+    );
+
+    for (const [span, duration] of [
+      ["Webpack::run", durations.get("compilerRun")],
+      ["Webpack::make", durations.get("make")],
+      ["Webpack::build_chunk_graph", durations.get("chunkGraph")],
+      ["Webpack::create_assets", durations.get("createAssets")],
+      ["Webpack::emit_assets", durations.get("emitAssets")],
+      ["Webpack::flush_cache", durations.get("flushCache")]
+    ]) {
+      if (duration === undefined) {
+        continue;
+      }
+      process.stderr.write(
+        `TRACE ${span}: webpack: close time.busy=${formatDurationMs(duration)} time.idle=0ms\n`
+      );
+    }
+  }
+
+  return {
+    plugin: {
+      apply(compiler) {
+        compiler.hooks.beforeRun.tap(pluginName, () => start("compilerRun"));
+        compiler.hooks.run.tap(pluginName, () => start("compilerRun"));
+        compiler.hooks.done.tap(pluginName, () => end("compilerRun"));
+        compiler.hooks.make.tap(pluginName, () => start("make"));
+        compiler.hooks.finishMake.tap(pluginName, () => end("make"));
+        compiler.hooks.emit.tap(pluginName, () => start("emitAssets"));
+        compiler.hooks.afterEmit.tap(pluginName, () => end("emitAssets"));
+        compiler.hooks.compilation.tap(pluginName, (compilation) => {
+          compilation.hooks.beforeChunks.tap(pluginName, () => start("chunkGraph"));
+          compilation.hooks.afterChunks.tap(pluginName, () => end("chunkGraph"));
+          compilation.hooks.beforeCodeGeneration.tap(pluginName, () => start("createAssets"));
+          compilation.hooks.afterProcessAssets.tap(pluginName, () => end("createAssets"));
+        });
+      }
+    },
+    async close(compiler) {
+      const startedClose = performance.now();
+      try {
+        await closeWebpackCompiler(compiler);
+      } finally {
+        durations.set("flushCache", performance.now() - startedClose);
+        print();
+      }
+    }
+  };
+}
+
+function formatDurationMs(duration) {
+  return `${duration.toFixed(3)}ms`;
 }
 
 function unpackTracingFilter(options) {

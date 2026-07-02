@@ -9,12 +9,23 @@ import { DEFAULT_TURBOPACK_COMMIT } from "./runner.mjs";
 const execFile = promisify(execFileCallback);
 const require = createRequire(import.meta.url);
 const preparedTurbopackBuilds = new Set();
+const UNPACK_INTERNAL_TRACING_ENV = "UNPACK_INTERNAL_TRACING";
+const DEFAULT_UNPACK_TRACING_FILTER = "unpack_core=trace,unpack_node=trace";
 
 export const adapters = {
   unpack: {
     name: "unpack",
     versionSource: () => `@unpack-js/core@${packageVersion("@unpack-js/core")}`,
-    async build({ fixture, outputDir, cacheDir, persistentCache = true, cacheReadonly = false }) {
+    async build({
+      fixture,
+      outputDir,
+      cacheDir,
+      phase,
+      persistentCache = true,
+      cacheReadonly = false,
+      options
+    }) {
+      configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly, options });
       const { default: unpack } = await import("@unpack-js/core");
       const compiler = unpack({
         mode: "none",
@@ -355,6 +366,48 @@ function packageVersionFromResolvedEntry(packageName) {
     current = dirname(current);
   }
   return "unknown";
+}
+
+function configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly, options }) {
+  const filter = unpackTracingFilter(options);
+  if (!filter) {
+    process.env[UNPACK_INTERNAL_TRACING_ENV] = "off";
+    return;
+  }
+
+  process.env[UNPACK_INTERNAL_TRACING_ENV] = filter;
+  process.stderr.write(
+    [
+      "[unpack tracing]",
+      `fixture=${fixture.name}`,
+      `phase=${phase}`,
+      `persistent_cache=${persistentCache ? "on" : "off"}`,
+      `cache_readonly=${cacheReadonly ? "on" : "off"}`,
+      `filter=${filter}`
+    ].join(" ") + "\n"
+  );
+}
+
+function unpackTracingFilter(options) {
+  const value = options?.unpackTracing ?? DEFAULT_UNPACK_TRACING_FILTER;
+  if (value === false) {
+    return null;
+  }
+  const normalized = String(value).trim();
+  const lowered = normalized.toLowerCase();
+  if (
+    normalized === "" ||
+    normalized === "0" ||
+    lowered === "false" ||
+    lowered === "off" ||
+    lowered === "none"
+  ) {
+    return null;
+  }
+  if (normalized === "1" || lowered === "true" || lowered === "on") {
+    return DEFAULT_UNPACK_TRACING_FILTER;
+  }
+  return normalized;
 }
 
 function unsupported(message) {

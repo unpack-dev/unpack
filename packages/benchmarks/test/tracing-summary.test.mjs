@@ -18,10 +18,18 @@ test("tracing summary groups major phase timings by fixture and build phase", ()
 [unpack tracing] fixture=small phase=warm persistent_cache=on cache_readonly=on filter=unpack_core=trace,unpack_node=trace
 2026-07-02T10:52:55.762452Z TRACE Compiler::run:Compilation::make: unpack_core::compilation: close time.busy=3.90ms time.idle=1.96ms
 2026-07-02T10:52:55.763750Z TRACE Compiler::run: unpack_core::compiler: close time.busy=5.32ms time.idle=1.90ms
+[webpack tracing] fixture=small phase=cold persistent_cache=on cache_readonly=off
+TRACE Webpack::make: webpack: close time.busy=10.125ms time.idle=0ms
+TRACE Webpack::run: webpack: close time.busy=15.250ms time.idle=0ms
+TRACE Webpack::build_chunk_graph: webpack: close time.busy=1.500ms time.idle=0ms
+TRACE Webpack::create_assets: webpack: close time.busy=2.250ms time.idle=0ms
+TRACE Webpack::emit_assets: webpack: close time.busy=3.500ms time.idle=0ms
+TRACE Webpack::flush_cache: webpack: close time.busy=4.750ms time.idle=0ms
 `);
 
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 3);
   assert.equal(rows[0].fixture, "small");
+  assert.equal(rows[0].bundler, "unpack");
   assert.equal(rows[0].build, "cold");
   assert.equal(rows[0].compilerRun.toFixed(3), "17.420");
   assert.equal(rows[0].make.toFixed(3), "15.050");
@@ -30,34 +38,41 @@ test("tracing summary groups major phase timings by fixture and build phase", ()
   assert.equal(rows[0].emitAssets.toFixed(3), "0.714");
   assert.equal(rows[0].flushCache.toFixed(3), "3.657");
   assert.equal(rows[1].fixture, "small");
+  assert.equal(rows[1].bundler, "unpack");
   assert.equal(rows[1].build, "warm");
   assert.equal(rows[1].compilerRun.toFixed(3), "7.220");
   assert.equal(rows[1].make.toFixed(3), "5.860");
+  assert.equal(rows[2].fixture, "small");
+  assert.equal(rows[2].bundler, "webpack");
+  assert.equal(rows[2].build, "cold");
+  assert.equal(rows[2].compilerRun.toFixed(3), "15.250");
+  assert.equal(rows[2].make.toFixed(3), "10.125");
 
   const markdown = toUnpackTracingSummaryMarkdown(rows);
-  assert.match(markdown, /\\| fixture \\| build \\| compiler run ms \\| make ms \\|/);
-  assert.match(markdown, /\\| small \\| cold \\| 17\\.420 \\| 15\\.050 \\| 0\\.188 \\| 1\\.464 \\| 0\\.714 \\| 3\\.657 \\|/);
-  assert.match(markdown, /\\| small \\| warm \\| 7\\.220 \\| 5\\.860 \\|  \\|  \\|  \\|  \\|/);
+  assert.match(markdown, /\\| fixture \\| bundler \\| build \\| compiler run ms \\| make ms \\|/);
+  assert.match(markdown, /\\| small \\| unpack \\| cold \\| 17\\.420 \\| 15\\.050 \\| 0\\.188 \\| 1\\.464 \\| 0\\.714 \\| 3\\.657 \\|/);
+  assert.match(markdown, /\\| small \\| unpack \\| warm \\| 7\\.220 \\| 5\\.860 \\|  \\|  \\|  \\|  \\|/);
+  assert.match(markdown, /\\| small \\| webpack \\| cold \\| 15\\.250 \\| 10\\.125 \\| 1\\.500 \\| 2\\.250 \\| 3\\.500 \\| 4\\.750 \\|/);
 });
 
 test("tracing summary can filter rows to one fixture", () => {
   const rows = [
-    { fixture: "small", build: "cold", compilerRun: 1 },
-    { fixture: "large", build: "cold", compilerRun: 2 },
-    { fixture: "large", build: "warm", compilerRun: 3 }
+    { fixture: "small", bundler: "unpack", build: "cold", compilerRun: 1 },
+    { fixture: "large", bundler: "unpack", build: "cold", compilerRun: 2 },
+    { fixture: "large", bundler: "webpack", build: "warm", compilerRun: 3 }
   ];
 
   const filtered = filterUnpackTracingSummaryRows(rows, { fixture: "large" });
   assert.deepEqual(filtered, [
-    { fixture: "large", build: "cold", compilerRun: 2 },
-    { fixture: "large", build: "warm", compilerRun: 3 }
+    { fixture: "large", bundler: "unpack", build: "cold", compilerRun: 2 },
+    { fixture: "large", bundler: "webpack", build: "warm", compilerRun: 3 }
   ]);
 
   const markdown = toUnpackTracingSummaryMarkdown(filtered, { fixture: "large" });
   assert.doesNotMatch(markdown, /small/);
-  assert.match(markdown, /\\| large \\| cold \\| 2\\.000 \\|/);
+  assert.match(markdown, /\\| large \\| unpack \\| cold \\| 2\\.000 \\|/);
   assert.equal(
     toUnpackTracingSummaryMarkdown([], { fixture: "large" }),
-    "No Unpack tracing phase timings were captured for fixture `large`.\n"
+    "No bundler phase timings were captured for fixture `large`.\n"
   );
 });

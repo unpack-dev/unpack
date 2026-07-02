@@ -108,7 +108,7 @@ test("runner reports unsupported adapters explicitly", async () => {
   }
 });
 
-test("CLI accepts pnpm-style -- separator and writes JSON output", async () => {
+test("CLI accepts pnpm-style -- separator, tracing option, and writes JSON output", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
   const outputJson = join(workspace, "results.json");
 
@@ -125,7 +125,9 @@ test("CLI accepts pnpm-style -- separator and writes JSON output", async () => {
         "--workspace",
         join(workspace, "run"),
         "--output-json",
-        outputJson
+        outputJson,
+        "--unpack-tracing",
+        "unpack_core=trace"
       ],
       {
         cwd: join(import.meta.dirname, "..")

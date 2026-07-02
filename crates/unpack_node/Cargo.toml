@@ -14,6 +14,7 @@ napi-derive = { workspace = true }
 regex = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 unpack_core = { path = "../unpack_core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]

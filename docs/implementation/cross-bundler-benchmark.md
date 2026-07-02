@@ -16,6 +16,13 @@ To run only the fast local smoke subset:
 pnpm --filter @unpack-js/benchmarks bench -- --fixtures small --bundlers unpack,webpack,rspack,rolldown
 ```
 
+The cross-bundler benchmark prints Unpack internal tracing details to stderr for
+each Unpack build phase. The default filter is
+`unpack_core=trace,unpack_node=trace`, which shows the coarse compiler spans and
+their close-time busy/idle durations. Pass `--no-unpack-tracing` for quiet
+benchmark logs, or `--unpack-tracing <filter>` to use a custom Rust
+`tracing-subscriber` filter.
+
 Turbopack requires a fixed Next.js checkout:
 
 ```sh
@@ -51,7 +58,7 @@ Runtime verification is separate from build timing. A Bundle that builds but doe
 
 ## CI
 
-The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. It writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, and uploads the JSON report as an artifact.
+The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. It writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack phase timing summary to a new pull request issue comment, and uploads the JSON report, Markdown summary, tracing summary, and raw tracing log as artifacts.
 
 The workflow builds the Unpack native addon with `UNPACK_NATIVE_PROFILE=release` so benchmark results compare optimized native builds.
 

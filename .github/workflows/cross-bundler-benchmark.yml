@@ -59,12 +59,22 @@ jobs:
         id: benchmark
         continue-on-error: true
         run: |
+          mkdir -p .benchmark-work/ci
           pnpm --filter @unpack-js/benchmarks bench -- \
             --workspace .benchmark-work/ci \
             --output-json .benchmark-work/ci/results.json \
             --summary-md .benchmark-work/ci/summary.md \
             --turbopack-repo .benchmark-tools/next.js \
-            --turbopack-commit "$TURBOPACK_NEXT_COMMIT"
+            --turbopack-commit "$TURBOPACK_NEXT_COMMIT" \
+            2> >(tee .benchmark-work/ci/unpack-tracing.log | sed -E '/^\[unpack tracing\]/d; / TRACE .*: .*: close time\.busy=/d' >&2)
+
+      - name: Format Unpack tracing summary
+        if: always()
+        run: |
+          mkdir -p .benchmark-work/ci
+          node packages/benchmarks/src/tracing-summary.mjs \
+            .benchmark-work/ci/unpack-tracing.log \
+            .benchmark-work/ci/unpack-tracing-summary.md
 
       - name: Publish benchmark summary
         if: always()
@@ -120,6 +130,33 @@ jobs:
               -f body="$(cat "$comment_file")"
           fi
 
+      - name: Comment Unpack phase timings on PR
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          trace_summary_file=".benchmark-work/ci/unpack-tracing-summary.md"
+          comment_file=".benchmark-work/ci/tracing-comment.md"
+          mkdir -p "$(dirname "$comment_file")"
+
+          {
+            echo "## Unpack Phase Timings"
+            echo
+            echo "[Workflow run]($RUN_URL)"
+            echo
+            if [ -f "$trace_summary_file" ]; then
+              cat "$trace_summary_file"
+            else
+              echo "No Unpack tracing phase timings were captured. Check the workflow logs for setup or runner failures."
+            fi
+          } > "$comment_file"
+
+          gh api --method POST "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+            -f body="$(cat "$comment_file")"
+
       - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@v4
@@ -128,4 +165,6 @@ jobs:
           path: |
             .benchmark-work/ci/results.json
             .benchmark-work/ci/summary.md
+            .benchmark-work/ci/unpack-tracing.log
+            .benchmark-work/ci/unpack-tracing-summary.md
           if-no-files-found: warn

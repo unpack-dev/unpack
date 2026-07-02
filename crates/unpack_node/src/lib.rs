@@ -9,6 +9,7 @@ use std::{
 
 use napi::{Env, Result, Task, bindgen_prelude::AsyncTask};
 use napi_derive::napi;
+use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use unpack_core::{
     Asset, BuildDependency, CacheOptions, Compiler, CompilerOptions, Entry, Error as CoreError,
     InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions, SnapshotOptions,
@@ -20,6 +21,8 @@ use unpack_core::{
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const MAX_BLOCKING_THREADS: usize = 4;
+const INTERNAL_TRACING_ENV: &str = "UNPACK_INTERNAL_TRACING";
+const DEFAULT_INTERNAL_TRACING_FILTER: &str = "unpack_core=trace,unpack_node=trace";
 
 #[cfg(not(target_family = "wasm"))]
 napi::ctor::declarative::ctor! {
@@ -180,6 +183,7 @@ pub struct NativeFlushResult {
 
 #[napi(js_name = "createCompiler")]
 pub fn create_compiler(options: NativeCompilerOptions) -> Result<NativeCompiler> {
+    init_internal_tracing_from_env();
     NativeCompiler::new(options)
 }
 
@@ -209,6 +213,38 @@ impl NativeCompiler {
     #[napi]
     pub fn close(&mut self) {
         self.compiler = None;
+    }
+}
+
+fn init_internal_tracing_from_env() {
+    let Some(filter) = internal_tracing_filter() else {
+        return;
+    };
+    let Ok(env_filter) = EnvFilter::try_new(&filter) else {
+        eprintln!("ignoring invalid {INTERNAL_TRACING_ENV} tracing filter: {filter}");
+        return;
+    };
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_span_events(FmtSpan::CLOSE)
+        .with_target(true)
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .finish();
+
+    let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
+fn internal_tracing_filter() -> Option<String> {
+    let value = std::env::var(INTERNAL_TRACING_ENV).ok()?;
+    let value = value.trim();
+    match value {
+        "" | "0" | "false" | "False" | "FALSE" | "off" | "Off" | "OFF" | "none" | "None"
+        | "NONE" => None,
+        "1" | "true" | "True" | "TRUE" | "on" | "On" | "ON" => {
+            Some(DEFAULT_INTERNAL_TRACING_FILTER.to_string())
+        }
+        _ => Some(value.to_string()),
     }
 }
 

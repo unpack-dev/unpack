@@ -62,6 +62,12 @@ function parseArgs(args) {
       case "--summary-md":
         parsed.summaryMd = resolve(invocationCwd, value());
         break;
+      case "--unpack-tracing":
+        parsed.unpackTracing = value();
+        break;
+      case "--no-unpack-tracing":
+        parsed.unpackTracing = false;
+        break;
       case "--turbopack-repo":
         parsed.turbopackRepo = resolve(invocationCwd, value());
         break;
@@ -101,6 +107,8 @@ Options:
   --bundlers <list>             Comma-separated bundler list
   --output-json <path>          Write raw JSON report
   --summary-md <path>           Write Markdown summary table
+  --unpack-tracing <filter>     Set the Unpack tracing filter (default: unpack_core=trace,unpack_node=trace)
+  --no-unpack-tracing           Do not print Unpack tracing details
   --turbopack-repo <path>       Fixed Next.js checkout containing turbopack/
   --turbopack-commit <sha>      Commit shown for Turbopack results
   --turbopack-profile <name>    Cargo profile for turbopack-cli (default: release)

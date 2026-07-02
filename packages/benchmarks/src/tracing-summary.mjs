@@ -47,9 +47,17 @@ export function parseUnpackTracingSummary(log) {
   return rows;
 }
 
-export function toUnpackTracingSummaryMarkdown(rows) {
+export function filterUnpackTracingSummaryRows(rows, options = {}) {
+  if (!options.fixture) {
+    return rows;
+  }
+  return rows.filter((row) => row.fixture === options.fixture);
+}
+
+export function toUnpackTracingSummaryMarkdown(rows, options = {}) {
   if (rows.length === 0) {
-    return "No Unpack tracing phase timings were captured.\n";
+    const fixture = options.fixture ? ` for fixture \`${options.fixture}\`` : "";
+    return `No Unpack tracing phase timings were captured${fixture}.\n`;
   }
 
   const lines = [
@@ -170,13 +178,41 @@ function formatMs(value) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const [, , inputPath, outputPath] = process.argv;
+  const { inputPath, outputPath, fixture } = parseCliArgs(process.argv.slice(2));
   if (!inputPath || !outputPath) {
-    process.stderr.write("Usage: node src/tracing-summary.mjs <input-log> <output-md>\n");
+    process.stderr.write(
+      "Usage: node src/tracing-summary.mjs <input-log> <output-md> [--fixture <name>]\n"
+    );
     process.exit(1);
   }
 
   const log = await readFile(inputPath, "utf8").catch(() => "");
-  const markdown = toUnpackTracingSummaryMarkdown(parseUnpackTracingSummary(log));
+  const rows = filterUnpackTracingSummaryRows(parseUnpackTracingSummary(log), { fixture });
+  const markdown = toUnpackTracingSummaryMarkdown(rows, { fixture });
   await writeFile(outputPath, markdown, "utf8");
+}
+
+function parseCliArgs(args) {
+  const parsed = {
+    inputPath: args[0],
+    outputPath: args[1],
+    fixture: undefined
+  };
+
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index];
+    switch (arg) {
+      case "--fixture":
+        index += 1;
+        if (index >= args.length) {
+          throw new Error("--fixture requires a value");
+        }
+        parsed.fixture = args[index];
+        break;
+      default:
+        throw new Error(`unknown argument '${arg}'`);
+    }
+  }
+
+  return parsed;
 }

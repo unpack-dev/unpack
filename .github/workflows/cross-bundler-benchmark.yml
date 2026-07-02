@@ -74,7 +74,8 @@ jobs:
           mkdir -p .benchmark-work/ci
           node packages/benchmarks/src/tracing-summary.mjs \
             .benchmark-work/ci/unpack-tracing.log \
-            .benchmark-work/ci/unpack-tracing-summary.md
+            .benchmark-work/ci/unpack-tracing-summary.md \
+            --fixture large
 
       - name: Publish benchmark summary
         if: always()

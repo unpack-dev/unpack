@@ -14,6 +14,7 @@ use crate::{
     CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, ModuleGraph, ModuleId,
     ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
+    cache_hash::stable_hash,
     parser::{ParsedModule, parse_module_dependencies},
     snapshot::FileSystemInfo,
 };
@@ -365,11 +366,11 @@ impl BuildTask {
             {
                 let process_dependencies =
                     process_dependencies_task(self.module_id, &issuer_context, record.parsed());
-                let (parsed, source) = record.cloned_parts();
+                let (parsed, source, source_hash) = record.cloned_parts();
                 state
                     .lock()
                     .await
-                    .finish_build(self.module_id, parsed, source)?;
+                    .finish_build(self.module_id, parsed, source, source_hash)?;
                 return Ok(process_dependencies.into_iter().collect());
             }
         }
@@ -403,7 +404,7 @@ impl BuildTask {
             state
                 .lock()
                 .await
-                .finish_build(self.module_id, parsed, source)?;
+                .finish_build(self.module_id, parsed, source, None)?;
             return Ok(process_dependencies.into_iter().collect());
         }
 
@@ -412,11 +413,12 @@ impl BuildTask {
             .create_file_snapshot(&self.resource, &source, services.module_snapshot_strategy)
             .await?;
         let record = ModuleBuildRecord::new(parsed.clone(), source.clone(), snapshot);
+        let source_hash = record.source_hash();
 
         state
             .lock()
             .await
-            .finish_build(self.module_id, parsed, source)?;
+            .finish_build(self.module_id, parsed, source, source_hash)?;
         services.module_build_cache.store(self.identity, record);
 
         Ok(process_dependencies.into_iter().collect())
@@ -606,16 +608,19 @@ impl MakeState {
         module_id: ModuleId,
         parsed: ParsedModule,
         source: String,
+        source_hash: Option<u64>,
     ) -> Result<()> {
         let module = self
             .module_graph
             .module_mut(module_id)
             .ok_or(Error::MissingModule(module_id))?;
+        let source_hash = source_hash.unwrap_or_else(|| stable_hash(&source));
         module.finish_build(
             parsed.dependencies,
             parsed.blocks,
             parsed.presentational_dependencies,
             source,
+            source_hash,
         );
         Ok(())
     }

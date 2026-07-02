@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AsyncDependenciesBlock, Dependency, Error, ExportsInfo};
+use crate::{AsyncDependenciesBlock, Dependency, Error, ExportsInfo, cache_hash::stable_hash};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(usize);
@@ -27,6 +27,7 @@ pub struct Module {
     exports_info: ExportsInfo,
     source: String,
     source_len: usize,
+    source_hash: u64,
     build_error: Option<Error>,
 }
 
@@ -41,6 +42,7 @@ impl Module {
             exports_info: ExportsInfo::default(),
             source: String::new(),
             source_len: 0,
+            source_hash: stable_hash(""),
             build_error: None,
         }
     }
@@ -77,6 +79,10 @@ impl Module {
         self.source_len
     }
 
+    pub fn source_hash(&self) -> u64 {
+        self.source_hash
+    }
+
     pub fn build_error(&self) -> Option<&Error> {
         self.build_error.as_ref()
     }
@@ -87,9 +93,11 @@ impl Module {
         blocks: Vec<AsyncDependenciesBlock>,
         presentational_dependencies: Vec<Dependency>,
         source: String,
+        source_hash: u64,
     ) {
         self.exports_info = ExportsInfo::from_dependencies(&dependencies);
         self.source_len = source.len();
+        self.source_hash = source_hash;
         self.source = source;
         self.dependencies = dependencies;
         self.blocks = blocks;
@@ -100,6 +108,7 @@ impl Module {
     pub(crate) fn fail_build(&mut self, error: Error, source: String) {
         self.exports_info = ExportsInfo::default();
         self.source_len = source.len();
+        self.source_hash = stable_hash(&source);
         self.source = source;
         self.dependencies.clear();
         self.blocks.clear();

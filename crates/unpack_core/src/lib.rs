@@ -1,4 +1,5 @@
 mod build_cache;
+mod cache_hash;
 mod chunk_graph;
 mod code_generation;
 mod compilation;

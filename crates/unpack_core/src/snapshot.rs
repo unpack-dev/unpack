@@ -35,7 +35,7 @@ impl Default for SnapshotOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SnapshotStrategy {
     pub timestamp: bool,
     pub hash: bool,
@@ -119,8 +119,15 @@ pub(crate) struct FileSystemInfo {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SnapshotCache {
+    file_snapshots: Arc<Mutex<HashMap<FileSnapshotCacheKey, FileSnapshot>>>,
     context_timestamp_hashes: Arc<Mutex<HashMap<PathBuf, DirectoryTimestampHash>>>,
     context_content_hashes: Arc<Mutex<HashMap<PathBuf, u64>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FileSnapshotCacheKey {
+    path: PathBuf,
+    strategy: SnapshotStrategy,
 }
 
 impl FileSystemInfo {
@@ -184,6 +191,7 @@ impl FileSystemInfo {
         Snapshot::create_sync(paths, strategy, self)
     }
 
+    #[cfg(test)]
     pub(crate) async fn is_snapshot_valid(
         &self,
         snapshot: &Snapshot,
@@ -502,7 +510,7 @@ impl SnapshotEntry {
         match self {
             Self::File(file) => {
                 file_system_info.ordinary_snapshot_applies(&file.path)
-                    && file.snapshot.is_valid(&file.path, strategy).await
+                    && file.snapshot.is_valid(&file.path, strategy, cache).await
             }
             Self::Context(context) => {
                 file_system_info.ordinary_snapshot_applies(&context.path)
@@ -750,37 +758,45 @@ impl FileSnapshot {
         })
     }
 
-    pub(crate) async fn is_valid(&self, path: &Path, strategy: SnapshotStrategy) -> bool {
-        if !self.exists {
-            return !strategy.timestamp && !strategy.hash
-                || matches!(
-                    tokio::fs::metadata(path).await,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound
-                );
+    pub(crate) async fn is_valid(
+        &self,
+        path: &Path,
+        strategy: SnapshotStrategy,
+        cache: Option<&SnapshotCache>,
+    ) -> bool {
+        let current = match cache {
+            Some(cache) => Self::current_with_cache(path, strategy, cache).await,
+            None => Self::create_from_path(path, strategy).await.ok(),
+        };
+        current.as_ref() == Some(self)
+    }
+
+    async fn current_with_cache(
+        path: &Path,
+        strategy: SnapshotStrategy,
+        cache: &SnapshotCache,
+    ) -> Option<Self> {
+        let key = FileSnapshotCacheKey {
+            path: path.to_path_buf(),
+            strategy,
+        };
+        if let Some(snapshot) = cache
+            .file_snapshots
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .get(&key)
+            .cloned()
+        {
+            return Some(snapshot);
         }
 
-        if strategy.timestamp {
-            let Ok(metadata) = tokio::fs::metadata(path).await else {
-                return false;
-            };
-            let Ok(modified) = metadata.modified() else {
-                return false;
-            };
-            if Some(modified) != self.modified {
-                return false;
-            }
-        }
-
-        if strategy.hash {
-            let Ok(source) = tokio::fs::read(path).await else {
-                return false;
-            };
-            if Some(hash_bytes(&source)) != self.source_hash {
-                return false;
-            }
-        }
-
-        true
+        let snapshot = Self::create_from_path(path, strategy).await.ok()?;
+        cache
+            .file_snapshots
+            .lock()
+            .expect("snapshot cache mutex should not be poisoned")
+            .insert(key, snapshot.clone());
+        Some(snapshot)
     }
 
     pub(crate) fn create_from_file_sync(path: &Path, strategy: SnapshotStrategy) -> Result<Self> {

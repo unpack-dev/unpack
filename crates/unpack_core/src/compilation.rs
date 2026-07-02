@@ -157,7 +157,6 @@ impl Compilation {
             &self.module_graph,
             &self.chunk_graph,
             &self.entries,
-            &self.build_cache.asset_generations(),
         );
         self.log_infrastructure(
             InfrastructureLogLevel::Verbose,

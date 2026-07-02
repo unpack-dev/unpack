@@ -32,6 +32,7 @@ impl NormalModuleFactory {
         cache: NormalModuleFactoryCache,
         file_system_info: FileSystemInfo,
         resolve_snapshot_strategy: SnapshotStrategy,
+        snapshot_cache: SnapshotCache,
     ) -> Self {
         Self {
             resolver,
@@ -39,7 +40,7 @@ impl NormalModuleFactory {
             file_system_info,
             resolve_snapshot_strategy,
             runtime_factorize_cache: Arc::new(Mutex::new(HashMap::new())),
-            snapshot_cache: SnapshotCache::default(),
+            snapshot_cache,
         }
     }
 
@@ -190,6 +191,7 @@ mod tests {
             build_cache.normal_module_factory(),
             FileSystemInfo::new(),
             SnapshotStrategy::timestamp(),
+            SnapshotCache::default(),
         );
         let dependency = Dependency::new(DependencyKind::StaticImport, "./dep");
 

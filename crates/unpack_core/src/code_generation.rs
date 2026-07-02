@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use rspack_sources::{
     ConcatSource, MapOptions, ObjectPool, OriginalSource, RawStringSource, ReplaceSource, Source,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AsyncBlockOrigin, Chunk, ChunkGraph, ChunkGroupKind, CompilerOptions, ConstDependency,
@@ -13,7 +14,7 @@ use crate::{
     HarmonyImportSpecifierDependency, ImportDependency, Module, ModuleGraph, ModuleId, SourceRange,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Asset {
     pub filename: String,
     pub source: String,

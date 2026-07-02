@@ -6,8 +6,16 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      include_turbopack:
+        description: Include Turbopack in the benchmark run
+        type: boolean
+        default: false
+        required: false
 
 env:
+  DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown
+  TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,turbopack
   TURBOPACK_NEXT_COMMIT: a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc
 
 jobs:
@@ -48,6 +56,7 @@ jobs:
         run: pnpm --filter @unpack-js/core build
 
       - name: Checkout fixed Turbopack source
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_turbopack }}
         run: |
           mkdir -p .benchmark-tools/next.js
           git -C .benchmark-tools/next.js init
@@ -58,14 +67,27 @@ jobs:
       - name: Run cross-bundler benchmark
         id: benchmark
         continue-on-error: true
+        env:
+          INCLUDE_TURBOPACK: ${{ github.event_name == 'workflow_dispatch' && inputs.include_turbopack }}
         run: |
           mkdir -p .benchmark-work/ci
+
+          benchmark_bundlers="$DEFAULT_BENCHMARK_BUNDLERS"
+          turbopack_args=()
+          if [ "$INCLUDE_TURBOPACK" = "true" ]; then
+            benchmark_bundlers="$TURBOPACK_BENCHMARK_BUNDLERS"
+            turbopack_args=(
+              --turbopack-repo .benchmark-tools/next.js
+              --turbopack-commit "$TURBOPACK_NEXT_COMMIT"
+            )
+          fi
+
           pnpm --filter @unpack-js/benchmarks bench -- \
             --workspace .benchmark-work/ci \
             --output-json .benchmark-work/ci/results.json \
             --summary-md .benchmark-work/ci/summary.md \
-            --turbopack-repo .benchmark-tools/next.js \
-            --turbopack-commit "$TURBOPACK_NEXT_COMMIT" \
+            --bundlers "$benchmark_bundlers" \
+            "${turbopack_args[@]}" \
             2> >(tee .benchmark-work/ci/bundler-phase-timings.log | sed -E '/^\[(unpack|webpack) tracing\]/d; /(^| )TRACE .*: .*: close time\.busy=/d' >&2)
 
       - name: Format bundler phase timing summary

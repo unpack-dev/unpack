@@ -10,7 +10,6 @@ use std::{
 use crate::{
     ModuleIdentity, SnapshotOptions, SnapshotStrategy,
     cache_hash::stable_hash,
-    code_generation::Asset,
     parser::ParsedModule,
     snapshot::{FileSystemInfo, Snapshot, SnapshotCache},
 };
@@ -38,7 +37,6 @@ pub(crate) struct CacheFacade<K, V> {
 
 pub(crate) type NormalModuleFactoryCache = CacheFacade<ResolveRequest, ResolveRecord>;
 pub(crate) type ModuleBuildCache = CacheFacade<ModuleIdentity, ModuleBuildRecord>;
-pub(crate) type AssetGenerationCache = CacheFacade<AssetGenerationKey, AssetGenerationRecord>;
 
 type CacheStoreAccessor<K, V> = for<'a> fn(&'a mut BuildCacheInner) -> &'a mut CacheStore<K, V>;
 
@@ -122,7 +120,6 @@ pub struct BuildDependency {
 struct BuildCacheInner {
     resolve_records: CacheStore<ResolveRequest, ResolveRecord>,
     module_builds: CacheStore<ModuleIdentity, ModuleBuildRecord>,
-    asset_generations: CacheStore<AssetGenerationKey, AssetGenerationRecord>,
     dirty: bool,
 }
 
@@ -325,40 +322,15 @@ impl ModuleBuildRecord {
         self.source_hash
     }
 
-    pub(crate) async fn is_valid(
+    pub(crate) async fn is_valid_with_cache(
         &self,
         file_system_info: &FileSystemInfo,
         strategy: SnapshotStrategy,
+        snapshot_cache: &SnapshotCache,
     ) -> bool {
         file_system_info
-            .is_snapshot_valid(&self.snapshot, strategy)
+            .is_snapshot_valid_with_cache(&self.snapshot, strategy, snapshot_cache)
             .await
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct AssetGenerationKey {
-    digest: u64,
-}
-
-impl AssetGenerationKey {
-    pub(crate) fn new(digest: u64) -> Self {
-        Self { digest }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct AssetGenerationRecord {
-    assets: Vec<Asset>,
-}
-
-impl AssetGenerationRecord {
-    pub(crate) fn new(assets: Vec<Asset>) -> Self {
-        Self { assets }
-    }
-
-    pub(crate) fn assets(&self) -> &[Asset] {
-        &self.assets
     }
 }
 
@@ -392,19 +364,12 @@ impl BuildCache {
         }
     }
 
-    pub(crate) fn asset_generations(&self) -> AssetGenerationCache {
-        CacheFacade {
-            build_cache: self.clone(),
-            store: asset_generations,
-        }
-    }
-
     pub(crate) fn flush_to_filesystem(&self) -> io::Result<()> {
         if self.options.kind != CacheKind::Filesystem || self.options.readonly {
             return Ok(());
         }
 
-        let (resolve_records, module_builds, asset_generations) = {
+        let (resolve_records, module_builds) = {
             let inner = self
                 .inner
                 .lock()
@@ -415,11 +380,10 @@ impl BuildCache {
             (
                 inner.resolve_records.records.clone(),
                 inner.module_builds.records.clone(),
-                inner.asset_generations.records.clone(),
             )
         };
 
-        self.write_filesystem_cache(&resolve_records, &module_builds, &asset_generations)?;
+        self.write_filesystem_cache(&resolve_records, &module_builds)?;
 
         self.inner
             .lock()
@@ -441,9 +405,6 @@ impl BuildCache {
             module_entries: inner.module_builds.entries(),
             module_hits: inner.module_builds.hits,
             module_misses: inner.module_builds.misses,
-            asset_entries: inner.asset_generations.entries(),
-            asset_hits: inner.asset_generations.hits,
-            asset_misses: inner.asset_generations.misses,
         }
     }
 }
@@ -524,18 +485,12 @@ impl BuildCache {
             .into_iter()
             .map(|(identity, record)| (identity, Arc::new(record)))
             .collect();
-        inner.asset_generations.records = pack
-            .asset_generations
-            .into_iter()
-            .map(|(key, record)| (key, Arc::new(record)))
-            .collect();
     }
 
     fn write_filesystem_cache(
         &self,
         resolve_records: &HashMap<ResolveRequest, Arc<ResolveRecord>>,
         module_builds: &HashMap<ModuleIdentity, Arc<ModuleBuildRecord>>,
-        asset_generations: &HashMap<AssetGenerationKey, Arc<AssetGenerationRecord>>,
     ) -> io::Result<()> {
         let Some(cache_location) = &self.options.cache_location else {
             return Ok(());
@@ -558,10 +513,6 @@ impl BuildCache {
             module_builds: module_builds
                 .iter()
                 .map(|(identity, record)| (identity.clone(), (**record).clone()))
-                .collect(),
-            asset_generations: asset_generations
-                .iter()
-                .map(|(key, record)| (*key, (**record).clone()))
                 .collect(),
         };
         let pack_payload = cbor4ii::serde::to_vec(Vec::new(), &pack)
@@ -664,8 +615,6 @@ struct CachePackDto {
     cache_version: String,
     resolve_records: Vec<(ResolveRequest, ResolveRecord)>,
     module_builds: Vec<(ModuleIdentity, ModuleBuildRecord)>,
-    #[serde(default)]
-    asset_generations: Vec<(AssetGenerationKey, AssetGenerationRecord)>,
 }
 
 #[cfg(test)]
@@ -677,9 +626,6 @@ pub(crate) struct BuildCacheStats {
     pub module_entries: usize,
     pub module_hits: usize,
     pub module_misses: usize,
-    pub asset_entries: usize,
-    pub asset_hits: usize,
-    pub asset_misses: usize,
 }
 
 fn resolve_records(inner: &mut BuildCacheInner) -> &mut CacheStore<ResolveRequest, ResolveRecord> {
@@ -697,27 +643,21 @@ mod tests {
     use crate::{ModuleIdentity, snapshot::FileSystemInfo};
 
     #[test]
-    fn cache_pack_without_asset_generations_deserializes_with_empty_asset_cache()
+    fn module_build_record_without_source_hash_deserializes_with_empty_hash()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        #[derive(Serialize)]
-        struct OldCachePackDto {
-            magic: String,
-            cache_version: String,
-            resolve_records: Vec<(ResolveRequest, ResolveRecord)>,
-            module_builds: Vec<(ModuleIdentity, ModuleBuildRecord)>,
-        }
+        let record: ModuleBuildRecord = serde_json::from_value(serde_json::json!({
+            "parsed": {
+                "dependencies": [],
+                "blocks": [],
+                "presentational_dependencies": []
+            },
+            "source": "export const value = 1;",
+            "snapshot": {
+                "entries": []
+            }
+        }))?;
 
-        let old_pack = OldCachePackDto {
-            magic: CACHE_MAGIC.to_string(),
-            cache_version: "old".to_string(),
-            resolve_records: Vec::new(),
-            module_builds: Vec::new(),
-        };
-        let payload = cbor4ii::serde::to_vec(Vec::new(), &old_pack)?;
-        let pack: CachePackDto = cbor4ii::serde::from_slice(&payload)?;
-
-        assert_eq!(pack.magic, CACHE_MAGIC);
-        assert!(pack.asset_generations.is_empty());
+        assert_eq!(record.source_hash(), None);
 
         Ok(())
     }
@@ -767,10 +707,4 @@ fn module_builds(
     inner: &mut BuildCacheInner,
 ) -> &mut CacheStore<ModuleIdentity, ModuleBuildRecord> {
     &mut inner.module_builds
-}
-
-fn asset_generations(
-    inner: &mut BuildCacheInner,
-) -> &mut CacheStore<AssetGenerationKey, AssetGenerationRecord> {
-    &mut inner.asset_generations
 }

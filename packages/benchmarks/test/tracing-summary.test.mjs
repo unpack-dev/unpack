@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  filterUnpackTracingSummaryRows,
   parseUnpackTracingSummary,
   toUnpackTracingSummaryMarkdown
 } from "../src/tracing-summary.mjs";
@@ -37,4 +38,26 @@ test("tracing summary groups major phase timings by fixture and build phase", ()
   assert.match(markdown, /\\| fixture \\| build \\| compiler run ms \\| make ms \\|/);
   assert.match(markdown, /\\| small \\| cold \\| 17\\.420 \\| 15\\.050 \\| 0\\.188 \\| 1\\.464 \\| 0\\.714 \\| 3\\.657 \\|/);
   assert.match(markdown, /\\| small \\| warm \\| 7\\.220 \\| 5\\.860 \\|  \\|  \\|  \\|  \\|/);
+});
+
+test("tracing summary can filter rows to one fixture", () => {
+  const rows = [
+    { fixture: "small", build: "cold", compilerRun: 1 },
+    { fixture: "large", build: "cold", compilerRun: 2 },
+    { fixture: "large", build: "warm", compilerRun: 3 }
+  ];
+
+  const filtered = filterUnpackTracingSummaryRows(rows, { fixture: "large" });
+  assert.deepEqual(filtered, [
+    { fixture: "large", build: "cold", compilerRun: 2 },
+    { fixture: "large", build: "warm", compilerRun: 3 }
+  ]);
+
+  const markdown = toUnpackTracingSummaryMarkdown(filtered, { fixture: "large" });
+  assert.doesNotMatch(markdown, /small/);
+  assert.match(markdown, /\\| large \\| cold \\| 2\\.000 \\|/);
+  assert.equal(
+    toUnpackTracingSummaryMarkdown([], { fixture: "large" }),
+    "No Unpack tracing phase timings were captured for fixture `large`.\n"
+  );
 });

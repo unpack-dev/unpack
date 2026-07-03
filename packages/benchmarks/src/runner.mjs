@@ -3,7 +3,11 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { performance } from "node:perf_hooks";
 import { dirname, join, resolve, sep } from "node:path";
 
-import { createBenchmarkFixture, FIXTURE_SHAPES } from "./fixture.mjs";
+import {
+  applyWarmBuildMutation,
+  createBenchmarkFixture,
+  FIXTURE_SHAPES
+} from "./fixture.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -36,8 +40,8 @@ export async function runBenchmark(options = {}) {
   const results = [];
 
   for (const shape of shapes) {
-    const fixture = await createBenchmarkFixture(fixtureRoot, shape);
     for (const bundler of bundlerNames) {
+      const fixture = await createBenchmarkFixture(fixtureRoot, shape);
       const adapter = adapters[bundler];
       results.push(
         await runBundlerBenchmark({
@@ -130,6 +134,8 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
   if (cold.status !== "success") {
     return resultFromPhases({ fixture, bundler, versionSource, cold });
   }
+
+  await applyWarmBuildMutation(fixture);
 
   const warm = await timedBuild({
     adapter,

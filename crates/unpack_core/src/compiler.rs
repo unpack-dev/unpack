@@ -79,28 +79,10 @@ impl Compiler {
 
     pub async fn run(&self) -> Result<Compilation> {
         async {
-            if let Some(cached) = self.build_cache.cached_compilation(&self.options).await {
-                return Ok(Compilation::from_cached(
-                    self.options.clone(),
-                    UnpackResolver::new(self.options.resolve.clone()),
-                    self.build_cache.clone(),
-                    &cached,
-                ));
-            }
-
             let mut compilation = self.create_compilation();
             compilation.make().await?;
             compilation.build_chunk_graph();
             compilation.create_assets();
-            if compilation.errors().is_empty() {
-                self.build_cache
-                    .store_compilation(
-                        &self.options,
-                        compilation.assets(),
-                        compilation.watch_dependencies(),
-                    )
-                    .await?;
-            }
             Ok(compilation)
         }
         .instrument(tracing::trace_span!("Compiler::run"))
@@ -246,7 +228,7 @@ mod tests {
         assert_eq!(first.errors(), []);
         assert!(cache_location.join("container.json").exists());
         assert!(cache_location.join("packs/modules.cbor").exists());
-        assert!(cache_location.join("packs/compilation.cbor").exists());
+        assert!(!cache_location.join("packs/compilation.cbor").exists());
         let manifest = fs::read_to_string(cache_location.join("container.json"))?;
         assert!(manifest.contains("UNPACK_PERSISTENT_CACHE"));
         assert!(manifest.contains("test-version"));
@@ -267,7 +249,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_cache_readonly_uses_cached_compilation_without_module_pack()
+    async fn filesystem_cache_readonly_rebuilds_without_module_pack()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         write(
@@ -291,7 +273,7 @@ mod tests {
 
         let module_pack = cache_location.join("packs/modules.cbor");
         assert!(module_pack.exists());
-        assert!(cache_location.join("packs/compilation.cbor").exists());
+        assert!(!cache_location.join("packs/compilation.cbor").exists());
         fs::remove_file(module_pack)?;
 
         let mut readonly_options = options;
@@ -302,8 +284,8 @@ mod tests {
 
         let second = readonly_compiler.run().await?;
         assert_eq!(asset_sources(&first), asset_sources(&second));
-        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 0);
-        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 0);
+        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 2);
+        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 2);
 
         Ok(())
     }

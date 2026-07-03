@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleId, Result, UnpackResolver,
-    build_cache::{BuildCache, CachedCompilationRecord},
+    build_cache::BuildCache,
     code_generation,
     make::{self, MakeState},
     snapshot::FileSystemInfo,
@@ -44,32 +44,6 @@ impl Compilation {
             entries: Vec::new(),
             errors: Vec::new(),
             watch_dependencies: WatchDependencies::default(),
-            infrastructure_log_events: Vec::new(),
-            file_system_info,
-        }
-    }
-
-    pub(crate) fn from_cached(
-        options: CompilerOptions,
-        resolver: UnpackResolver,
-        build_cache: BuildCache,
-        cached: &CachedCompilationRecord,
-    ) -> Self {
-        let file_system_info = FileSystemInfo::from_snapshot_options(&options.snapshot);
-        Self {
-            options,
-            resolver,
-            build_cache,
-            module_graph: ModuleGraph::default(),
-            chunk_graph: ChunkGraph::default(),
-            assets: cached.assets().to_vec(),
-            entries: Vec::new(),
-            errors: Vec::new(),
-            watch_dependencies: WatchDependencies::from_sets(
-                cached.file_dependencies().clone(),
-                cached.context_dependencies().clone(),
-                cached.missing_dependencies().clone(),
-            ),
             infrastructure_log_events: Vec::new(),
             file_system_info,
         }
@@ -212,18 +186,6 @@ pub struct WatchDependencies {
 }
 
 impl WatchDependencies {
-    pub(crate) fn from_sets(
-        files: BTreeSet<PathBuf>,
-        contexts: BTreeSet<PathBuf>,
-        missing: BTreeSet<PathBuf>,
-    ) -> Self {
-        Self {
-            files,
-            contexts,
-            missing,
-        }
-    }
-
     pub fn files(&self) -> &BTreeSet<PathBuf> {
         &self.files
     }

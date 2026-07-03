@@ -1,6 +1,8 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+export const WARM_BUILD_CHECKSUM_DELTA = 2000;
+
 export const FIXTURE_SHAPES = {
   small: {
     name: "small",
@@ -59,8 +61,20 @@ export async function createBenchmarkFixture(rootDir, shape) {
     name: shape.name,
     context,
     entry: "./src/index.js",
-    expectedChecksum: expectedChecksum(shape)
+    expectedChecksum: expectedChecksum(shape),
+    warmBuildMutationApplied: false
   };
+}
+
+export async function applyWarmBuildMutation(fixture) {
+  if (fixture.warmBuildMutationApplied) {
+    return fixture;
+  }
+
+  await writeSource(join(fixture.context, "src/features/leaf0.js"), leafSource(0, 1001));
+  fixture.expectedChecksum += WARM_BUILD_CHECKSUM_DELTA;
+  fixture.warmBuildMutationApplied = true;
+  return fixture;
 }
 
 function entrySource(shape) {
@@ -115,8 +129,8 @@ function sharedSource(shared) {
   return `export const shared${shared} = ${shared + 1};\nexport const sharedValue${shared} = shared${shared} * 2;\n`;
 }
 
-function leafSource(feature) {
-  return `export const leaf${feature} = ${feature + 1};\n`;
+function leafSource(feature, value = feature + 1) {
+  return `export const leaf${feature} = ${value};\n`;
 }
 
 function reexportSource(feature) {

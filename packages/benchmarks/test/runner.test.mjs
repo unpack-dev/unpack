@@ -7,6 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { adapters, applyTurbopackBuildCacheFlushPatch } from "../src/adapters.mjs";
+import { WARM_BUILD_CHECKSUM_DELTA } from "../src/fixture.mjs";
 import { runBenchmark, toSummaryMarkdown } from "../src/runner.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -50,9 +51,37 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
         { phase: "no-cache", persistentCache: false, cacheReadonly: false }
       ]
     );
+    assert.equal(
+      calls[1].expectedChecksum,
+      calls[0].expectedChecksum + WARM_BUILD_CHECKSUM_DELTA
+    );
+    assert.equal(calls[2].expectedChecksum, calls[1].expectedChecksum);
     const summary = toSummaryMarkdown(report);
     assert.match(summary, /no_cache_build_ms/);
     assert.match(summary, /\\| small \\| fake \\| fake@1\\.0\\.0 \\|/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("runner verifies warm builds against the mutated fixture checksum", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const report = await runBenchmark({
+      workspaceDir: workspace,
+      fixtures: ["small"],
+      bundlers: ["fake"],
+      adapters: {
+        fake: fakeAdapter({ staleWarmChecksum: true })
+      }
+    });
+
+    assert.equal(report.results[0].status, "warm_runtime_failed");
+    assert.equal(report.results[0].cold_status, "success");
+    assert.equal(report.results[0].warm_status, "runtime_failed");
+    assert.equal(report.results[0].no_cache_status, "not_run");
+    assert.match(report.results[0].error, /expected bundle checksum/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -231,19 +260,32 @@ test("turbopack prepare patches build shutdown to flush persistent cache", async
   }
 });
 
-function fakeAdapter({ checksumOffset = 0, error, calls } = {}) {
+function fakeAdapter({ checksumOffset = 0, error, calls, staleWarmChecksum = false } = {}) {
+  let coldChecksum;
   return {
     name: "fake",
     versionSource: () => "fake@1.0.0",
     async build({ fixture, outputDir, phase, persistentCache, cacheReadonly }) {
-      calls?.push({ phase, persistentCache, cacheReadonly });
+      calls?.push({
+        phase,
+        persistentCache,
+        cacheReadonly,
+        expectedChecksum: fixture.expectedChecksum
+      });
       if (error) {
         throw error;
       }
+      if (phase === "cold") {
+        coldChecksum = fixture.expectedChecksum;
+      }
+      const checksum =
+        staleWarmChecksum && phase === "warm"
+          ? coldChecksum
+          : fixture.expectedChecksum;
       const entryFile = join(outputDir, "main.js");
       await writeFile(
         entryFile,
-        `exports.checksum = ${fixture.expectedChecksum + checksumOffset};\n`,
+        `exports.checksum = ${checksum + checksumOffset};\n`,
         "utf8"
       );
       return { entryFile };

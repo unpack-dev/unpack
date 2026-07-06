@@ -113,13 +113,17 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     });
   }
 
-  if (fixture.requiresWebpackLoaders && !adapter.supportsWebpackLoaders) {
+  if (
+    fixture.requiresWebpackLoaders &&
+    !adapter.supportsWebpackLoaders &&
+    !adapter.supportsLoaderFixture
+  ) {
     return emptyResult({
       fixture,
       bundler,
       versionSource,
       status: "unsupported",
-      message: `${adapter.name ?? bundler} does not support the webpack loader benchmark fixture`
+      message: `${adapter.name ?? bundler} does not support the loader benchmark fixture`
     });
   }
 

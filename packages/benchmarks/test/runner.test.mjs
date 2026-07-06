@@ -7,7 +7,10 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { adapters, applyTurbopackBuildCacheFlushPatch } from "../src/adapters.mjs";
-import { WARM_BUILD_CHECKSUM_DELTA } from "../src/fixture.mjs";
+import {
+  WARM_BUILD_CHECKSUM_DELTA,
+  WARM_BUILD_GRAPH_COPY
+} from "../src/fixture.mjs";
 import { runBenchmark, toSummaryMarkdown } from "../src/runner.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -56,6 +59,23 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
       calls[0].expectedChecksum + WARM_BUILD_CHECKSUM_DELTA
     );
     assert.equal(calls[2].expectedChecksum, calls[1].expectedChecksum);
+    const mutatedEntry = await readFile(
+      join(workspace, "fixtures", "large", "src", "index.js"),
+      "utf8"
+    );
+    assert.match(
+      mutatedEntry,
+      new RegExp(
+        `// import \\* as copy${WARM_BUILD_GRAPH_COPY} from "\\./copy${WARM_BUILD_GRAPH_COPY}/Three\\.js";`
+      )
+    );
+    assert.doesNotMatch(
+      mutatedEntry,
+      new RegExp(
+        `^import \\* as copy${WARM_BUILD_GRAPH_COPY} from "\\./copy${WARM_BUILD_GRAPH_COPY}/Three\\.js";`,
+        "m"
+      )
+    );
     const summary = toSummaryMarkdown(report);
     assert.match(summary, /no_cache_build_ms/);
     assert.match(summary, /\\| large \\| fake \\| fake@1\\.0\\.0 \\|/);

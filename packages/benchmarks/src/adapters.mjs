@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
 import { dirname, join, resolve } from "node:path";
@@ -27,6 +27,7 @@ export const adapters = {
       cacheReadonly = false,
       options
     }) {
+      assertNoWebpackLoaderFixture(fixture, "Unpack");
       configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly, options });
       const { default: unpack } = await import("@unpack-js/core");
       const compiler = unpack({
@@ -64,6 +65,7 @@ export const adapters = {
 
   webpack: {
     name: "webpack",
+    supportsWebpackLoaders: true,
     versionSource: () => `webpack@${packageVersion("webpack")}`,
     async build({
       fixture,
@@ -106,6 +108,7 @@ export const adapters = {
 
   rspack: {
     name: "rspack",
+    supportsWebpackLoaders: true,
     versionSource: () => `@rspack/core@${packageVersion("@rspack/core")}`,
     async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
       const rspackModule = await import("@rspack/core");
@@ -138,10 +141,12 @@ export const adapters = {
     name: "rolldown",
     versionSource: () => `rolldown@${packageVersion("rolldown")}`,
     async build({ fixture, outputDir }) {
+      assertNoWebpackLoaderFixture(fixture, "Rolldown");
       const { rolldown } = await import("rolldown");
       const bundle = await rolldown({
         input: resolve(fixture.context, fixture.entry),
-        treeshake: true
+        logLevel: "silent",
+        treeshake: false
       });
 
       try {
@@ -165,6 +170,7 @@ export const adapters = {
     name: "metro",
     versionSource: () => `metro@${packageVersion("metro")}`,
     async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
+      assertNoWebpackLoaderFixture(fixture, "Metro");
       const metroModule = await import("metro");
       const metroRuntimeRoot = resolveMetroRuntimeRoot();
       const transformCacheDir = join(cacheDir, "transform");
@@ -220,6 +226,74 @@ export const adapters = {
     }
   },
 
+  parcel: {
+    name: "parcel",
+    versionSource: () => `parcel@${packageVersion("parcel")}`,
+    async build({
+      fixture,
+      outputDir,
+      cacheDir,
+      persistentCache = true,
+      cacheReadonly = false
+    }) {
+      assertNoWebpackLoaderFixture(fixture, "Parcel");
+      const parcelRequire = createParcelRequire();
+      const { default: Parcel } = parcelRequire("@parcel/core");
+      const currentCwd = process.cwd();
+      const currentExecArgv = process.execArgv;
+      const entryFile = join(outputDir, "main.js");
+
+      try {
+        await rm(entryFile, { force: true });
+        process.chdir(fixture.context);
+        // Parcel forwards process.execArgv to worker threads. Node's test runner can
+        // include flags that Worker rejects, so keep the benchmark invocation clean.
+        process.execArgv = [];
+        const bundler = new Parcel({
+          entries: [fixture.entry],
+          projectRoot: fixture.context,
+          defaultConfig: parcelRequire.resolve("@parcel/config-default"),
+          mode: "production",
+          shouldPatchConsole: false,
+          shouldDisableCache: !persistentCache || cacheReadonly,
+          shouldAutoInstall: false,
+          shouldContentHash: false,
+          cacheDir,
+          logLevel: "none",
+          defaultTargetOptions: {
+            shouldOptimize: false,
+            shouldScopeHoist: true,
+            sourceMaps: false,
+            distDir: outputDir
+          },
+          targets: {
+            main: {
+              distDir: outputDir,
+              distEntry: "main.js",
+              context: "node",
+              outputFormat: "commonjs",
+              isLibrary: true,
+              includeNodeModules: true,
+              optimize: false,
+              scopeHoist: true,
+              sourceMap: false,
+              engines: {
+                node: ">=16"
+              }
+            }
+          }
+        });
+
+        await bundler.run();
+      } finally {
+        process.execArgv = currentExecArgv;
+        process.chdir(currentCwd);
+      }
+
+      return { entryFile };
+    }
+  },
+
   turbopack: {
     name: "turbopack",
     outputDir: ({ fixture }) => join(fixture.context, "dist"),
@@ -264,6 +338,7 @@ export const adapters = {
       preparedTurbopackBuilds.add(prepareKey);
     },
     async build({ fixture, cacheDir, persistentCache = true, options }) {
+      assertNoWebpackLoaderFixture(fixture, "Turbopack");
       const repo = options.turbopackRepo;
       const profile = options.turbopackProfile ?? "release";
       const binary = options.turbopackBinary
@@ -348,7 +423,7 @@ export async function applyTurbopackBuildCacheFlushPatch(repo) {
 }
 
 function webpackLikeConfig({ fixture, outputDir }) {
-  return {
+  const config = {
     mode: "none",
     target: "node",
     context: fixture.context,
@@ -370,6 +445,34 @@ function webpackLikeConfig({ fixture, outputDir }) {
     },
     stats: "errors-warnings"
   };
+
+  const rules = webpackLoaderRules(fixture);
+  if (rules.length > 0) {
+    config.module = { rules };
+  }
+
+  return config;
+}
+
+function webpackLoaderRules(fixture) {
+  if (!fixture.requiresWebpackLoaders) {
+    return [];
+  }
+
+  return [
+    {
+      test: /\.benchdata$/,
+      loader: join(fixture.context, "loaders/benchmark-loader.cjs")
+    }
+  ];
+}
+
+function assertNoWebpackLoaderFixture(fixture, bundler) {
+  if (!fixture.requiresWebpackLoaders) {
+    return;
+  }
+
+  throw unsupported(`${bundler} does not support the webpack loader benchmark fixture`);
 }
 
 function runUnpackCompiler(compiler) {
@@ -459,6 +562,11 @@ function resolveMetroRuntimeRoot() {
   return dirname(
     require.resolve("metro-runtime/package.json", { paths: [metroRoot] })
   );
+}
+
+function createParcelRequire() {
+  const parcelRoot = dirname(require.resolve("parcel/package.json"));
+  return createRequire(`${parcelRoot}/package.json`);
 }
 
 function configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly, options }) {

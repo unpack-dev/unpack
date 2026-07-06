@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 
 import {
   DEFAULT_BUNDLERS,
+  DEFAULT_FIXTURES,
   DEFAULT_TURBOPACK_COMMIT,
   runBenchmark,
   toSummaryMarkdown
@@ -28,7 +29,7 @@ process.stdout.write(summary);
 function parseArgs(args) {
   const parsed = {
     workspaceDir: resolve(invocationCwd, ".benchmark-work"),
-    fixtures: ["small", "medium", "large"],
+    fixtures: DEFAULT_FIXTURES,
     bundlers: DEFAULT_BUNDLERS,
     turbopackCommit: DEFAULT_TURBOPACK_COMMIT,
     turbopackProfile: "release"
@@ -106,7 +107,7 @@ function printHelp() {
 
 Options:
   --workspace <path>            Benchmark-owned workspace directory
-  --fixtures <list>             Comma-separated fixture list
+  --fixtures <list>             Comma-separated fixture list (default: large,loader)
   --bundlers <list>             Comma-separated bundler list
   --output-json <path>          Write raw JSON report
   --summary-md <path>           Write Markdown summary table

@@ -14,8 +14,8 @@ on:
         required: false
 
 env:
-  DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro
-  TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,turbopack
+  DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel
+  TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel,turbopack
   TURBOPACK_CLI_RELEASE_URL: https://github.com/hardfist/bundler-diff/releases/download/turbopack-cli-main/turbopack-cli-linux-x64.tar.gz
 
 jobs:
@@ -89,6 +89,7 @@ jobs:
 
           pnpm --filter @unpack-js/benchmarks bench -- \
             --workspace .benchmark-work/ci \
+            --fixtures large,loader \
             --output-json .benchmark-work/ci/results.json \
             --summary-md .benchmark-work/ci/summary.md \
             --bundlers "$benchmark_bundlers" \

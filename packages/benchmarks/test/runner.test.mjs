@@ -19,7 +19,7 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
   try {
     const report = await runBenchmark({
       workspaceDir: workspace,
-      fixtures: ["small"],
+      fixtures: ["large"],
       bundlers: ["fake"],
       adapters: {
         fake: fakeAdapter({ calls })
@@ -28,7 +28,7 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
 
     assert.equal(report.schema_version, 2);
     assert.equal(report.results.length, 1);
-    assert.equal(report.results[0].fixture, "small");
+    assert.equal(report.results[0].fixture, "large");
     assert.equal(report.results[0].bundler, "fake");
     assert.equal(report.results[0].status, "success");
     assert.equal(report.results[0].cold_status, "success");
@@ -58,7 +58,7 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
     assert.equal(calls[2].expectedChecksum, calls[1].expectedChecksum);
     const summary = toSummaryMarkdown(report);
     assert.match(summary, /no_cache_build_ms/);
-    assert.match(summary, /\\| small \\| fake \\| fake@1\\.0\\.0 \\|/);
+    assert.match(summary, /\\| large \\| fake \\| fake@1\\.0\\.0 \\|/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -70,7 +70,7 @@ test("runner verifies warm builds against the mutated fixture checksum", async (
   try {
     const report = await runBenchmark({
       workspaceDir: workspace,
-      fixtures: ["small"],
+      fixtures: ["large"],
       bundlers: ["fake"],
       adapters: {
         fake: fakeAdapter({ staleWarmChecksum: true })
@@ -93,7 +93,7 @@ test("runner marks a built bundle with the wrong checksum as runtime_failed", as
   try {
     const report = await runBenchmark({
       workspaceDir: workspace,
-      fixtures: ["small"],
+      fixtures: ["large"],
       bundlers: ["fake"],
       adapters: {
         fake: fakeAdapter({ checksumOffset: 1 })
@@ -120,7 +120,7 @@ test("runner reports unsupported adapters explicitly", async () => {
     error.code = "UNSUPPORTED_BUNDLER";
     const report = await runBenchmark({
       workspaceDir: workspace,
-      fixtures: ["small"],
+      fixtures: ["large"],
       bundlers: ["fake"],
       adapters: {
         fake: fakeAdapter({ error })
@@ -143,7 +143,7 @@ test("metro adapter builds a verified benchmark fixture", async () => {
   try {
     const report = await runBenchmark({
       workspaceDir: workspace,
-      fixtures: ["small"],
+      fixtures: ["large"],
       bundlers: ["metro"],
       adapters: {
         metro: adapters.metro
@@ -162,6 +162,90 @@ test("metro adapter builds a verified benchmark fixture", async () => {
   }
 });
 
+test("parcel adapter builds a verified benchmark fixture", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const report = await runBenchmark({
+      workspaceDir: workspace,
+      fixtures: ["large"],
+      bundlers: ["parcel"],
+      adapters: {
+        parcel: adapters.parcel
+      }
+    });
+
+    assert.equal(report.results[0].bundler, "parcel");
+    assert.equal(report.results[0].status, "success");
+    assert.equal(report.results[0].cold_status, "success");
+    assert.equal(report.results[0].warm_status, "success");
+    assert.equal(report.results[0].no_cache_status, "success");
+    assert.equal(report.results[0].verify_status, "success");
+    assert.match(report.results[0].version_source, /^parcel@/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("webpack-compatible adapters build the loader benchmark fixture", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const report = await runBenchmark({
+      workspaceDir: workspace,
+      fixtures: ["loader"],
+      bundlers: ["webpack", "rspack"],
+      adapters: {
+        webpack: adapters.webpack,
+        rspack: adapters.rspack
+      }
+    });
+
+    assert.equal(report.results.length, 2);
+    for (const result of report.results) {
+      assert.equal(result.fixture, "loader");
+      assert.equal(result.status, "success");
+      assert.equal(result.cold_status, "success");
+      assert.equal(result.warm_status, "success");
+      assert.equal(result.no_cache_status, "success");
+      assert.equal(result.verify_status, "success");
+    }
+
+    const loaderEntry = await readFile(
+      join(workspace, "fixtures", "loader", "src", "index.js"),
+      "utf8"
+    );
+    assert.match(loaderEntry, /@material-ui\/core/);
+    assert.match(loaderEntry, /\.\/rome\.ts/);
+    assert.match(loaderEntry, /\.\/loader-data\/item0\.benchdata/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("non-loader adapters mark the loader benchmark fixture unsupported", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const report = await runBenchmark({
+      workspaceDir: workspace,
+      fixtures: ["loader"],
+      bundlers: ["metro"],
+      adapters: {
+        metro: adapters.metro
+      }
+    });
+
+    assert.equal(report.results[0].fixture, "loader");
+    assert.equal(report.results[0].bundler, "metro");
+    assert.equal(report.results[0].status, "unsupported");
+    assert.equal(report.results[0].cold_build_ms, null);
+    assert.match(report.results[0].error, /webpack loader benchmark fixture/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("CLI accepts pnpm-style -- separator, tracing option, and writes JSON output", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
   const outputJson = join(workspace, "results.json");
@@ -173,7 +257,7 @@ test("CLI accepts pnpm-style -- separator, tracing option, and writes JSON outpu
         "src/run.mjs",
         "--",
         "--fixtures",
-        "small",
+        "large",
         "--bundlers",
         "turbopack",
         "--workspace",

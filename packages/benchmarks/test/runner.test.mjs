@@ -236,6 +236,59 @@ test("turbopack build enables persistent cache for warm measurements", async () 
   }
 });
 
+test("turbopack build can use a prebuilt binary without a source checkout", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const binary = join(workspace, "tools", "turbopack-cli");
+    const argsLog = join(workspace, "turbopack-args.txt");
+    const fixtureContext = join(workspace, "fixture");
+    const cacheDir = join(workspace, "cache");
+
+    await mkdir(join(workspace, "tools"), { recursive: true });
+    await mkdir(fixtureContext, { recursive: true });
+    await writeFile(
+      binary,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsLog}"\n`,
+      "utf8"
+    );
+    await chmod(binary, 0o755);
+
+    await adapters.turbopack.prepare({
+      options: {
+        turbopackBinary: binary
+      }
+    });
+
+    await adapters.turbopack.build({
+      fixture: {
+        context: fixtureContext,
+        entry: "./src/index.js"
+      },
+      cacheDir,
+      options: {
+        turbopackBinary: binary
+      }
+    });
+
+    const args = (await readFile(argsLog, "utf8")).trim().split("\n");
+    assert.ok(args.includes("--persistent-caching"));
+    assert.equal(args[args.indexOf("--cache-dir") + 1], cacheDir);
+    assert.equal(args.at(-1), "./src/index.js");
+    assert.match(
+      adapters.turbopack.versionSource({
+        options: {
+          turbopackBinary: binary,
+          turbopackCommit: "release-source"
+        }
+      }),
+      /^hardfist\/bundler-diff@release-source\+release-turbopack-cli$/
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("turbopack prepare patches build shutdown to flush persistent cache", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
 

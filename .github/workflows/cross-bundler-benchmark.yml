@@ -16,7 +16,7 @@ on:
 env:
   DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro
   TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,turbopack
-  TURBOPACK_NEXT_COMMIT: a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc
+  TURBOPACK_CLI_RELEASE_URL: https://github.com/hardfist/bundler-diff/releases/download/turbopack-cli-main/turbopack-cli-linux-x64.tar.gz
 
 jobs:
   cross-bundler-benchmarks:
@@ -55,14 +55,15 @@ jobs:
           UNPACK_NATIVE_PROFILE: release
         run: pnpm --filter @unpack-js/core build
 
-      - name: Checkout fixed Turbopack source
+      - name: Download Turbopack CLI release
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_turbopack }}
         run: |
-          mkdir -p .benchmark-tools/next.js
-          git -C .benchmark-tools/next.js init
-          git -C .benchmark-tools/next.js remote add origin https://github.com/vercel/next.js.git
-          git -C .benchmark-tools/next.js fetch --depth=1 --filter=blob:none origin "$TURBOPACK_NEXT_COMMIT"
-          git -C .benchmark-tools/next.js checkout --detach FETCH_HEAD
+          set -euo pipefail
+          mkdir -p .benchmark-tools/turbopack-cli
+          curl -fsSL "$TURBOPACK_CLI_RELEASE_URL" -o .benchmark-tools/turbopack-cli.tar.gz
+          tar -xzf .benchmark-tools/turbopack-cli.tar.gz -C .benchmark-tools/turbopack-cli
+          chmod +x .benchmark-tools/turbopack-cli/turbopack-cli
+          .benchmark-tools/turbopack-cli/turbopack-cli --help >/dev/null
 
       - name: Run cross-bundler benchmark
         id: benchmark
@@ -76,9 +77,13 @@ jobs:
           turbopack_args=()
           if [ "$INCLUDE_TURBOPACK" = "true" ]; then
             benchmark_bundlers="$TURBOPACK_BENCHMARK_BUNDLERS"
+            turbopack_commit="turbopack-cli-main"
+            if [ -f .benchmark-tools/turbopack-cli/source-commit.txt ]; then
+              turbopack_commit="$(cat .benchmark-tools/turbopack-cli/source-commit.txt)"
+            fi
             turbopack_args=(
-              --turbopack-repo .benchmark-tools/next.js
-              --turbopack-commit "$TURBOPACK_NEXT_COMMIT"
+              --turbopack-binary .benchmark-tools/turbopack-cli/turbopack-cli
+              --turbopack-commit "$turbopack_commit"
             )
           fi
 

@@ -71,6 +71,9 @@ function parseArgs(args) {
       case "--turbopack-repo":
         parsed.turbopackRepo = resolve(invocationCwd, value());
         break;
+      case "--turbopack-binary":
+        parsed.turbopackBinary = resolve(invocationCwd, value());
+        break;
       case "--turbopack-commit":
         parsed.turbopackCommit = value();
         break;
@@ -110,6 +113,7 @@ Options:
   --unpack-tracing <filter>     Set the Unpack tracing filter (default: unpack_core=trace,unpack_node=trace)
   --no-unpack-tracing           Do not print Unpack tracing details
   --turbopack-repo <path>       Fixed Next.js checkout containing turbopack/
+  --turbopack-binary <path>     Prebuilt turbopack-cli binary
   --turbopack-commit <sha>      Commit shown for Turbopack results
   --turbopack-profile <name>    Cargo profile for turbopack-cli (default: release)
 `);

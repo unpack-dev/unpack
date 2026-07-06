@@ -223,12 +223,22 @@ export const adapters = {
   turbopack: {
     name: "turbopack",
     outputDir: ({ fixture }) => join(fixture.context, "dist"),
-    versionSource: ({ options }) =>
-      `vercel/next.js@${options.turbopackCommit ?? DEFAULT_TURBOPACK_COMMIT}+benchmark-cache-flush`,
+    versionSource: ({ options }) => {
+      if (options.turbopackBinary) {
+        return `hardfist/bundler-diff@${options.turbopackCommit ?? "turbopack-cli-main"}+release-turbopack-cli`;
+      }
+      return `vercel/next.js@${options.turbopackCommit ?? DEFAULT_TURBOPACK_COMMIT}+benchmark-cache-flush`;
+    },
     async prepare({ options }) {
+      if (options.turbopackBinary) {
+        return;
+      }
+
       const repo = options.turbopackRepo;
       if (!repo) {
-        throw unsupported("Turbopack requires --turbopack-repo pointing at a fixed Next.js checkout");
+        throw unsupported(
+          "Turbopack requires --turbopack-binary or --turbopack-repo pointing at a fixed Next.js checkout"
+        );
       }
 
       const profile = options.turbopackProfile ?? "release";
@@ -255,17 +265,18 @@ export const adapters = {
     },
     async build({ fixture, cacheDir, persistentCache = true, options }) {
       const repo = options.turbopackRepo;
-      if (!repo) {
-        throw unsupported("Turbopack requires --turbopack-repo pointing at a fixed Next.js checkout");
+      const profile = options.turbopackProfile ?? "release";
+      const binary = options.turbopackBinary
+        ? options.turbopackBinary
+        : repo
+          ? join(repo, "target", profile === "dev" ? "debug" : profile, "turbopack-cli")
+          : null;
+      if (!binary) {
+        throw unsupported(
+          "Turbopack requires --turbopack-binary or --turbopack-repo pointing at a fixed Next.js checkout"
+        );
       }
 
-      const profile = options.turbopackProfile ?? "release";
-      const binary = join(
-        repo,
-        "target",
-        profile === "dev" ? "debug" : profile,
-        "turbopack-cli"
-      );
       const args = [
         "build",
         "--dir",
@@ -287,7 +298,7 @@ export const adapters = {
         binary,
         args,
         {
-          cwd: repo,
+          cwd: repo ?? dirname(binary),
           env: { ...process.env, CI: process.env.CI ?? "1" },
           timeout: 10 * 60 * 1000,
           maxBuffer: 1024 * 1024 * 20

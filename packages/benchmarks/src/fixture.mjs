@@ -20,7 +20,7 @@ export const FIXTURE_SHAPES = {
     name: "loader",
     kind: "loader",
     moduleCount: LOADER_MODULE_COUNT,
-    expectedChecksum: loaderExpectedChecksum(LOADER_MODULE_COUNT)
+    expectedChecksum: LARGE_BASE_CHECKSUM + loaderExpectedChecksum(LOADER_MODULE_COUNT)
   }
 };
 
@@ -208,19 +208,20 @@ async function writeWebpackAllFixture(context, shape) {
     private: true,
     benchmarkCase: {
       source: "webpack/benchmark/cases/all",
-      commit: WEBPACK_ALL_COMMIT
+      commit: WEBPACK_ALL_COMMIT,
+      loaderOverlay: shape.kind === "loader"
     },
     dependencies: WEBPACK_ALL_DEPENDENCIES
   });
   await writeSource(join(context, "tsconfig.json"), tsconfigSource());
   await writeSource(join(context, "webpack.config.js"), webpackConfigSource());
   await writeSource(join(context, "src/.gitignore"), "copy*\nrome\n");
-  await writeSource(join(context, "src/index.js"), webpackAllEntrySource());
+  await writeSource(join(context, "src/index.js"), webpackAllEntrySource(shape));
   await writeSource(join(context, "src/babel-runtime.js"), babelRuntimeSource());
   await writeSource(join(context, "src/rome.ts"), romeEntrySource());
   await writeSource(
     join(context, "src/__benchmark_checksum.js"),
-    checksumSource(shape.expectedChecksum)
+    checksumSource(LARGE_BASE_CHECKSUM)
   );
 
   await writeWebpackAllPackages(context);
@@ -229,13 +230,7 @@ async function writeWebpackAllFixture(context, shape) {
 }
 
 async function writeLoaderFixture(context, shape) {
-  await writeJson(join(context, "package.json"), {
-    private: true,
-    benchmarkCase: {
-      source: "webpack-compatible local loader fixture"
-    }
-  });
-  await writeSource(join(context, "src/index.js"), loaderEntrySource(shape));
+  await writeWebpackAllFixture(context, shape);
   await writeSource(
     join(context, "loaders/benchmark-loader.cjs"),
     benchmarkLoaderSource()
@@ -375,7 +370,7 @@ async function writeRomeTree(context) {
   );
 }
 
-function webpackAllEntrySource() {
+function webpackAllEntrySource(shape) {
   const copyImports = [];
   for (let copy = 1; copy <= THREE_COPY_COUNT; copy += 1) {
     copyImports.push(`import * as copy${copy} from "./copy${copy}/Three.js";`);
@@ -460,8 +455,10 @@ ${copyImports.join("\n")}
 import "./rome.ts";
 
 import { benchmarkChecksum } from "./__benchmark_checksum.js";
+${loaderEntryImports(shape)}
 
-export const checksum = benchmarkChecksum;
+${loaderChecksumSource(shape)}
+export const checksum = benchmarkChecksum + loaderChecksum;
 export default { checksum };
 
 console.log("Hello World", checksum);
@@ -496,24 +493,37 @@ console.log("Hello World");
 `;
 }
 
-function loaderEntrySource(shape) {
+function loaderEntryImports(shape) {
+  if (shape.kind !== "loader") {
+    return "";
+  }
+
   const imports = [];
-  const values = [];
   for (let index = 0; index < shape.moduleCount; index += 1) {
     imports.push(`import value${index} from "./loader-data/item${index}.benchdata";`);
+  }
+
+  return `
+// webpack-compatible loader overlay
+${imports.join("\n")}
+`;
+}
+
+function loaderChecksumSource(shape) {
+  if (shape.kind !== "loader") {
+    return "const loaderChecksum = 0;";
+  }
+
+  const values = [];
+  for (let index = 0; index < shape.moduleCount; index += 1) {
     values.push(`value${index}`);
   }
 
-  return `// Benchmark fixture that exercises a webpack-compatible loader pipeline.
-${imports.join("\n")}
-
-const values = [
+  return `const loaderValues = [
   ${values.join(",\n  ")}
 ];
 
-export const checksum = values.reduce((total, value) => total + value, 0);
-export default { checksum };
-`;
+const loaderChecksum = loaderValues.reduce((total, value) => total + value, 0);`;
 }
 
 function benchmarkLoaderSource() {

@@ -210,6 +210,14 @@ test("webpack-compatible adapters build the loader benchmark fixture", async () 
       assert.equal(result.no_cache_status, "success");
       assert.equal(result.verify_status, "success");
     }
+
+    const loaderEntry = await readFile(
+      join(workspace, "fixtures", "loader", "src", "index.js"),
+      "utf8"
+    );
+    assert.match(loaderEntry, /@material-ui\/core/);
+    assert.match(loaderEntry, /\.\/rome\.ts/);
+    assert.match(loaderEntry, /\.\/loader-data\/item0\.benchdata/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

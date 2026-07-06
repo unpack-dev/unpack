@@ -393,6 +393,62 @@ test("turbopack build can use a prebuilt binary without a source checkout", asyn
   }
 });
 
+test("turbopack build enables tracing and archives the raw trace", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const binary = join(workspace, "tools", "turbopack-cli");
+    const envLog = join(workspace, "turbopack-tracing-env.txt");
+    const fixtureContext = join(workspace, "fixture");
+    const sourceTraceDir = join(fixtureContext, ".turbopack");
+    const cacheDir = join(workspace, "cache");
+    const traceDir = join(workspace, "traces");
+
+    await mkdir(join(workspace, "tools"), { recursive: true });
+    await mkdir(fixtureContext, { recursive: true });
+    await writeFile(
+      binary,
+      `#!/bin/sh
+printf '%s\\n' "$TURBOPACK_TRACING" > "${envLog}"
+mkdir -p "${sourceTraceDir}"
+printf 'raw trace\\n' > "${sourceTraceDir}/trace.log"
+`,
+      "utf8"
+    );
+    await chmod(binary, 0o755);
+
+    await adapters.turbopack.build({
+      fixture: {
+        name: "large",
+        context: fixtureContext,
+        entry: "./src/index.js"
+      },
+      cacheDir,
+      phase: "cold",
+      options: {
+        turbopackBinary: binary,
+        turbopackTracing: "turbo-tasks",
+        turbopackTracingDir: traceDir
+      }
+    });
+
+    assert.equal(await readFile(envLog, "utf8"), "turbo-tasks\n");
+    assert.equal(
+      await readFile(join(traceDir, "large", "cold", "trace.log"), "utf8"),
+      "raw trace\n"
+    );
+    const metadata = JSON.parse(
+      await readFile(join(traceDir, "large", "cold", "metadata.json"), "utf8")
+    );
+    assert.equal(metadata.fixture, "large");
+    assert.equal(metadata.phase, "cold");
+    assert.equal(metadata.filter, "turbo-tasks");
+    assert.equal(metadata.bytes, "raw trace\n".length);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("turbopack prepare patches build shutdown to flush persistent cache", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
 

@@ -17,6 +17,7 @@ env:
   DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel,turbopack
   NO_TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel
   TURBOPACK_CLI_RELEASE_URL: https://github.com/hardfist/bundler-diff/releases/download/turbopack-cli-main/turbopack-cli-linux-x64.tar.gz
+  TURBOPACK_TRACING_PRESET: turbo-tasks
 
 jobs:
   cross-bundler-benchmarks:
@@ -86,6 +87,8 @@ jobs:
             turbopack_args=(
               --turbopack-binary .benchmark-tools/turbopack-cli/turbopack-cli
               --turbopack-commit "$turbopack_commit"
+              --turbopack-tracing "$TURBOPACK_TRACING_PRESET"
+              --turbopack-tracing-dir .benchmark-work/ci/turbopack-traces
             )
           fi
 
@@ -107,6 +110,15 @@ jobs:
             .benchmark-work/ci/bundler-phase-timings.md \
             --fixture large
 
+      - name: Format Turbopack trace index
+        if: always()
+        run: |
+          mkdir -p .benchmark-work/ci/turbopack-traces
+          node packages/benchmarks/src/turbopack-trace-index.mjs \
+            .benchmark-work/ci/turbopack-traces \
+            .benchmark-work/ci/turbopack-traces.md \
+            --html .benchmark-work/ci/turbopack-traces/index.html
+
       - name: Publish benchmark summary
         if: always()
         run: |
@@ -117,6 +129,12 @@ jobs:
               echo "## Cross-Bundler Benchmarks"
               echo
               echo "The benchmark did not produce a summary. Check the workflow logs for setup or runner failures."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f .benchmark-work/ci/turbopack-traces.md ]; then
+            {
+              echo
+              cat .benchmark-work/ci/turbopack-traces.md
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -144,7 +162,7 @@ jobs:
             echo
             echo "[Workflow run]($RUN_URL)"
             echo
-            echo "Raw JSON results are uploaded as the \`cross-bundler-benchmark-results\` workflow artifact."
+            echo "Raw JSON results and Turbopack trace files are uploaded as the \`cross-bundler-benchmark-results\` workflow artifact."
           } > "$comment_file"
 
           comment_id="$(
@@ -183,6 +201,10 @@ jobs:
             else
               echo "No bundler phase timings were captured. Check the workflow logs for setup or runner failures."
             fi
+            if [ -f .benchmark-work/ci/turbopack-traces.md ]; then
+              echo
+              cat .benchmark-work/ci/turbopack-traces.md
+            fi
           } > "$comment_file"
 
           gh api --method POST "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
@@ -198,4 +220,6 @@ jobs:
             .benchmark-work/ci/summary.md
             .benchmark-work/ci/bundler-phase-timings.log
             .benchmark-work/ci/bundler-phase-timings.md
+            .benchmark-work/ci/turbopack-traces.md
+            .benchmark-work/ci/turbopack-traces/**
           if-no-files-found: warn

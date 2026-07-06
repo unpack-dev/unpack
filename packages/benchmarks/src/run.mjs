@@ -104,7 +104,7 @@ function printHelp() {
 
 Options:
   --workspace <path>            Benchmark-owned workspace directory
-  --fixtures <list>             Comma-separated fixture list (default: large)
+  --fixtures <list>             Comma-separated fixture list (default: large,loader)
   --bundlers <list>             Comma-separated bundler list
   --output-json <path>          Write raw JSON report
   --summary-md <path>           Write Markdown summary table

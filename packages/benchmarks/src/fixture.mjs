@@ -5,6 +5,7 @@ export const WARM_BUILD_CHECKSUM_DELTA = 2000;
 
 const WEBPACK_ALL_COMMIT = "d3a1ca290b4b887757a45901288ea30f86b2f842";
 const LARGE_BASE_CHECKSUM = 100000;
+const LOADER_MODULE_COUNT = 300;
 const THREE_COPY_COUNT = 10;
 const THREE_PARTS_PER_COPY = 20;
 const ROME_MODULE_COUNT = 80;
@@ -12,7 +13,14 @@ const ROME_MODULE_COUNT = 80;
 export const FIXTURE_SHAPES = {
   large: {
     name: "large",
+    kind: "webpack-all",
     expectedChecksum: LARGE_BASE_CHECKSUM
+  },
+  loader: {
+    name: "loader",
+    kind: "loader",
+    moduleCount: LOADER_MODULE_COUNT,
+    expectedChecksum: loaderExpectedChecksum(LOADER_MODULE_COUNT)
   }
 };
 
@@ -158,6 +166,44 @@ export async function createBenchmarkFixture(rootDir, shape) {
   await rm(context, { recursive: true, force: true });
   await mkdir(context, { recursive: true });
 
+  if (shape.kind === "loader") {
+    await writeLoaderFixture(context, shape);
+  } else {
+    await writeWebpackAllFixture(context, shape);
+  }
+
+  return {
+    name: shape.name,
+    context,
+    entry: "./src/index.js",
+    expectedChecksum: shape.expectedChecksum,
+    requiresWebpackLoaders: shape.kind === "loader",
+    warmBuildMutationApplied: false
+  };
+}
+
+export async function applyWarmBuildMutation(fixture) {
+  if (fixture.warmBuildMutationApplied) {
+    return fixture;
+  }
+
+  fixture.expectedChecksum += WARM_BUILD_CHECKSUM_DELTA;
+  if (fixture.requiresWebpackLoaders) {
+    await writeSource(
+      join(fixture.context, "src/loader-data/item0.benchdata"),
+      `${1 + WARM_BUILD_CHECKSUM_DELTA}\n`
+    );
+  } else {
+    await writeSource(
+      join(fixture.context, "src/__benchmark_checksum.js"),
+      checksumSource(fixture.expectedChecksum)
+    );
+  }
+  fixture.warmBuildMutationApplied = true;
+  return fixture;
+}
+
+async function writeWebpackAllFixture(context, shape) {
   await writeJson(join(context, "package.json"), {
     private: true,
     benchmarkCase: {
@@ -180,28 +226,27 @@ export async function createBenchmarkFixture(rootDir, shape) {
   await writeWebpackAllPackages(context);
   await writeThreeCopies(context);
   await writeRomeTree(context);
-
-  return {
-    name: shape.name,
-    context,
-    entry: "./src/index.js",
-    expectedChecksum: shape.expectedChecksum,
-    warmBuildMutationApplied: false
-  };
 }
 
-export async function applyWarmBuildMutation(fixture) {
-  if (fixture.warmBuildMutationApplied) {
-    return fixture;
-  }
-
-  fixture.expectedChecksum += WARM_BUILD_CHECKSUM_DELTA;
+async function writeLoaderFixture(context, shape) {
+  await writeJson(join(context, "package.json"), {
+    private: true,
+    benchmarkCase: {
+      source: "webpack-compatible local loader fixture"
+    }
+  });
+  await writeSource(join(context, "src/index.js"), loaderEntrySource(shape));
   await writeSource(
-    join(fixture.context, "src/__benchmark_checksum.js"),
-    checksumSource(fixture.expectedChecksum)
+    join(context, "loaders/benchmark-loader.cjs"),
+    benchmarkLoaderSource()
   );
-  fixture.warmBuildMutationApplied = true;
-  return fixture;
+
+  for (let index = 0; index < shape.moduleCount; index += 1) {
+    await writeSource(
+      join(context, `src/loader-data/item${index}.benchdata`),
+      `${index + 1}\n`
+    );
+  }
 }
 
 async function writeWebpackAllPackages(context) {
@@ -451,6 +496,41 @@ console.log("Hello World");
 `;
 }
 
+function loaderEntrySource(shape) {
+  const imports = [];
+  const values = [];
+  for (let index = 0; index < shape.moduleCount; index += 1) {
+    imports.push(`import value${index} from "./loader-data/item${index}.benchdata";`);
+    values.push(`value${index}`);
+  }
+
+  return `// Benchmark fixture that exercises a webpack-compatible loader pipeline.
+${imports.join("\n")}
+
+const values = [
+  ${values.join(",\n  ")}
+];
+
+export const checksum = values.reduce((total, value) => total + value, 0);
+export default { checksum };
+`;
+}
+
+function benchmarkLoaderSource() {
+  return `module.exports = function benchmarkLoader(source) {
+  const value = Number.parseInt(String(source).trim(), 10);
+  if (!Number.isFinite(value)) {
+    throw new Error("benchmark loader expected a numeric payload");
+  }
+  return [
+    \`const value = \${value};\`,
+    "export default value;",
+    "export { value as loadedValue };"
+  ].join("\\n");
+};
+`;
+}
+
 function packageModuleSource(packageName) {
   return `const packageName = ${JSON.stringify(packageName)};
 
@@ -531,6 +611,10 @@ export const helperName = ${JSON.stringify(helper)};
 
 function checksumSource(checksum) {
   return `export const benchmarkChecksum = ${checksum};\n`;
+}
+
+function loaderExpectedChecksum(moduleCount) {
+  return (moduleCount * (moduleCount + 1)) / 2;
 }
 
 function tsconfigSource() {

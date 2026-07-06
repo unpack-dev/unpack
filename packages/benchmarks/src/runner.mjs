@@ -21,12 +21,14 @@ export const DEFAULT_BUNDLERS = [
   "turbopack"
 ];
 
+export const DEFAULT_FIXTURES = ["large"];
+
 export const DEFAULT_TURBOPACK_COMMIT =
   "a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc";
 
 export async function runBenchmark(options = {}) {
   const workspaceDir = resolve(options.workspaceDir ?? ".benchmark-work");
-  const fixtureNames = options.fixtures ?? ["small", "medium", "large"];
+  const fixtureNames = options.fixtures ?? DEFAULT_FIXTURES;
   const bundlerNames = options.bundlers ?? DEFAULT_BUNDLERS;
   const adapters = options.adapters ?? (await defaultAdapters());
   const shapes = fixtureNames.map((name) => {
@@ -255,7 +257,26 @@ async function verifyBundle({ entryFile, outputDir, expectedChecksum }) {
   clearRequireCache(outputDir);
   const resolvedEntry = require.resolve(entryFile);
   delete require.cache[resolvedEntry];
-  const exports = require(resolvedEntry);
+  const previousDocument = globalThis.document;
+  const hadDocument = Object.hasOwn(globalThis, "document");
+  const previousConsoleLog = console.log;
+  globalThis.document = {
+    getElementById() {
+      return null;
+    }
+  };
+  console.log = () => {};
+  let exports;
+  try {
+    exports = require(resolvedEntry);
+  } finally {
+    console.log = previousConsoleLog;
+    if (hadDocument) {
+      globalThis.document = previousDocument;
+    } else {
+      delete globalThis.document;
+    }
+  }
   const checksum = exports?.checksum ?? exports?.default?.checksum;
 
   if (checksum !== expectedChecksum) {

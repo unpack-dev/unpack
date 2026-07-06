@@ -85,7 +85,7 @@ A performance comparison that runs the same benchmark fixture through Unpack and
 _Avoid_: Compatibility benchmark, conformance benchmark, release gate
 
 **Benchmark Fixture**:
-A generated application module graph constrained to JavaScript features the compared bundlers are expected to compile. It exists to produce comparable bundle work, not to model a real application.
+A generated or locally materialized application module graph constrained to JavaScript features the compared bundlers are expected to compile. It exists to produce comparable bundle work, not to model a real application.
 _Avoid_: Sample app, real-world app, compatibility fixture
 
 **Cold Build Measurement**:

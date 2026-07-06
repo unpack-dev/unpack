@@ -14,8 +14,8 @@ on:
         required: false
 
 env:
-  DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro
-  TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,turbopack
+  DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel
+  TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel,turbopack
   TURBOPACK_NEXT_COMMIT: a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc
 
 jobs:

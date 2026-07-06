@@ -220,6 +220,64 @@ export const adapters = {
     }
   },
 
+  parcel: {
+    name: "parcel",
+    versionSource: () => `parcel@${packageVersion("parcel")}`,
+    async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
+      const parcelRequire = createParcelRequire();
+      const { default: Parcel } = parcelRequire("@parcel/core");
+      const currentCwd = process.cwd();
+      const currentExecArgv = process.execArgv;
+
+      try {
+        process.chdir(fixture.context);
+        // Parcel forwards process.execArgv to worker threads. Node's test runner can
+        // include flags that Worker rejects, so keep the benchmark invocation clean.
+        process.execArgv = [];
+        const bundler = new Parcel({
+          entries: [fixture.entry],
+          projectRoot: fixture.context,
+          defaultConfig: parcelRequire.resolve("@parcel/config-default"),
+          mode: "production",
+          shouldPatchConsole: false,
+          shouldDisableCache: !persistentCache,
+          shouldAutoInstall: false,
+          shouldContentHash: false,
+          cacheDir,
+          logLevel: "none",
+          defaultTargetOptions: {
+            shouldOptimize: false,
+            shouldScopeHoist: false,
+            sourceMaps: false,
+            distDir: outputDir
+          },
+          targets: {
+            main: {
+              distDir: outputDir,
+              distEntry: "main.js",
+              context: "node",
+              outputFormat: "commonjs",
+              includeNodeModules: true,
+              optimize: false,
+              scopeHoist: false,
+              sourceMap: false,
+              engines: {
+                node: ">=16"
+              }
+            }
+          }
+        });
+
+        await bundler.run();
+      } finally {
+        process.execArgv = currentExecArgv;
+        process.chdir(currentCwd);
+      }
+
+      return { entryFile: join(outputDir, "main.js") };
+    }
+  },
+
   turbopack: {
     name: "turbopack",
     outputDir: ({ fixture }) => join(fixture.context, "dist"),
@@ -448,6 +506,11 @@ function resolveMetroRuntimeRoot() {
   return dirname(
     require.resolve("metro-runtime/package.json", { paths: [metroRoot] })
   );
+}
+
+function createParcelRequire() {
+  const parcelRoot = dirname(require.resolve("parcel/package.json"));
+  return createRequire(`${parcelRoot}/package.json`);
 }
 
 function configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly, options }) {

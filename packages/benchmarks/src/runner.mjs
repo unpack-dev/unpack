@@ -13,6 +13,7 @@ export const DEFAULT_BUNDLERS = [
   "rspack",
   "rolldown",
   "metro",
+  "parcel",
   "turbopack"
 ];
 

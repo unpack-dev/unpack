@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
 import { dirname, join, resolve } from "node:path";
@@ -215,6 +215,73 @@ export const adapters = {
         sourceMap: false,
         platform: "web"
       });
+
+      return { entryFile };
+    }
+  },
+
+  parcel: {
+    name: "parcel",
+    versionSource: () => `parcel@${packageVersion("parcel")}`,
+    async build({
+      fixture,
+      outputDir,
+      cacheDir,
+      persistentCache = true,
+      cacheReadonly = false
+    }) {
+      const parcelRequire = createParcelRequire();
+      const { default: Parcel } = parcelRequire("@parcel/core");
+      const currentCwd = process.cwd();
+      const currentExecArgv = process.execArgv;
+      const entryFile = join(outputDir, "main.js");
+
+      try {
+        await rm(entryFile, { force: true });
+        process.chdir(fixture.context);
+        // Parcel forwards process.execArgv to worker threads. Node's test runner can
+        // include flags that Worker rejects, so keep the benchmark invocation clean.
+        process.execArgv = [];
+        const bundler = new Parcel({
+          entries: [fixture.entry],
+          projectRoot: fixture.context,
+          defaultConfig: parcelRequire.resolve("@parcel/config-default"),
+          mode: "production",
+          shouldPatchConsole: false,
+          shouldDisableCache: !persistentCache || cacheReadonly,
+          shouldAutoInstall: false,
+          shouldContentHash: false,
+          cacheDir,
+          logLevel: "none",
+          defaultTargetOptions: {
+            shouldOptimize: false,
+            shouldScopeHoist: true,
+            sourceMaps: false,
+            distDir: outputDir
+          },
+          targets: {
+            main: {
+              distDir: outputDir,
+              distEntry: "main.js",
+              context: "node",
+              outputFormat: "commonjs",
+              isLibrary: true,
+              includeNodeModules: true,
+              optimize: false,
+              scopeHoist: true,
+              sourceMap: false,
+              engines: {
+                node: ">=16"
+              }
+            }
+          }
+        });
+
+        await bundler.run();
+      } finally {
+        process.execArgv = currentExecArgv;
+        process.chdir(currentCwd);
+      }
 
       return { entryFile };
     }
@@ -448,6 +515,11 @@ function resolveMetroRuntimeRoot() {
   return dirname(
     require.resolve("metro-runtime/package.json", { paths: [metroRoot] })
   );
+}
+
+function createParcelRequire() {
+  const parcelRoot = dirname(require.resolve("parcel/package.json"));
+  return createRequire(`${parcelRoot}/package.json`);
 }
 
 function configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly, options }) {

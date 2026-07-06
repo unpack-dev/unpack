@@ -1,6 +1,6 @@
 # Cross-Bundler Benchmark
 
-The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack on the `large` Benchmark Fixture. The fixture is derived from webpack's `benchmark/cases/all` workload and generated locally so benchmark runs do not need network access. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
+The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack on the `large` and `loader` Benchmark Fixtures. The `large` fixture is derived from webpack's `benchmark/cases/all` workload and generated locally so benchmark runs do not need network access. The `loader` fixture adds a webpack-compatible loader pipeline comparison; adapters without webpack loader support report `unsupported`. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
 
 ## Local Run
 
@@ -13,7 +13,7 @@ pnpm benchmark:bundlers -- --workspace .benchmark-work/local
 To run a local subset of bundlers:
 
 ```sh
-pnpm --filter @unpack-js/benchmarks bench -- --fixtures large --bundlers unpack,webpack,rspack,rolldown,metro,parcel
+pnpm --filter @unpack-js/benchmarks bench -- --fixtures large,loader --bundlers unpack,webpack,rspack,rolldown,metro,parcel
 ```
 
 The cross-bundler benchmark prints Unpack internal tracing details to stderr for
@@ -48,7 +48,7 @@ The runner emits a Markdown summary and can write the raw JSON report with `--ou
 Important fields:
 
 - `cold_build_ms`: build time after clearing benchmark-owned output and persistent cache state.
-- `warm_build_ms`: build time after a cold build in the same job, preserving benchmark-owned persistent cache state, modifying the fixture checksum marker, and verifying the updated bundle checksum.
+- `warm_build_ms`: build time after a cold build in the same job, preserving benchmark-owned persistent cache state, modifying the fixture checksum marker or one loader input file, and verifying the updated bundle checksum.
 - `no_cache_build_ms`: build time for an additional clean build with persistent cache disabled. Bundlers without a persistent-cache option run this as a separate clean one-shot build.
 - `output_bytes`: bytes emitted under the benchmark output path, excluding runner metadata.
 - `version_source`: the npm package version or fixed source commit used for the bundler.
@@ -58,7 +58,7 @@ Runtime verification is separate from build timing. A Bundle that builds but doe
 
 ## CI
 
-The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. Automatic CI runs compare Unpack with webpack, Rspack, Rolldown, Metro, and Parcel; they skip the fixed Next.js checkout and Turbopack build by default. To include Turbopack, run the workflow manually with the `include_turbopack` input enabled. The workflow writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, and raw timing log as artifacts.
+The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. Automatic CI runs compare Unpack with webpack, Rspack, Rolldown, Metro, and Parcel across the `large` and `loader` fixtures; they skip the fixed Next.js checkout and Turbopack build by default. To include Turbopack, run the workflow manually with the `include_turbopack` input enabled. The workflow writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, and raw timing log as artifacts.
 
 The workflow builds the Unpack native addon with `UNPACK_NATIVE_PROFILE=release` so benchmark results compare optimized native builds.
 

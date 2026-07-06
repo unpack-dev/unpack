@@ -187,6 +187,57 @@ test("parcel adapter builds a verified benchmark fixture", async () => {
   }
 });
 
+test("webpack-compatible adapters build the loader benchmark fixture", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const report = await runBenchmark({
+      workspaceDir: workspace,
+      fixtures: ["loader"],
+      bundlers: ["webpack", "rspack"],
+      adapters: {
+        webpack: adapters.webpack,
+        rspack: adapters.rspack
+      }
+    });
+
+    assert.equal(report.results.length, 2);
+    for (const result of report.results) {
+      assert.equal(result.fixture, "loader");
+      assert.equal(result.status, "success");
+      assert.equal(result.cold_status, "success");
+      assert.equal(result.warm_status, "success");
+      assert.equal(result.no_cache_status, "success");
+      assert.equal(result.verify_status, "success");
+    }
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("non-loader adapters mark the loader benchmark fixture unsupported", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const report = await runBenchmark({
+      workspaceDir: workspace,
+      fixtures: ["loader"],
+      bundlers: ["metro"],
+      adapters: {
+        metro: adapters.metro
+      }
+    });
+
+    assert.equal(report.results[0].fixture, "loader");
+    assert.equal(report.results[0].bundler, "metro");
+    assert.equal(report.results[0].status, "unsupported");
+    assert.equal(report.results[0].cold_build_ms, null);
+    assert.match(report.results[0].error, /webpack loader benchmark fixture/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("CLI accepts pnpm-style -- separator, tracing option, and writes JSON output", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
   const outputJson = join(workspace, "results.json");

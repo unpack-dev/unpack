@@ -21,7 +21,7 @@ export const DEFAULT_BUNDLERS = [
   "turbopack"
 ];
 
-export const DEFAULT_FIXTURES = ["large"];
+export const DEFAULT_FIXTURES = ["large", "loader"];
 
 export const DEFAULT_TURBOPACK_COMMIT =
   "a88f25caf0070b582a8ed83b1ae9e7135d7fd3bc";
@@ -110,6 +110,16 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
       versionSource: "not_configured",
       status: "unsupported",
       message: "no adapter configured"
+    });
+  }
+
+  if (fixture.requiresWebpackLoaders && !adapter.supportsWebpackLoaders) {
+    return emptyResult({
+      fixture,
+      bundler,
+      versionSource,
+      status: "unsupported",
+      message: `${adapter.name ?? bundler} does not support the webpack loader benchmark fixture`
     });
   }
 

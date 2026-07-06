@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
 import { dirname, join, resolve } from "node:path";
@@ -12,6 +12,7 @@ const require = createRequire(import.meta.url);
 const preparedTurbopackBuilds = new Set();
 const UNPACK_INTERNAL_TRACING_ENV = "UNPACK_INTERNAL_TRACING";
 const DEFAULT_UNPACK_TRACING_FILTER = "unpack_core=trace,unpack_node=trace";
+const METRO_COMMONJS_TRANSFORMER = require.resolve("./metro-commonjs-transformer.cjs");
 
 export const adapters = {
   unpack: {
@@ -157,6 +158,65 @@ export const adapters = {
       }
 
       return { entryFile: join(outputDir, "main.js") };
+    }
+  },
+
+  metro: {
+    name: "metro",
+    versionSource: () => `metro@${packageVersion("metro")}`,
+    async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
+      const metroModule = await import("metro");
+      const metroRuntimeRoot = resolveMetroRuntimeRoot();
+      const transformCacheDir = join(cacheDir, "transform");
+      const fileMapCacheDir = join(cacheDir, "file-map");
+      const entryFile = join(outputDir, "main.js");
+
+      await mkdir(transformCacheDir, { recursive: true });
+      await mkdir(fileMapCacheDir, { recursive: true });
+
+      const config = await metroModule.loadConfig(
+        { cwd: fixture.context, verbose: false },
+        {
+          projectRoot: fixture.context,
+          watchFolders: [metroRuntimeRoot],
+          cacheStores: persistentCache
+            ? (MetroCache) => [
+                new MetroCache.FileStore({ root: transformCacheDir })
+              ]
+            : [],
+          resetCache: !persistentCache,
+          maxWorkers: 1,
+          stickyWorkers: false,
+          resolver: {
+            useWatchman: false,
+            extraNodeModules: {
+              "metro-runtime": metroRuntimeRoot
+            }
+          },
+          serializer: {
+            getRunModuleStatement: (moduleId) =>
+              `module.exports = __r(${JSON.stringify(moduleId)});`
+          },
+          transformer: {
+            babelTransformerPath: METRO_COMMONJS_TRANSFORMER,
+            enableBabelRCLookup: false,
+            enableBabelRuntime: false
+          }
+        }
+      );
+
+      config.fileMapCacheDirectory = fileMapCacheDir;
+
+      await metroModule.runBuild(config, {
+        entry: fixture.entry,
+        out: entryFile,
+        dev: false,
+        minify: false,
+        sourceMap: false,
+        platform: "web"
+      });
+
+      return { entryFile };
     }
   },
 
@@ -381,6 +441,13 @@ function packageVersionFromResolvedEntry(packageName) {
     current = dirname(current);
   }
   return "unknown";
+}
+
+function resolveMetroRuntimeRoot() {
+  const metroRoot = dirname(require.resolve("metro/package.json"));
+  return dirname(
+    require.resolve("metro-runtime/package.json", { paths: [metroRoot] })
+  );
 }
 
 function configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly, options }) {

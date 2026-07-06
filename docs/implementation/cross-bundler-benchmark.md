@@ -1,6 +1,6 @@
 # Cross-Bundler Benchmark
 
-The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, and Turbopack on generated Benchmark Fixtures. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
+The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, Metro, and Turbopack on generated Benchmark Fixtures. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
 
 ## Local Run
 
@@ -13,7 +13,7 @@ pnpm benchmark:bundlers -- --workspace .benchmark-work/local
 To run only the fast local smoke subset:
 
 ```sh
-pnpm --filter @unpack-js/benchmarks bench -- --fixtures small --bundlers unpack,webpack,rspack,rolldown
+pnpm --filter @unpack-js/benchmarks bench -- --fixtures small --bundlers unpack,webpack,rspack,rolldown,metro
 ```
 
 The cross-bundler benchmark prints Unpack internal tracing details to stderr for
@@ -58,7 +58,7 @@ Runtime verification is separate from build timing. A Bundle that builds but doe
 
 ## CI
 
-The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. Automatic CI runs compare Unpack with webpack, Rspack, and Rolldown; they skip the fixed Next.js checkout and Turbopack build by default. To include Turbopack, run the workflow manually with the `include_turbopack` input enabled. The workflow writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, and raw timing log as artifacts.
+The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. Automatic CI runs compare Unpack with webpack, Rspack, Rolldown, and Metro; they skip the fixed Next.js checkout and Turbopack build by default. To include Turbopack, run the workflow manually with the `include_turbopack` input enabled. The workflow writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, and raw timing log as artifacts.
 
 The workflow builds the Unpack native addon with `UNPACK_NATIVE_PROFILE=release` so benchmark results compare optimized native builds.
 

@@ -137,6 +137,31 @@ test("runner reports unsupported adapters explicitly", async () => {
   }
 });
 
+test("metro adapter builds a verified benchmark fixture", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const report = await runBenchmark({
+      workspaceDir: workspace,
+      fixtures: ["small"],
+      bundlers: ["metro"],
+      adapters: {
+        metro: adapters.metro
+      }
+    });
+
+    assert.equal(report.results[0].bundler, "metro");
+    assert.equal(report.results[0].status, "success");
+    assert.equal(report.results[0].cold_status, "success");
+    assert.equal(report.results[0].warm_status, "success");
+    assert.equal(report.results[0].no_cache_status, "success");
+    assert.equal(report.results[0].verify_status, "success");
+    assert.match(report.results[0].version_source, /^metro@/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("CLI accepts pnpm-style -- separator, tracing option, and writes JSON output", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
   const outputJson = join(workspace, "results.json");

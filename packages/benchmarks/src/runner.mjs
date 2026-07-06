@@ -16,6 +16,7 @@ export const DEFAULT_BUNDLERS = [
   "webpack",
   "rspack",
   "rolldown",
+  "metro",
   "turbopack"
 ];
 

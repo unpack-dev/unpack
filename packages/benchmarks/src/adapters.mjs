@@ -141,7 +141,8 @@ export const adapters = {
       const { rolldown } = await import("rolldown");
       const bundle = await rolldown({
         input: resolve(fixture.context, fixture.entry),
-        treeshake: true
+        logLevel: "silent",
+        treeshake: false
       });
 
       try {

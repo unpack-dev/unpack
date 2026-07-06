@@ -73,12 +73,12 @@ export function toTurbopackTraceMarkdown(rows, options = {}) {
   ];
 
   for (const row of rows) {
-    const linkPath = linkBaseDir ? relative(linkBaseDir, row.path) : row.relativePath;
+    const tracePath = linkBaseDir ? relative(linkBaseDir, row.path) : row.relativePath;
     lines.push(
       [
         row.fixture,
         row.phase,
-        `[${escapeMarkdown(row.relativePath)}](${encodePath(linkPath)})`,
+        formatMarkdownCode(toHrefPath(tracePath)),
         formatBytes(row.bytes)
       ].join(" | ").replace(/^/, "| ").replace(/$/, " |")
     );
@@ -276,15 +276,8 @@ async function walk(rootDir) {
   return paths;
 }
 
-function escapeMarkdown(value) {
-  return String(value)
-    .replaceAll("\\", "\\\\")
-    .replaceAll("[", "\\[")
-    .replaceAll("]", "\\]");
-}
-
-function encodePath(value) {
-  return String(value).split(sep).map(encodeURIComponent).join("/");
+function formatMarkdownCode(value) {
+  return `\`${String(value).replaceAll("`", "\\`").replaceAll("|", "\\|")}\``;
 }
 
 function toHrefPath(value) {

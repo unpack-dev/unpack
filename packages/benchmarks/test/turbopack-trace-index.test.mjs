@@ -35,8 +35,9 @@ test("turbopack trace index lists traces by fixture and build phase", async () =
     assert.match(markdown, /## Turbopack Trace Files/);
     assert.match(
       markdown,
-      /\| large \| cold \| \[large\/cold\/trace\.log\]\(turbopack-traces\/large\/cold\/trace\.log\) \| 4 B \|/
+      /\| large \| cold \| `turbopack-traces\/large\/cold\/trace\.log` \| 4 B \|/
     );
+    assert.doesNotMatch(markdown, /\]\(turbopack-traces\/large\/cold\/trace\.log\)/);
 
     const html = toTurbopackTraceHtml(rows, {
       rootDir: traceDir,

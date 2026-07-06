@@ -296,6 +296,7 @@ export const adapters = {
 
   turbopack: {
     name: "turbopack",
+    supportsLoaderFixture: true,
     outputDir: ({ fixture }) => join(fixture.context, "dist"),
     versionSource: ({ options }) =>
       `vercel/next.js@${options.turbopackCommit ?? DEFAULT_TURBOPACK_COMMIT}+benchmark-cache-flush`,
@@ -328,11 +329,11 @@ export const adapters = {
       preparedTurbopackBuilds.add(prepareKey);
     },
     async build({ fixture, cacheDir, persistentCache = true, options }) {
-      assertNoWebpackLoaderFixture(fixture, "Turbopack");
       const repo = options.turbopackRepo;
       if (!repo) {
         throw unsupported("Turbopack requires --turbopack-repo pointing at a fixed Next.js checkout");
       }
+      await materializeTurbopackLoaderFixture(fixture);
 
       const profile = options.turbopackProfile ?? "release";
       const binary = join(
@@ -461,7 +462,40 @@ function assertNoWebpackLoaderFixture(fixture, bundler) {
     return;
   }
 
-  throw unsupported(`${bundler} does not support the webpack loader benchmark fixture`);
+  throw unsupported(`${bundler} does not support the loader benchmark fixture`);
+}
+
+async function materializeTurbopackLoaderFixture(fixture) {
+  if (!fixture.requiresWebpackLoaders) {
+    return;
+  }
+
+  const entryPath = resolve(fixture.context, fixture.entry);
+  const entrySource = await readFile(entryPath, "utf8");
+  const rewrittenEntrySource = entrySource.replace(
+    /(\.\/loader-data\/item\d+\.benchdata)(?=")/g,
+    "$1.js"
+  );
+  if (rewrittenEntrySource !== entrySource) {
+    await writeFile(entryPath, rewrittenEntrySource, "utf8");
+  }
+
+  for (let index = 0; index < fixture.loaderModuleCount; index += 1) {
+    const dataPath = join(fixture.context, `src/loader-data/item${index}.benchdata`);
+    const value = Number.parseInt((await readFile(dataPath, "utf8")).trim(), 10);
+    if (!Number.isFinite(value)) {
+      throw new Error(`benchmark loader expected a numeric payload in ${dataPath}`);
+    }
+    await writeFile(
+      `${dataPath}.js`,
+      [
+        `const value = ${value};`,
+        "export default value;",
+        "export { value as loadedValue };"
+      ].join("\n") + "\n",
+      "utf8"
+    );
+  }
 }
 
 function runUnpackCompiler(compiler) {

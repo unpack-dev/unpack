@@ -260,7 +260,7 @@ test("non-loader adapters mark the loader benchmark fixture unsupported", async 
     assert.equal(report.results[0].bundler, "metro");
     assert.equal(report.results[0].status, "unsupported");
     assert.equal(report.results[0].cold_build_ms, null);
-    assert.match(report.results[0].error, /webpack loader benchmark fixture/);
+    assert.match(report.results[0].error, /loader benchmark fixture/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -335,6 +335,65 @@ test("turbopack build enables persistent cache for warm measurements", async () 
     assert.ok(args.includes("--persistent-caching"));
     assert.equal(args[args.indexOf("--cache-dir") + 1], cacheDir);
     assert.equal(args.at(-1), "./src/index.js");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("turbopack adapter materializes loader fixture inputs as JavaScript modules", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const repo = join(workspace, "next.js");
+    const binary = join(repo, "target", "release", "turbopack-cli");
+    const argsLog = join(repo, "turbopack-args.txt");
+    const fixtureContext = join(workspace, "fixture");
+    const cacheDir = join(workspace, "cache");
+
+    await mkdir(join(repo, "target", "release"), { recursive: true });
+    await mkdir(join(fixtureContext, "src", "loader-data"), { recursive: true });
+    await writeFile(
+      binary,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsLog}"\n`,
+      "utf8"
+    );
+    await chmod(binary, 0o755);
+    await writeFile(
+      join(fixtureContext, "src", "index.js"),
+      [
+        'import value0 from "./loader-data/item0.benchdata";',
+        'import value1 from "./loader-data/item1.benchdata";',
+        "export const checksum = value0 + value1;"
+      ].join("\n") + "\n",
+      "utf8"
+    );
+    await writeFile(join(fixtureContext, "src", "loader-data", "item0.benchdata"), "1\n");
+    await writeFile(join(fixtureContext, "src", "loader-data", "item1.benchdata"), "2\n");
+
+    await adapters.turbopack.build({
+      fixture: {
+        context: fixtureContext,
+        entry: "./src/index.js",
+        loaderModuleCount: 2,
+        requiresWebpackLoaders: true
+      },
+      cacheDir,
+      options: {
+        turbopackRepo: repo,
+        turbopackProfile: "release"
+      }
+    });
+
+    const entry = await readFile(join(fixtureContext, "src", "index.js"), "utf8");
+    assert.match(entry, /\.\/loader-data\/item0\.benchdata\.js/);
+    assert.doesNotMatch(entry, /\.\/loader-data\/item0\.benchdata"/);
+
+    const materialized = await readFile(
+      join(fixtureContext, "src", "loader-data", "item0.benchdata.js"),
+      "utf8"
+    );
+    assert.match(materialized, /const value = 1;/);
+    assert.match(materialized, /export default value;/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

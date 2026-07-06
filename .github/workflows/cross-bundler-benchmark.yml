@@ -84,6 +84,7 @@ jobs:
 
           pnpm --filter @unpack-js/benchmarks bench -- \
             --workspace .benchmark-work/ci \
+            --fixtures large \
             --output-json .benchmark-work/ci/results.json \
             --summary-md .benchmark-work/ci/summary.md \
             --bundlers "$benchmark_bundlers" \

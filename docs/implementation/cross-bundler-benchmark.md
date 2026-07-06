@@ -1,6 +1,6 @@
 # Cross-Bundler Benchmark
 
-The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack on generated Benchmark Fixtures. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
+The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack on the `large` Benchmark Fixture. The fixture is derived from webpack's `benchmark/cases/all` workload and generated locally so benchmark runs do not need network access. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
 
 ## Local Run
 
@@ -10,10 +10,10 @@ Build the Unpack JavaScript API and run the benchmark:
 pnpm benchmark:bundlers -- --workspace .benchmark-work/local
 ```
 
-To run only the fast local smoke subset:
+To run a local subset of bundlers:
 
 ```sh
-pnpm --filter @unpack-js/benchmarks bench -- --fixtures small --bundlers unpack,webpack,rspack,rolldown,metro,parcel
+pnpm --filter @unpack-js/benchmarks bench -- --fixtures large --bundlers unpack,webpack,rspack,rolldown,metro,parcel
 ```
 
 The cross-bundler benchmark prints Unpack internal tracing details to stderr for
@@ -48,7 +48,7 @@ The runner emits a Markdown summary and can write the raw JSON report with `--ou
 Important fields:
 
 - `cold_build_ms`: build time after clearing benchmark-owned output and persistent cache state.
-- `warm_build_ms`: build time after a cold build in the same job, preserving benchmark-owned persistent cache state, modifying one generated fixture module, and verifying the updated bundle checksum.
+- `warm_build_ms`: build time after a cold build in the same job, preserving benchmark-owned persistent cache state, modifying the fixture checksum marker, and verifying the updated bundle checksum.
 - `no_cache_build_ms`: build time for an additional clean build with persistent cache disabled. Bundlers without a persistent-cache option run this as a separate clean one-shot build.
 - `output_bytes`: bytes emitted under the benchmark output path, excluding runner metadata.
 - `version_source`: the npm package version or fixed source commit used for the bundler.

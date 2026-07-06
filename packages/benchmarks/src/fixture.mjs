@@ -1,8 +1,6 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-export const WARM_BUILD_CHECKSUM_DELTA = 2000;
-
 const WEBPACK_ALL_COMMIT = "d3a1ca290b4b887757a45901288ea30f86b2f842";
 const LARGE_BASE_CHECKSUM = 100000;
 const LOADER_MODULE_COUNT = 300;
@@ -10,17 +8,21 @@ const THREE_COPY_COUNT = 10;
 const THREE_PARTS_PER_COPY = 20;
 const ROME_MODULE_COUNT = 80;
 
+export const WARM_BUILD_GRAPH_COPY = THREE_COPY_COUNT;
+export const WARM_BUILD_CHECKSUM_DELTA = -copyChecksum(WARM_BUILD_GRAPH_COPY);
+
 export const FIXTURE_SHAPES = {
   large: {
     name: "large",
     kind: "webpack-all",
-    expectedChecksum: LARGE_BASE_CHECKSUM
+    expectedChecksum: largeExpectedChecksum()
   },
   loader: {
     name: "loader",
     kind: "loader",
     moduleCount: LOADER_MODULE_COUNT,
-    expectedChecksum: LARGE_BASE_CHECKSUM + loaderExpectedChecksum(LOADER_MODULE_COUNT)
+    expectedChecksum:
+      largeExpectedChecksum() + loaderExpectedChecksum(LOADER_MODULE_COUNT)
   }
 };
 
@@ -177,6 +179,8 @@ export async function createBenchmarkFixture(rootDir, shape) {
     context,
     entry: "./src/index.js",
     expectedChecksum: shape.expectedChecksum,
+    fixtureKind: shape.kind,
+    loaderModuleCount: shape.moduleCount ?? 0,
     requiresWebpackLoaders: shape.kind === "loader",
     warmBuildMutationApplied: false
   };
@@ -188,17 +192,16 @@ export async function applyWarmBuildMutation(fixture) {
   }
 
   fixture.expectedChecksum += WARM_BUILD_CHECKSUM_DELTA;
-  if (fixture.requiresWebpackLoaders) {
-    await writeSource(
-      join(fixture.context, "src/loader-data/item0.benchdata"),
-      `${1 + WARM_BUILD_CHECKSUM_DELTA}\n`
-    );
-  } else {
-    await writeSource(
-      join(fixture.context, "src/__benchmark_checksum.js"),
-      checksumSource(fixture.expectedChecksum)
-    );
-  }
+  await writeSource(
+    join(fixture.context, "src/index.js"),
+    webpackAllEntrySource(
+      {
+        kind: fixture.fixtureKind,
+        moduleCount: fixture.loaderModuleCount
+      },
+      { excludedCopy: WARM_BUILD_GRAPH_COPY }
+    )
+  );
   fixture.warmBuildMutationApplied = true;
   return fixture;
 }
@@ -370,12 +373,22 @@ async function writeRomeTree(context) {
   );
 }
 
-function webpackAllEntrySource(shape) {
+function webpackAllEntrySource(shape, { excludedCopy } = {}) {
   const copyImports = [];
+  const copyChecksumValues = [];
   for (let copy = 1; copy <= THREE_COPY_COUNT; copy += 1) {
+    if (copy === excludedCopy) {
+      copyImports.push(`// warm-build graph mutation excludes copy${copy}.`);
+      copyImports.push(`// import * as copy${copy} from "./copy${copy}/Three.js";`);
+      copyImports.push(`// export { copy${copy} };`);
+      continue;
+    }
+
     copyImports.push(`import * as copy${copy} from "./copy${copy}/Three.js";`);
     copyImports.push(`export { copy${copy} };`);
+    copyChecksumValues.push(`copy${copy}.threeChecksum`);
   }
+  const copyChecksumSource = `const copyChecksum = ${copyChecksumValues.join(" + ")};`;
 
   return `// Based on webpack/benchmark cases/all/src/index.js at ${WEBPACK_ALL_COMMIT}.
 // The benchmark fixture vendors deterministic local package/setup stubs so it can
@@ -457,8 +470,9 @@ import "./rome.ts";
 import { benchmarkChecksum } from "./__benchmark_checksum.js";
 ${loaderEntryImports(shape)}
 
+${copyChecksumSource}
 ${loaderChecksumSource(shape)}
-export const checksum = benchmarkChecksum + loaderChecksum;
+export const checksum = benchmarkChecksum + copyChecksum + loaderChecksum;
 export default { checksum };
 
 console.log("Hello World", checksum);
@@ -625,6 +639,22 @@ function checksumSource(checksum) {
 
 function loaderExpectedChecksum(moduleCount) {
   return (moduleCount * (moduleCount + 1)) / 2;
+}
+
+function largeExpectedChecksum() {
+  let total = LARGE_BASE_CHECKSUM;
+  for (let copy = 1; copy <= THREE_COPY_COUNT; copy += 1) {
+    total += copyChecksum(copy);
+  }
+  return total;
+}
+
+function copyChecksum(copy) {
+  let total = copy;
+  for (let part = 0; part < THREE_PARTS_PER_COPY; part += 1) {
+    total += copy * 1000 + part;
+  }
+  return total;
 }
 
 function tsconfigSource() {

@@ -50,7 +50,7 @@ The runner emits a Markdown summary and can write the raw JSON report with `--ou
 Important fields:
 
 - `cold_build_ms`: build time after clearing benchmark-owned output and persistent cache state.
-- `warm_build_ms`: build time after a cold build in the same job, preserving benchmark-owned persistent cache state, modifying the fixture checksum marker or one loader input file, and verifying the updated bundle checksum.
+- `warm_build_ms`: build time after a cold build in the same job, preserving benchmark-owned persistent cache state, rewriting the fixture entry to comment out one generated module import/export, and verifying the updated bundle checksum.
 - `no_cache_build_ms`: build time for an additional clean build with persistent cache disabled. Bundlers without a persistent-cache option run this as a separate clean one-shot build.
 - `output_bytes`: bytes emitted under the benchmark output path, excluding runner metadata.
 - `version_source`: the npm package version or fixed source commit used for the bundler.

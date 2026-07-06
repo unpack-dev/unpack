@@ -10,12 +10,12 @@ on:
       include_turbopack:
         description: Include Turbopack in the benchmark run
         type: boolean
-        default: false
+        default: true
         required: false
 
 env:
-  DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel
-  TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel,turbopack
+  DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel,turbopack
+  NO_TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel
   TURBOPACK_CLI_RELEASE_URL: https://github.com/hardfist/bundler-diff/releases/download/turbopack-cli-main/turbopack-cli-linux-x64.tar.gz
 
 jobs:
@@ -56,7 +56,7 @@ jobs:
         run: pnpm --filter @unpack-js/core build
 
       - name: Download Turbopack CLI release
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_turbopack }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.include_turbopack }}
         run: |
           set -euo pipefail
           mkdir -p .benchmark-tools/turbopack-cli
@@ -69,14 +69,16 @@ jobs:
         id: benchmark
         continue-on-error: true
         env:
-          INCLUDE_TURBOPACK: ${{ github.event_name == 'workflow_dispatch' && inputs.include_turbopack }}
+          INCLUDE_TURBOPACK: ${{ github.event_name != 'workflow_dispatch' || inputs.include_turbopack }}
         run: |
           mkdir -p .benchmark-work/ci
 
           benchmark_bundlers="$DEFAULT_BENCHMARK_BUNDLERS"
           turbopack_args=()
+          if [ "$INCLUDE_TURBOPACK" != "true" ]; then
+            benchmark_bundlers="$NO_TURBOPACK_BENCHMARK_BUNDLERS"
+          fi
           if [ "$INCLUDE_TURBOPACK" = "true" ]; then
-            benchmark_bundlers="$TURBOPACK_BENCHMARK_BUNDLERS"
             turbopack_commit="turbopack-cli-main"
             if [ -f .benchmark-tools/turbopack-cli/source-commit.txt ]; then
               turbopack_commit="$(cat .benchmark-tools/turbopack-cli/source-commit.txt)"

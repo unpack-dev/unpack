@@ -23,7 +23,9 @@ their close-time busy/idle durations. Pass `--no-unpack-tracing` for quiet
 benchmark logs, or `--unpack-tracing <filter>` to use a custom Rust
 `tracing-subscriber` filter.
 
-Turbopack requires a fixed Next.js checkout:
+Turbopack can run against the prebuilt `turbopack-cli` release produced by
+`hardfist/bundler-diff`, or against a fixed Next.js checkout for local
+source-level comparisons:
 
 ```sh
 git init .benchmark-tools/next.js
@@ -58,7 +60,7 @@ Runtime verification is separate from build timing. A Bundle that builds but doe
 
 ## CI
 
-The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. Automatic CI runs compare Unpack with webpack, Rspack, Rolldown, Metro, and Parcel across the `large` and `loader` fixtures; they skip the fixed Next.js checkout and Turbopack build by default. To include Turbopack, run the workflow manually with the `include_turbopack` input enabled. The workflow writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, and raw timing log as artifacts.
+The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. CI runs compare Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack across the `large` and `loader` fixtures by default. The workflow downloads the `turbopack-cli-main` release artifact from `hardfist/bundler-diff` and passes it to the benchmark runner with `--turbopack-binary`; manual dispatch can set `include_turbopack` to `false` when a non-Turbopack run is needed. The workflow writes the table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, and raw timing log as artifacts.
 
 The workflow builds the Unpack native addon with `UNPACK_NATIVE_PROFILE=release` so benchmark results compare optimized native builds.
 

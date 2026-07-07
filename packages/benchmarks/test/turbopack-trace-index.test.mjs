@@ -30,9 +30,14 @@ test("turbopack trace index lists traces by fixture and build phase", async () =
 
     const markdown = toTurbopackTraceMarkdown(rows, {
       rootDir: traceDir,
-      linkBaseDir: workspace
+      linkBaseDir: workspace,
+      artifactUrl: "https://github.com/unpack-dev/unpack/actions/runs/123#artifacts"
     });
     assert.match(markdown, /## Turbopack Trace Files/);
+    assert.match(
+      markdown,
+      /\[cross-bundler-benchmark-results\]\(https:\/\/github\.com\/unpack-dev\/unpack\/actions\/runs\/123#artifacts\)/
+    );
     assert.match(
       markdown,
       /\| large \| cold \| `turbopack-traces\/large\/cold\/trace\.log` \| 4 B \|/

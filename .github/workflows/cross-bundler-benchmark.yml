@@ -112,12 +112,15 @@ jobs:
 
       - name: Format Turbopack trace index
         if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           mkdir -p .benchmark-work/ci/turbopack-traces
           node packages/benchmarks/src/turbopack-trace-index.mjs \
             .benchmark-work/ci/turbopack-traces \
             .benchmark-work/ci/turbopack-traces.md \
-            --html .benchmark-work/ci/turbopack-traces/index.html
+            --html .benchmark-work/ci/turbopack-traces/index.html \
+            --artifact-url "$RUN_URL#artifacts"
 
       - name: Publish benchmark summary
         if: always()

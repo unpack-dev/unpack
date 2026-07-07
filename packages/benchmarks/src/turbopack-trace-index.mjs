@@ -63,10 +63,15 @@ export function toTurbopackTraceMarkdown(rows, options = {}) {
   }
 
   const linkBaseDir = options.linkBaseDir ?? options.rootDir;
+  const artifactSentence = options.artifactUrl
+    ? `Download [cross-bundler-benchmark-results](${escapeMarkdownUrl(options.artifactUrl)}) from the workflow run, then open \`turbopack-traces/index.html\` or use one of the artifact-local trace paths below.`
+    : "Raw Turbopack trace files are uploaded in the workflow artifact. After downloading the artifact, open `turbopack-traces/index.html` or use one of the artifact-local trace paths below.";
   const lines = [
     "## Turbopack Trace Files",
     "",
-    "Raw Turbopack trace files are uploaded in the workflow artifact. After downloading the artifact, start a trace server with `pnpm next internal trace <trace.log>` or `cargo run --bin turbo-trace-server --release -- <trace.log>`, then open https://trace.nextjs.org/.",
+    artifactSentence,
+    "",
+    "Start a trace server with `pnpm next internal trace <trace.log>` or `cargo run --bin turbo-trace-server --release -- <trace.log>`, then open https://trace.nextjs.org/.",
     "",
     "| fixture | build | trace file | size |",
     "| --- | --- | --- | ---: |"
@@ -280,6 +285,10 @@ function formatMarkdownCode(value) {
   return `\`${String(value).replaceAll("`", "\\`").replaceAll("|", "\\|")}\``;
 }
 
+function escapeMarkdownUrl(value) {
+  return String(value).replaceAll(")", "%29");
+}
+
 function toHrefPath(value) {
   return String(value).split(sep).join("/");
 }
@@ -296,10 +305,12 @@ function escapeAttribute(value) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const { traceDir, markdownPath, htmlPath } = parseCliArgs(process.argv.slice(2));
+  const { traceDir, markdownPath, htmlPath, artifactUrl } = parseCliArgs(
+    process.argv.slice(2)
+  );
   if (!traceDir || !markdownPath) {
     process.stderr.write(
-      "Usage: node src/turbopack-trace-index.mjs <trace-dir> <output-md> [--html <output-html>]\n"
+      "Usage: node src/turbopack-trace-index.mjs <trace-dir> <output-md> [--html <output-html>] [--artifact-url <url>]\n"
     );
     process.exit(1);
   }
@@ -310,7 +321,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     markdownPath,
     toTurbopackTraceMarkdown(rows, {
       rootDir: traceDir,
-      linkBaseDir: dirname(markdownPath)
+      linkBaseDir: dirname(markdownPath),
+      artifactUrl
     }),
     "utf8"
   );
@@ -332,7 +344,8 @@ function parseCliArgs(args) {
   const parsed = {
     traceDir: args[0],
     markdownPath: args[1],
-    htmlPath: undefined
+    htmlPath: undefined,
+    artifactUrl: undefined
   };
 
   for (let index = 2; index < args.length; index += 1) {
@@ -344,6 +357,13 @@ function parseCliArgs(args) {
           throw new Error("--html requires a value");
         }
         parsed.htmlPath = args[index];
+        break;
+      case "--artifact-url":
+        index += 1;
+        if (index >= args.length) {
+          throw new Error("--artifact-url requires a value");
+        }
+        parsed.artifactUrl = args[index];
         break;
       default:
         throw new Error(`unknown argument '${arg}'`);

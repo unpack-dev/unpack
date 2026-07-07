@@ -93,7 +93,7 @@ export function toUnpackTracingSummaryMarkdown(rows, options = {}) {
 }
 
 function parseTracingHeader(line) {
-  const match = line.match(/^\[(unpack|webpack) tracing\]/);
+  const match = line.match(/^\[(unpack|webpack|rspack) tracing\]/);
   if (!match) {
     return null;
   }
@@ -135,22 +135,42 @@ function phaseKey(name) {
   if (name === "Compiler::run" || name === "Webpack::run") {
     return "compilerRun";
   }
-  if (name.includes("Compilation::make") || name === "Webpack::make") {
+  if (name === "Rspack::run") {
+    return "compilerRun";
+  }
+  if (
+    name.includes("Compilation::make") ||
+    name === "Webpack::make" ||
+    name === "Rspack::make"
+  ) {
     return "make";
   }
   if (
     name.includes("Compilation::build_chunk_graph") ||
-    name === "Webpack::build_chunk_graph"
+    name === "Webpack::build_chunk_graph" ||
+    name === "Rspack::build_chunk_graph"
   ) {
     return "chunkGraph";
   }
-  if (name.includes("Compilation::create_assets") || name === "Webpack::create_assets") {
+  if (
+    name.includes("Compilation::create_assets") ||
+    name === "Webpack::create_assets" ||
+    name === "Rspack::create_assets"
+  ) {
     return "createAssets";
   }
-  if (name === "unpack_node::emit_assets" || name === "Webpack::emit_assets") {
+  if (
+    name === "unpack_node::emit_assets" ||
+    name === "Webpack::emit_assets" ||
+    name === "Rspack::emit_assets"
+  ) {
     return "emitAssets";
   }
-  if (name === "Compiler::flush_cache" || name === "Webpack::flush_cache") {
+  if (
+    name === "Compiler::flush_cache" ||
+    name === "Webpack::flush_cache" ||
+    name === "Rspack::flush_cache"
+  ) {
     return "flushCache";
   }
   return null;

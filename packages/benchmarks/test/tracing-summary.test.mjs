@@ -25,9 +25,15 @@ TRACE Webpack::build_chunk_graph: webpack: close time.busy=1.500ms time.idle=0ms
 TRACE Webpack::create_assets: webpack: close time.busy=2.250ms time.idle=0ms
 TRACE Webpack::emit_assets: webpack: close time.busy=3.500ms time.idle=0ms
 TRACE Webpack::flush_cache: webpack: close time.busy=4.750ms time.idle=0ms
+[rspack tracing] fixture=large phase=cold persistent_cache=on cache_readonly=off
+TRACE Rspack::make: rspack: close time.busy=8.125ms time.idle=0ms
+TRACE Rspack::run: rspack: close time.busy=13.250ms time.idle=0ms
+TRACE Rspack::create_assets: rspack: close time.busy=1.750ms time.idle=0ms
+TRACE Rspack::emit_assets: rspack: close time.busy=2.500ms time.idle=0ms
+TRACE Rspack::flush_cache: rspack: close time.busy=3.750ms time.idle=0ms
 `);
 
-  assert.equal(rows.length, 3);
+  assert.equal(rows.length, 4);
   assert.equal(rows[0].fixture, "large");
   assert.equal(rows[0].bundler, "unpack");
   assert.equal(rows[0].build, "cold");
@@ -47,12 +53,18 @@ TRACE Webpack::flush_cache: webpack: close time.busy=4.750ms time.idle=0ms
   assert.equal(rows[2].build, "cold");
   assert.equal(rows[2].compilerRun.toFixed(3), "15.250");
   assert.equal(rows[2].make.toFixed(3), "10.125");
+  assert.equal(rows[3].fixture, "large");
+  assert.equal(rows[3].bundler, "rspack");
+  assert.equal(rows[3].build, "cold");
+  assert.equal(rows[3].compilerRun.toFixed(3), "13.250");
+  assert.equal(rows[3].make.toFixed(3), "8.125");
 
   const markdown = toUnpackTracingSummaryMarkdown(rows);
   assert.match(markdown, /\\| fixture \\| bundler \\| build \\| compiler run ms \\| make ms \\|/);
   assert.match(markdown, /\\| large \\| unpack \\| cold \\| 17\\.420 \\| 15\\.050 \\| 0\\.188 \\| 1\\.464 \\| 0\\.714 \\| 3\\.657 \\|/);
   assert.match(markdown, /\\| large \\| unpack \\| warm \\| 7\\.220 \\| 5\\.860 \\|  \\|  \\|  \\|  \\|/);
   assert.match(markdown, /\\| large \\| webpack \\| cold \\| 15\\.250 \\| 10\\.125 \\| 1\\.500 \\| 2\\.250 \\| 3\\.500 \\| 4\\.750 \\|/);
+  assert.match(markdown, /\\| large \\| rspack \\| cold \\| 13\\.250 \\| 8\\.125 \\|  \\| 1\\.750 \\| 2\\.500 \\| 3\\.750 \\|/);
 });
 
 test("tracing summary can filter rows to one fixture", () => {

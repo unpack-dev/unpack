@@ -133,16 +133,13 @@ export const adapters = {
         cacheReadonly
       });
       const compiler = rspack({
-        ...webpackLikeConfig({ fixture, outputDir }),
-        cache: persistentCache
-          ? {
-              type: "persistent",
-              storage: {
-                type: "filesystem",
-                directory: cacheDir
-              }
-            }
-          : false,
+        ...createRspackBenchmarkConfig({
+          fixture,
+          outputDir,
+          cacheDir,
+          persistentCache,
+          cacheReadonly
+        }),
         plugins: [tracing.plugin]
       });
 
@@ -434,6 +431,28 @@ export const adapters = {
     }
   }
 };
+
+export function createRspackBenchmarkConfig({
+  fixture,
+  outputDir,
+  cacheDir,
+  persistentCache = true,
+  cacheReadonly = false
+}) {
+  return {
+    ...webpackLikeConfig({ fixture, outputDir }),
+    cache: persistentCache
+      ? {
+          type: "persistent",
+          storage: {
+            type: "filesystem",
+            directory: cacheDir
+          },
+          readonly: cacheReadonly
+        }
+      : false
+  };
+}
 
 export async function applyTurbopackBuildCacheFlushPatch(repo) {
   const buildSourcePath = join(

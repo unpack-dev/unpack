@@ -1,6 +1,5 @@
 use std::{
     collections::HashSet,
-    fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -49,8 +48,7 @@ impl UnpackResolver {
             .into_iter()
             .map(|path| normalize_resolver_dependency(path.as_path()))
             .collect::<HashSet<_>>();
-        let context_dependencies =
-            context_dependencies(directory, &file_dependencies, &missing_dependencies);
+        let context_dependencies = HashSet::new();
 
         Ok(ResolveResult {
             resource: ResolvedResource {
@@ -114,39 +112,36 @@ fn normalize_platform_path(path: PathBuf) -> PathBuf {
     path
 }
 
-fn context_dependencies(
-    search_directory: &Path,
-    file_dependencies: &HashSet<PathBuf>,
-    missing_dependencies: &HashSet<PathBuf>,
-) -> HashSet<PathBuf> {
-    let search_directory = fs::canonicalize(search_directory)
-        .unwrap_or_else(|_| normalize_resolver_dependency(search_directory));
-    file_dependencies
-        .iter()
-        .chain(missing_dependencies.iter())
-        .filter_map(|path| context_dependency(&search_directory, path))
-        .collect()
-}
+#[cfg(test)]
+mod tests {
+    use std::fs;
 
-fn context_dependency(search_directory: &Path, dependency: &Path) -> Option<PathBuf> {
-    if dependency
-        .file_name()
-        .is_some_and(|name| name == "node_modules")
-    {
-        return None;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn resolve_dependencies_do_not_synthesize_contexts_from_files_or_missing_paths()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let src = temp.path().join("src");
+        fs::create_dir_all(&src)?;
+        fs::write(src.join("dep.js"), "export const value = 1;")?;
+
+        let mut options = ResolveOptions::default();
+        options.extensions = vec![".js".to_string()];
+        let resolver = UnpackResolver::new(options);
+
+        let result = resolver.resolve_with_dependencies(&src, "./dep").await?;
+
+        assert!(result.resource.path.ends_with("src/dep.js"));
+        assert!(
+            result
+                .file_dependencies
+                .contains(&normalize_resolver_dependency(&src.join("dep.js")))
+        );
+        assert!(result.context_dependencies.is_empty());
+
+        Ok(())
     }
-
-    let parent = dependency.parent()?;
-    if !parent.is_dir() {
-        return None;
-    }
-
-    let parent = normalize_resolver_dependency(parent);
-    (parent.starts_with(search_directory) || has_component(&parent, "node_modules"))
-        .then_some(parent)
-}
-
-fn has_component(path: &Path, name: &str) -> bool {
-    path.components()
-        .any(|component| component.as_os_str() == name)
 }

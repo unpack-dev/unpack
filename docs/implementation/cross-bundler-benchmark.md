@@ -49,15 +49,6 @@ fixed checkout so `turbopack-cli build` explicitly stops TurboTasks before
 process exit. Turbopack build sessions use shutdown-time persistent cache
 storage, so this flushes the cold build cache for the warm measurement.
 
-To create a shareable trace index after a run:
-
-```sh
-node packages/benchmarks/src/turbopack-trace-index.mjs \
-  .benchmark-work/local/turbopack-traces \
-  .benchmark-work/local/turbopack-traces.md \
-  --html .benchmark-work/local/turbopack-traces/index.html
-```
-
 The raw traces can be viewed with the Turbopack trace viewer. Start a local
 trace server with `pnpm next internal trace <trace.log>` or
 `cargo run --bin turbo-trace-server --release -- <trace.log>`, then open
@@ -80,7 +71,7 @@ Runtime verification is separate from build timing. A Bundle that builds but doe
 
 ## CI
 
-The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. CI runs compare Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack across the `large` and `loader` fixtures by default. The workflow downloads the `turbopack-cli-main` release artifact from `hardfist/bundler-diff` and passes it to the benchmark runner with `--turbopack-binary`; manual dispatch can set `include_turbopack` to `false` when a non-Turbopack run is needed. Turbopack CI runs enable `TURBOPACK_TRACING=turbo-tasks`, copy raw trace files into `.benchmark-work/ci/turbopack-traces`, generate a Markdown and HTML trace index, and include that index in the GitHub Actions job summary and pull request timing comment. The workflow writes the benchmark table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, raw timing log, Turbopack traces, and trace index artifacts.
+The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. CI runs compare Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack across the `large` and `loader` fixtures by default. The workflow downloads the `turbopack-cli-main` release artifact from `hardfist/bundler-diff` and passes it to the benchmark runner with `--turbopack-binary`; manual dispatch can set `include_turbopack` to `false` when a non-Turbopack run is needed. Turbopack CI runs enable `TURBOPACK_TRACING=turbo-tasks`, copy raw trace files into `.benchmark-work/ci/turbopack-traces`, upload each trace log as a separate workflow artifact, and link those trace artifacts from the pull request timing comment. The workflow writes the benchmark table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, raw timing log, and Turbopack trace log artifacts.
 
 The workflow builds the Unpack native addon with `UNPACK_NATIVE_PROFILE=release` so benchmark results compare optimized native builds.
 

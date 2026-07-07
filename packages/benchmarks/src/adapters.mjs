@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
 import { dirname, join, resolve } from "node:path";
@@ -12,6 +12,8 @@ const require = createRequire(import.meta.url);
 const preparedTurbopackBuilds = new Set();
 const UNPACK_INTERNAL_TRACING_ENV = "UNPACK_INTERNAL_TRACING";
 const DEFAULT_UNPACK_TRACING_FILTER = "unpack_core=trace,unpack_node=trace";
+const TURBOPACK_TRACING_ENV = "TURBOPACK_TRACING";
+const DEFAULT_TURBOPACK_TRACING_FILTER = "turbo-tasks";
 const METRO_COMMONJS_TRANSFORMER = require.resolve("./metro-commonjs-transformer.cjs");
 
 export const adapters = {
@@ -338,7 +340,7 @@ export const adapters = {
       });
       preparedTurbopackBuilds.add(prepareKey);
     },
-    async build({ fixture, cacheDir, persistentCache = true, options }) {
+    async build({ fixture, cacheDir, phase, persistentCache = true, options }) {
       const repo = options.turbopackRepo;
       const profile = options.turbopackProfile ?? "release";
       const binary = options.turbopackBinary
@@ -370,16 +372,45 @@ export const adapters = {
       }
       args.push(fixture.entry);
 
-      await execFile(
-        binary,
-        args,
-        {
-          cwd: repo ?? dirname(binary),
-          env: { ...process.env, CI: process.env.CI ?? "1" },
-          timeout: 10 * 60 * 1000,
-          maxBuffer: 1024 * 1024 * 20
+      const tracingFilter = turbopackTracingFilter(options);
+      const traceSourcePath = join(fixture.context, ".turbopack", "trace.log");
+      if (tracingFilter) {
+        await rm(traceSourcePath, { force: true });
+      }
+
+      const env = { ...process.env, CI: process.env.CI ?? "1" };
+      delete env[TURBOPACK_TRACING_ENV];
+      if (tracingFilter) {
+        env[TURBOPACK_TRACING_ENV] = tracingFilter;
+      }
+
+      try {
+        await execFile(
+          binary,
+          args,
+          {
+            cwd: repo ?? dirname(binary),
+            env,
+            timeout: 10 * 60 * 1000,
+            maxBuffer: 1024 * 1024 * 20
+          }
+        );
+      } finally {
+        if (tracingFilter && options.turbopackTracingDir) {
+          await archiveTurbopackTrace({
+            sourcePath: traceSourcePath,
+            targetPath: join(
+              options.turbopackTracingDir,
+              pathSegment(fixture.name ?? "fixture"),
+              pathSegment(phase ?? "build"),
+              "trace.log"
+            ),
+            fixture,
+            phase,
+            filter: tracingFilter
+          });
         }
-      );
+      }
 
       return { entryFile: join(fixture.context, "dist/index.entry.js") };
     }
@@ -725,6 +756,94 @@ function unpackTracingFilter(options) {
     return DEFAULT_UNPACK_TRACING_FILTER;
   }
   return normalized;
+}
+
+function turbopackTracingFilter(options) {
+  if (!Object.hasOwn(options ?? {}, "turbopackTracing")) {
+    return null;
+  }
+  const value = options.turbopackTracing;
+  if (value === false) {
+    return null;
+  }
+  const normalized = String(value ?? "").trim();
+  const lowered = normalized.toLowerCase();
+  if (
+    normalized === "" ||
+    normalized === "0" ||
+    lowered === "false" ||
+    lowered === "off" ||
+    lowered === "none"
+  ) {
+    return null;
+  }
+  if (normalized === "1" || lowered === "true" || lowered === "on") {
+    return DEFAULT_TURBOPACK_TRACING_FILTER;
+  }
+  return normalized;
+}
+
+async function archiveTurbopackTrace({
+  sourcePath,
+  targetPath,
+  fixture,
+  phase,
+  filter
+}) {
+  let traceStat;
+  try {
+    traceStat = await stat(sourcePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      process.stderr.write(
+        `[turbopack tracing] unable to inspect ${sourcePath}: ${errorMessage(error)}\n`
+      );
+    }
+    return;
+  }
+
+  if (!traceStat.isFile() || traceStat.size === 0) {
+    return;
+  }
+
+  try {
+    await mkdir(dirname(targetPath), { recursive: true });
+    await copyFile(sourcePath, targetPath);
+    await writeFile(
+      join(dirname(targetPath), "metadata.json"),
+      `${JSON.stringify(
+        {
+          fixture: fixture.name ?? null,
+          phase: phase ?? null,
+          filter,
+          source: sourcePath,
+          bytes: traceStat.size
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+    process.stderr.write(
+      [
+        "[turbopack tracing]",
+        `fixture=${fixture.name ?? "unknown"}`,
+        `phase=${phase ?? "unknown"}`,
+        `filter=${filter}`,
+        `file=${targetPath}`,
+        `bytes=${traceStat.size}`
+      ].join(" ") + "\n"
+    );
+  } catch (error) {
+    process.stderr.write(
+      `[turbopack tracing] unable to archive ${sourcePath}: ${errorMessage(error)}\n`
+    );
+  }
+}
+
+function pathSegment(value) {
+  const segment = String(value).replace(/[^A-Za-z0-9._-]+/g, "-");
+  return segment || "unknown";
 }
 
 function unsupported(message) {

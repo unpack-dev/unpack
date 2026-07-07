@@ -81,6 +81,15 @@ function parseArgs(args) {
       case "--turbopack-profile":
         parsed.turbopackProfile = value();
         break;
+      case "--turbopack-tracing":
+        parsed.turbopackTracing = value();
+        break;
+      case "--no-turbopack-tracing":
+        parsed.turbopackTracing = false;
+        break;
+      case "--turbopack-tracing-dir":
+        parsed.turbopackTracingDir = resolve(invocationCwd, value());
+        break;
       case "--help":
         printHelp();
         process.exit(0);
@@ -117,5 +126,9 @@ Options:
   --turbopack-binary <path>     Prebuilt turbopack-cli binary
   --turbopack-commit <sha>      Commit shown for Turbopack results
   --turbopack-profile <name>    Cargo profile for turbopack-cli (default: release)
+  --turbopack-tracing <filter>  Set TURBOPACK_TRACING for turbopack-cli (use "turbo-tasks" for detailed traces)
+  --no-turbopack-tracing        Disable Turbopack tracing even if configured by the runner
+  --turbopack-tracing-dir <path>
+                                Copy Turbopack raw trace files into this directory
 `);
 }

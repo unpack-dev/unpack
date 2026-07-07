@@ -79,7 +79,9 @@ export const adapters = {
     }) {
       const webpackModule = await import("webpack");
       const webpack = webpackModule.default ?? webpackModule;
-      const tracing = createWebpackPhaseTracing({
+      const tracing = createWebpackLikePhaseTracing({
+        bundler: "webpack",
+        spanPrefix: "Webpack",
         fixture,
         phase,
         persistentCache,
@@ -112,9 +114,24 @@ export const adapters = {
     name: "rspack",
     supportsWebpackLoaders: true,
     versionSource: () => `@rspack/core@${packageVersion("@rspack/core")}`,
-    async build({ fixture, outputDir, cacheDir, persistentCache = true }) {
+    async build({
+      fixture,
+      outputDir,
+      cacheDir,
+      phase,
+      persistentCache = true,
+      cacheReadonly = false
+    }) {
       const rspackModule = await import("@rspack/core");
       const rspack = rspackModule.rspack ?? rspackModule.default;
+      const tracing = createWebpackLikePhaseTracing({
+        bundler: "rspack",
+        spanPrefix: "Rspack",
+        fixture,
+        phase,
+        persistentCache,
+        cacheReadonly
+      });
       const compiler = rspack({
         ...webpackLikeConfig({ fixture, outputDir }),
         cache: persistentCache
@@ -125,14 +142,15 @@ export const adapters = {
                 directory: cacheDir
               }
             }
-          : false
+          : false,
+        plugins: [tracing.plugin]
       });
 
       try {
         const stats = await runWebpackCompiler(compiler);
         assertWebpackStats(stats, "Rspack");
       } finally {
-        await closeWebpackCompiler(compiler);
+        await tracing.close(compiler);
       }
 
       return { entryFile: join(outputDir, "main.js") };
@@ -654,8 +672,15 @@ function configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly
   );
 }
 
-function createWebpackPhaseTracing({ fixture, phase, persistentCache, cacheReadonly }) {
-  const pluginName = "UnpackBenchmarkWebpackPhaseTracingPlugin";
+function createWebpackLikePhaseTracing({
+  bundler,
+  spanPrefix,
+  fixture,
+  phase,
+  persistentCache,
+  cacheReadonly
+}) {
+  const pluginName = "UnpackBenchmarkWebpackLikePhaseTracingPlugin";
   const started = new Map();
   const durations = new Map();
 
@@ -677,7 +702,7 @@ function createWebpackPhaseTracing({ fixture, phase, persistentCache, cacheReado
   function print() {
     process.stderr.write(
       [
-        "[webpack tracing]",
+        `[${bundler} tracing]`,
         `fixture=${fixture.name}`,
         `phase=${phase}`,
         `persistent_cache=${persistentCache ? "on" : "off"}`,
@@ -686,37 +711,53 @@ function createWebpackPhaseTracing({ fixture, phase, persistentCache, cacheReado
     );
 
     for (const [span, duration] of [
-      ["Webpack::run", durations.get("compilerRun")],
-      ["Webpack::make", durations.get("make")],
-      ["Webpack::build_chunk_graph", durations.get("chunkGraph")],
-      ["Webpack::create_assets", durations.get("createAssets")],
-      ["Webpack::emit_assets", durations.get("emitAssets")],
-      ["Webpack::flush_cache", durations.get("flushCache")]
+      [`${spanPrefix}::run`, durations.get("compilerRun")],
+      [`${spanPrefix}::make`, durations.get("make")],
+      [`${spanPrefix}::build_chunk_graph`, durations.get("chunkGraph")],
+      [`${spanPrefix}::create_assets`, durations.get("createAssets")],
+      [`${spanPrefix}::emit_assets`, durations.get("emitAssets")],
+      [`${spanPrefix}::flush_cache`, durations.get("flushCache")]
     ]) {
       if (duration === undefined) {
         continue;
       }
       process.stderr.write(
-        `TRACE ${span}: webpack: close time.busy=${formatDurationMs(duration)} time.idle=0ms\n`
+        `TRACE ${span}: ${bundler}: close time.busy=${formatDurationMs(duration)} time.idle=0ms\n`
       );
     }
+  }
+
+  function hasHook(hooks, name) {
+    return Boolean(hooks && Object.prototype.hasOwnProperty.call(hooks, name));
+  }
+
+  function tap(hooks, name, callback) {
+    if (!hasHook(hooks, name)) {
+      return false;
+    }
+    hooks[name].tap(pluginName, callback);
+    return true;
   }
 
   return {
     plugin: {
       apply(compiler) {
-        compiler.hooks.beforeRun.tap(pluginName, () => start("compilerRun"));
-        compiler.hooks.run.tap(pluginName, () => start("compilerRun"));
-        compiler.hooks.done.tap(pluginName, () => end("compilerRun"));
-        compiler.hooks.make.tap(pluginName, () => start("make"));
-        compiler.hooks.finishMake.tap(pluginName, () => end("make"));
-        compiler.hooks.emit.tap(pluginName, () => start("emitAssets"));
-        compiler.hooks.afterEmit.tap(pluginName, () => end("emitAssets"));
-        compiler.hooks.compilation.tap(pluginName, (compilation) => {
-          compilation.hooks.beforeChunks.tap(pluginName, () => start("chunkGraph"));
-          compilation.hooks.afterChunks.tap(pluginName, () => end("chunkGraph"));
-          compilation.hooks.beforeCodeGeneration.tap(pluginName, () => start("createAssets"));
-          compilation.hooks.afterProcessAssets.tap(pluginName, () => end("createAssets"));
+        tap(compiler.hooks, "beforeRun", () => start("compilerRun"));
+        tap(compiler.hooks, "run", () => start("compilerRun"));
+        tap(compiler.hooks, "done", () => end("compilerRun"));
+        tap(compiler.hooks, "make", () => start("make"));
+        tap(compiler.hooks, "finishMake", () => end("make"));
+        tap(compiler.hooks, "emit", () => start("emitAssets"));
+        tap(compiler.hooks, "afterEmit", () => end("emitAssets"));
+        tap(compiler.hooks, "compilation", (compilation) => {
+          tap(compilation.hooks, "beforeChunks", () => start("chunkGraph"));
+          tap(compilation.hooks, "afterChunks", () => end("chunkGraph"));
+          if (hasHook(compilation.hooks, "beforeCodeGeneration")) {
+            tap(compilation.hooks, "beforeCodeGeneration", () => start("createAssets"));
+          } else {
+            tap(compilation.hooks, "processAssets", () => start("createAssets"));
+          }
+          tap(compilation.hooks, "afterProcessAssets", () => end("createAssets"));
         });
       }
     },

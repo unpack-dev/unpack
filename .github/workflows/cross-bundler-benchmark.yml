@@ -137,6 +137,15 @@ jobs:
             .benchmark-work/ci/bundler-phase-timings.md
           if-no-files-found: warn
 
+      - name: Upload Turbopack trace decoder
+        id: upload_turbopack_trace_decoder
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turbopack-trace-decoder
+          path: .benchmark-tools/turbopack-cli/trace-decoder
+          if-no-files-found: ignore
+
       - name: Upload Turbopack trace large cold
         id: upload_turbopack_trace_large_cold
         if: always()
@@ -218,6 +227,11 @@ jobs:
           {
             echo "## Turbopack Trace Artifacts"
             echo
+            decoder_url="${{ steps.upload_turbopack_trace_decoder.outputs['artifact-url'] }}"
+            if [ -n "$decoder_url" ]; then
+              echo "Trace decoder wasm and JavaScript loader: [turbopack-trace-decoder]($decoder_url)."
+              echo
+            fi
             if [ ! -s "$artifact_rows_file" ]; then
               echo "No Turbopack trace artifacts were uploaded. Check the workflow logs for setup or runner failures."
             else
@@ -253,7 +267,7 @@ jobs:
             echo
             echo "[Workflow run]($RUN_URL)"
             echo
-            echo "Raw JSON results are uploaded as the \`cross-bundler-benchmark-results\` workflow artifact. Turbopack trace logs are uploaded as separate workflow artifacts."
+            echo "Raw JSON results are uploaded as the \`cross-bundler-benchmark-results\` workflow artifact. Turbopack trace logs and decoder assets are uploaded as separate workflow artifacts."
           } > "$comment_file"
 
           comment_id="$(

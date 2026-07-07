@@ -89,6 +89,13 @@ export function toUnpackTracingSummaryMarkdown(rows, options = {}) {
     );
   }
 
+  if (rows.some((row) => row.bundler === "rspack" && row.make === undefined)) {
+    lines.push(
+      "",
+      "Rspack `make ms` is omitted because its low-overhead JavaScript hooks do not expose a webpack-comparable make phase; earlier hooks include native cache/snapshot work but materially perturb benchmark timings."
+    );
+  }
+
   return `${lines.join("\n")}\n`;
 }
 

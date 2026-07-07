@@ -127,6 +127,7 @@ export const adapters = {
       const tracing = createWebpackLikePhaseTracing({
         bundler: "rspack",
         spanPrefix: "Rspack",
+        makeStartHook: null,
         fixture,
         phase,
         persistentCache,
@@ -675,6 +676,7 @@ function configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly
 function createWebpackLikePhaseTracing({
   bundler,
   spanPrefix,
+  makeStartHook = "make",
   fixture,
   phase,
   persistentCache,
@@ -745,8 +747,10 @@ function createWebpackLikePhaseTracing({
         tap(compiler.hooks, "beforeRun", () => start("compilerRun"));
         tap(compiler.hooks, "run", () => start("compilerRun"));
         tap(compiler.hooks, "done", () => end("compilerRun"));
-        tap(compiler.hooks, "make", () => start("make"));
-        tap(compiler.hooks, "finishMake", () => end("make"));
+        if (makeStartHook) {
+          tap(compiler.hooks, makeStartHook, () => start("make"));
+          tap(compiler.hooks, "finishMake", () => end("make"));
+        }
         tap(compiler.hooks, "emit", () => start("emitAssets"));
         tap(compiler.hooks, "afterEmit", () => end("emitAssets"));
         tap(compiler.hooks, "compilation", (compilation) => {

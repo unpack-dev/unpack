@@ -6,7 +6,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { adapters, applyTurbopackBuildCacheFlushPatch } from "../src/adapters.mjs";
+import {
+  adapters,
+  applyTurbopackBuildCacheFlushPatch,
+  createRspackBenchmarkConfig
+} from "../src/adapters.mjs";
 import {
   WARM_BUILD_CHECKSUM_DELTA,
   WARM_BUILD_GRAPH_COPY
@@ -241,6 +245,28 @@ test("webpack-compatible adapters build the loader benchmark fixture", async () 
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test("rspack warm benchmark config enables readonly persistent cache", () => {
+  const config = createRspackBenchmarkConfig({
+    fixture: {
+      context: "/benchmark/fixture",
+      entry: "./src/index.js"
+    },
+    outputDir: "/benchmark/output",
+    cacheDir: "/benchmark/cache",
+    persistentCache: true,
+    cacheReadonly: true
+  });
+
+  assert.deepEqual(config.cache, {
+    type: "persistent",
+    storage: {
+      type: "filesystem",
+      directory: "/benchmark/cache"
+    },
+    readonly: true
+  });
 });
 
 test("non-loader adapters mark the loader benchmark fixture unsupported", async () => {

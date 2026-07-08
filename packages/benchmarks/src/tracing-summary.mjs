@@ -92,7 +92,7 @@ export function toUnpackTracingSummaryMarkdown(rows, options = {}) {
   if (rows.some((row) => row.bundler === "rspack" && row.make === undefined)) {
     lines.push(
       "",
-      "Rspack `make ms` is omitted because its low-overhead JavaScript hooks do not expose a webpack-comparable make phase; earlier hooks include native cache/snapshot work but materially perturb benchmark timings."
+      "Rspack `make ms` is omitted because `compiler.hooks.make -> finishMake` only measures JavaScript make-hook callbacks; Rspack native tracing shows persistent-cache snapshot/read work occurs outside that hook boundary. Earlier JavaScript hooks include that native work but materially perturb benchmark timings."
     );
   }
 

@@ -138,6 +138,7 @@ export const adapters = {
         cache: persistentCache
           ? {
               type: "persistent",
+              readonly: cacheReadonly,
               storage: {
                 type: "filesystem",
                 directory: cacheDir

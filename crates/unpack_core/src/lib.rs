@@ -12,6 +12,7 @@ mod make;
 mod module;
 mod module_graph;
 mod normal_module_factory;
+mod pack_file;
 mod parser;
 mod resolver;
 mod snapshot;

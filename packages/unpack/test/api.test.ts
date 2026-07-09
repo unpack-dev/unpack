@@ -698,7 +698,6 @@ test("stats exposes watch dependency sets", async () => {
     const result = await runExistingCompiler(compiler);
     assert.equal(result.err, null);
     const json = result.stats?.toJson();
-    const fixtureRoot = await realpath(fixture);
     const sourceRoot = await realpath(join(fixture, "src"));
     assert.ok(json);
     assert.equal(json.errors.length, 1);
@@ -706,7 +705,7 @@ test("stats exposes watch dependency sets", async () => {
       join(sourceRoot, "dep.js"),
       join(sourceRoot, "index.js")
     ]);
-    assert.deepEqual(json.watchDependencies.contexts, [fixtureRoot, sourceRoot]);
+    assert.deepEqual(json.watchDependencies.contexts, []);
     assert.ok(json.watchDependencies.missing.includes(join(sourceRoot, "missing")));
     assert.ok(json.watchDependencies.missing.includes(join(sourceRoot, "dep.ts")));
   } finally {

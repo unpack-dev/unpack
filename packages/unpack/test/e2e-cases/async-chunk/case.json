@@ -1,0 +1,4 @@
+{
+  "runtimeExpression": "entry.run()",
+  "expected": "entry:async:feature-ok"
+}

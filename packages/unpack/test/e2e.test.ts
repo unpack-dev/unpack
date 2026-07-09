@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -10,6 +11,13 @@ import unpack from "@unpack-js/core";
 import type { Stats, UnpackOptions } from "@unpack-js/core";
 
 const execFileAsync = promisify(execFile);
+const casesRoot = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "test",
+  "e2e-cases"
+);
 const defaultEntry = "./src/index.js";
 const defaultEntryAsset = "main.js";
 const defaultCompilerOptions = {
@@ -17,73 +25,31 @@ const defaultCompilerOptions = {
 } satisfies Pick<UnpackOptions, "sourcemap">;
 
 interface BundleExecutionCase {
-  name: string;
-  files: Record<string, string>;
+  id: string;
+  path: string;
   entry?: UnpackOptions["entry"];
   entryAsset?: string;
   runtimeExpression: string;
   expected: unknown;
 }
 
-const bundleExecutionCases: BundleExecutionCase[] = [
-  {
-    name: "preserves static ESM live bindings",
-    files: {
-      "src/index.js": `
-        import { value, setValue } from "./state";
+interface BundleExecutionCaseManifest {
+  entry?: UnpackOptions["entry"];
+  entryAsset?: string;
+  runtimeExpression: string;
+  expected: unknown;
+}
 
-        export function run() {
-          const before = value;
-          setValue(7);
-          return [before, value];
-        }
-      `,
-      "src/state.js": `
-        export let value = 1;
-
-        export function setValue(next) {
-          value = next;
-        }
-      `
-    },
-    runtimeExpression: "entry.run()",
-    expected: [1, 7]
-  },
-  {
-    name: "loads async chunks",
-    files: {
-      "src/index.js": `
-        import { label } from "./label";
-
-        export async function run() {
-          const feature = await import("./feature");
-          return [label, feature.value, feature.describe("ok")].join(":");
-        }
-      `,
-      "src/label.js": `
-        export const label = "entry";
-      `,
-      "src/feature.js": `
-        export const value = "async";
-
-        export function describe(suffix) {
-          return "feature-" + suffix;
-        }
-      `
-    },
-    runtimeExpression: "entry.run()",
-    expected: "entry:async:feature-ok"
-  }
-];
+const bundleExecutionCases = await readBundleExecutionCases();
 
 for (const bundleCase of bundleExecutionCases) {
-  test(`emitted bundle ${bundleCase.name}`, async () => {
+  test(`emitted bundle ${bundleCase.id}`, async () => {
     await runBundleExecutionCase(bundleCase);
   });
 }
 
 async function runBundleExecutionCase(bundleCase: BundleExecutionCase) {
-  const fixture = await createFixture(bundleCase.files);
+  const fixture = await createFixture(bundleCase.path);
   const outputPath = join(fixture, "dist");
 
   try {
@@ -109,16 +75,47 @@ async function runBundleExecutionCase(bundleCase: BundleExecutionCase) {
   }
 }
 
-async function createFixture(files: Record<string, string>) {
-  const root = await mkdtemp(join(tmpdir(), "unpack-e2e-"));
-  await Promise.all(
-    Object.entries(files).map(async ([path, source]) => {
-      const absolutePath = join(root, path);
-      await mkdir(dirname(absolutePath), { recursive: true });
-      await writeFile(absolutePath, source, { encoding: "utf8" });
+async function readBundleExecutionCases() {
+  const entries = await readdir(casesRoot, { withFileTypes: true });
+  const caseDirectories = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+
+  assert.notEqual(caseDirectories.length, 0, "expected at least one e2e case");
+
+  return Promise.all(
+    caseDirectories.map(async (id): Promise<BundleExecutionCase> => {
+      const casePath = join(casesRoot, id);
+      const manifest = parseCaseManifest(
+        id,
+        await readFile(join(casePath, "case.json"), "utf8")
+      );
+
+      return {
+        id,
+        path: casePath,
+        ...manifest
+      };
     })
   );
-  return root;
+}
+
+async function createFixture(casePath: string) {
+  const fixturePath = await mkdtemp(join(tmpdir(), "unpack-e2e-"));
+  const entries = await readdir(casePath, { withFileTypes: true });
+
+  await Promise.all(
+    entries
+      .filter((entry) => entry.name !== "case.json")
+      .map((entry) =>
+        cp(join(casePath, entry.name), join(fixturePath, entry.name), {
+          recursive: true
+        })
+      )
+  );
+
+  return fixturePath;
 }
 
 async function runCompiler(options: UnpackOptions) {
@@ -165,4 +162,52 @@ function createNodeScript(entryAsset: string, runtimeExpression: string) {
         process.exit(1);
       });
   `;
+}
+
+function parseCaseManifest(id: string, source: string): BundleExecutionCaseManifest {
+  const parsed = JSON.parse(source) as unknown;
+
+  assert.ok(isRecord(parsed), `${id}/case.json must define an object`);
+
+  const manifest = parsed as Partial<BundleExecutionCaseManifest>;
+
+  assert.equal(
+    typeof manifest.runtimeExpression,
+    "string",
+    `${id}/case.json must define runtimeExpression`
+  );
+  assert.ok(
+    Object.hasOwn(manifest, "expected"),
+    `${id}/case.json must define expected`
+  );
+
+  if (manifest.entry !== undefined) {
+    assert.ok(
+      isEntryOption(manifest.entry),
+      `${id}/case.json entry must match UnpackOptions.entry`
+    );
+  }
+  if (manifest.entryAsset !== undefined) {
+    assert.equal(
+      typeof manifest.entryAsset,
+      "string",
+      `${id}/case.json entryAsset must be a string`
+    );
+  }
+
+  return manifest as BundleExecutionCaseManifest;
+}
+
+function isEntryOption(entry: unknown): entry is UnpackOptions["entry"] {
+  if (typeof entry === "string") {
+    return true;
+  }
+  if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
+    return false;
+  }
+  return Object.values(entry).every((value) => typeof value === "string");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
 }

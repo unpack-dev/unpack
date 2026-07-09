@@ -240,9 +240,29 @@ _Avoid_: Cache options, watch options
 Compiler-owned reusable build information that can be validated and reused across compilations.
 _Avoid_: Runtime module cache, compilation cache, module graph reuse
 
+**Cache Layer**:
+An ordered source of Build Cache data, such as compiler-owned Memory Cache or cross-process Persistent Cache.
+_Avoid_: Cache backend, cache implementation
+
+**Memory Cache**:
+A Build Cache layer held within one Compiler process for reuse during that Compiler's lifetime.
+_Avoid_: Persistent Cache, module graph reuse
+
 **Cache Facade**:
 A scoped access point to the build cache for one compiler subsystem or cache item family.
-_Avoid_: Specialized cache method, cache namespace
+_Avoid_: Specialized cache method, cache store
+
+**Cache Namespace**:
+The stable scope contributed by a Cache Facade to distinguish Cache Items owned by different compiler subsystems.
+_Avoid_: Cache Facade, cache directory
+
+**Cache Identifier**:
+The stable identity of one Cache Item within a Cache Namespace, independent of whether its inputs are current.
+_Avoid_: Cache ETag, file path
+
+**Cache ETag**:
+A validation token representing the inputs relevant to one Cache Identifier; Cache Items without an ETag use record-level validation data instead.
+_Avoid_: Cache Identifier, Snapshot
 
 **Cache Item**:
 A named unit of reusable build information stored in the build cache with its own validation data.
@@ -255,6 +275,14 @@ _Avoid_: Resolver cache entry, resolved path cache
 **Module Build Record**:
 A cache item that represents the validated result of building one module for reuse across compilations.
 _Avoid_: Cached module, parsed module cache
+
+**Code Generation Record**:
+A Cache Item containing reusable generated module code for one module and runtime input identity.
+_Avoid_: Generated bundle, cached Compilation
+
+**Asset Render Record**:
+A Cache Item containing reusable rendered source for one Asset identity without representing the Compilation's full Asset lifecycle.
+_Avoid_: Cached Asset, cached Compilation
 
 **File Snapshot**:
 A recorded view of filesystem inputs used to decide whether cached build information is still valid.
@@ -308,6 +336,10 @@ _Avoid_: JavaScript RegExp compatibility promise, watch ignore pattern
 A toolchain or configuration input whose change can invalidate persistent build cache entries.
 _Avoid_: Application dependency, module dependency
 
+**Build Dependency Snapshot**:
+A Snapshot of resolved toolchain or configuration inputs used to decide whether a Persistent Cache Container remains valid.
+_Avoid_: Resolve Build Dependency Snapshot, module snapshot
+
 **Resolve Build Dependency Snapshot**:
 A file snapshot of the resolution work needed to find configured build dependencies before deciding whether persistent cache entries can be reused.
 _Avoid_: Build dependency snapshot, resolver cache entry
@@ -316,9 +348,17 @@ _Avoid_: Build dependency snapshot, resolver cache entry
 A build cache stored outside the process so later compiler instances can reuse validated build information.
 _Avoid_: Disk cache, offline cache
 
+**Persistent Cache Container**:
+The restorable unit of Persistent Cache data governed by one cache location, version, and Build Dependency validation boundary.
+_Avoid_: Cache Pack, cache directory
+
 **Cache Pack**:
 A grouped persistent cache storage unit that holds multiple cache items plus metadata needed to find and validate them.
 _Avoid_: Module cache file, cache blob
+
+**Memory Cache Generation**:
+One completed Compilation step used to age unused Memory Cache entries.
+_Avoid_: Persistent Cache generation, compiler run count
 
 **Cache Idle Flush**:
 The lifecycle step that writes pending persistent cache updates after a compiler has no active compilation work.

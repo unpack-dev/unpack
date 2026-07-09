@@ -1,0 +1,3 @@
+# Treat persistent cache as best-effort single-writer infrastructure
+
+Unpack will treat Persistent Cache as trusted local, Linux-supported, single-writer infrastructure: corrupt, incompatible, or unwritable cache data produces Infrastructure Logging and a cache miss or cold build instead of failing a Compilation or Compiler Close. This supersedes ADR 0073 only where it required cache flush errors to surface from close, and partially supersedes ADR 0083 by allowing cache failure events without callback errors and `cache.profile` events below phase granularity. Idle flush and shutdown still wait for pending cache work, while shared-location multi-writer coordination and hostile-cache authentication remain outside the contract.

@@ -7,6 +7,149 @@ use std::{
 use unpack_core::{ChunkGroupKind, Compiler, CompilerOptions, Entry};
 
 #[tokio::test]
+async fn separates_module_code_generation_from_asset_rendering()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            export const value = 42;
+        "#,
+    )?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ));
+    let mut compilation = compiler.create_compilation();
+
+    compilation.make().await?;
+    compilation.build_chunk_graph();
+    compilation.code_generation();
+
+    assert_eq!(compilation.assets(), []);
+
+    compilation.create_assets();
+
+    assert_eq!(compilation.errors(), []);
+    assert_eq!(
+        compilation
+            .assets()
+            .iter()
+            .map(|asset| asset.filename.as_str())
+            .collect::<Vec<_>>(),
+        ["main.js", "main.js.map"]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn builds_a_render_manifest_before_creating_asset_bookkeeping()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            export async function load() {
+                return import("./feature");
+            }
+        "#,
+    )?;
+    write(
+        temp.path().join("src/feature.js"),
+        "export const value = 42;",
+    )?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ));
+    let mut compilation = compiler.create_compilation();
+
+    compilation.make().await?;
+    compilation.build_chunk_graph();
+    compilation.code_generation();
+    compilation.create_asset_render_manifest();
+
+    assert_eq!(compilation.assets(), []);
+
+    compilation.render_assets();
+
+    assert_eq!(compilation.errors(), []);
+    assert_eq!(
+        compilation
+            .assets()
+            .iter()
+            .map(|asset| asset.filename.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "main.js",
+            "main.js.map",
+            "src_feature_js.js",
+            "src_feature_js.js.map"
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn preserves_byte_exact_static_async_and_sourcemap_outputs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            import { eager } from "./eager";
+
+            export async function load() {
+                const feature = await import("./feature");
+                return [eager, feature.value];
+            }
+        "#,
+    )?;
+    write(
+        temp.path().join("src/eager.js"),
+        "export const eager = 'eager';",
+    )?;
+    write(
+        temp.path().join("src/feature.js"),
+        "export const value = 'feature';",
+    )?;
+
+    let compilation = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ))
+    .run()
+    .await?;
+    let fingerprints = compilation
+        .assets()
+        .iter()
+        .map(|asset| {
+            (
+                asset.filename.as_str(),
+                asset.source.len(),
+                fnv1a64(asset.source.as_bytes()),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        fingerprints,
+        [
+            ("main.js", 3166, 12861121386719719501),
+            ("main.js.map", 480, 10309079247393373181),
+            ("src_feature_js.js", 398, 7014656015713497901),
+            ("src_feature_js.js.map", 164, 2414748877879059404)
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn emits_node_require_chunks_for_dynamic_import() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     write(
@@ -374,4 +517,10 @@ fn node_available() -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
 }

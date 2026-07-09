@@ -360,7 +360,7 @@ impl BuildTask {
             .ok_or(Error::MissingModuleDirectory(self.module_id))?
             .to_path_buf();
 
-        if let Some(record) = services.module_build_cache.get(&self.identity) {
+        if let Some(record) = services.module_build_cache.get(&self.identity, None) {
             if record
                 .is_valid_with_cache(
                     &services.file_system_info,
@@ -424,7 +424,9 @@ impl BuildTask {
             .lock()
             .await
             .finish_build(self.module_id, parsed, source, source_hash)?;
-        services.module_build_cache.store(self.identity, record);
+        services
+            .module_build_cache
+            .store(self.identity, None, record);
 
         Ok(process_dependencies.into_iter().collect())
     }

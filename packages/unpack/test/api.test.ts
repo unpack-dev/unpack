@@ -636,6 +636,63 @@ test("compiler close waits for pending filesystem cache flush", async () => {
   }
 });
 
+test("filesystem cache publication failures are warnings and do not fail close", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;",
+    ".cache/unpack/unwritable": "not a directory"
+  });
+  const captured = captureConsole();
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation: join(fixture, ".cache/unpack/unwritable"),
+      idleTimeout: 60_000
+    },
+    infrastructureLogging: { level: "warn" }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+
+    assert.equal(await closeCompilerResult(compiler), null);
+    assert.ok(captured.calls.warn.some((event) => event.startsWith("[unpack.Cache]")));
+  } finally {
+    captured.restore();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("filesystem cache publication failures do not fail watching close", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;",
+    ".cache/unpack/unwritable": "not a directory"
+  });
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation: join(fixture, ".cache/unpack/unwritable"),
+      idleTimeout: 60_000
+    }
+  });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("filesystem cache readonly skips persistent writes", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"

@@ -442,12 +442,7 @@ class CompilerImpl implements Compiler {
 
     try {
       this.#clearIdleFlushTimer();
-      this.#flushCacheNow().then((flushError) => {
-        if (flushError) {
-          callback(flushError);
-          return;
-        }
-
+      this.#flushCacheNow().then(() => {
         try {
           this.#nativeCompiler.close();
           this.#closed = true;
@@ -674,10 +669,10 @@ class WatchingImpl implements Watching {
 
   async #finishClose(): Promise<void> {
     const callbacks = this.#closeCallbacks.splice(0);
-    const flushError = await this.#flushCache();
+    await this.#flushCache();
     this.#onClose();
     for (const callback of callbacks) {
-      callback(flushError);
+      callback(null);
     }
   }
 

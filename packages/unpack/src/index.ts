@@ -1686,7 +1686,6 @@ function assertNonNegativeNumber(value: unknown, name: string): number {
   }
   return value;
 }
-
 function normalizeGenerationLimit(
   value: unknown,
   name: string,

@@ -160,7 +160,7 @@ pub struct CacheOptions {
     pub build_dependencies: Vec<BuildDependency>,
     pub automatic_build_dependencies: Vec<PathBuf>,
     pub max_age: Duration,
-    pub max_memory_generations: Option<u32>,
+    pub max_memory_generations: Option<u64>,
     pub idle_timeout: Option<u32>,
     pub idle_timeout_for_initial_store: Option<u32>,
     pub idle_timeout_after_large_changes: Option<u32>,
@@ -394,6 +394,9 @@ trait CacheLayer: fmt::Debug + Send + Sync {
     ) -> bool {
         false
     }
+    fn on_compilation_completed(&mut self) -> Vec<CacheItemFamily> {
+        Vec::new()
+    }
     fn publish(
         &mut self,
         _guard: &PackFileGuardDto,
@@ -411,21 +414,90 @@ trait CacheLayer: fmt::Debug + Send + Sync {
     fn entry_count(&self, family: CacheItemFamily) -> usize;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryRetention {
+    Disabled,
+    Generations(u64),
+    Unbounded,
+}
+
+impl MemoryRetention {
+    fn from_options(options: &CacheOptions) -> Self {
+        match options.kind {
+            CacheKind::Disabled => Self::Disabled,
+            CacheKind::Memory | CacheKind::Filesystem => match options.max_memory_generations {
+                Some(0) => Self::Disabled,
+                Some(generations) => Self::Generations(generations),
+                None => Self::Unbounded,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MemoryCacheEntry {
+    entry: CacheEntry,
+    last_used_generation: u64,
+}
+
+#[derive(Debug)]
 struct MemoryCacheLayer {
-    entries: HashMap<CacheAddress, CacheEntry>,
+    entries: HashMap<CacheAddress, MemoryCacheEntry>,
+    retention: MemoryRetention,
+    completed_generation: u64,
+}
+
+impl MemoryCacheLayer {
+    fn new(retention: MemoryRetention) -> Self {
+        Self {
+            entries: HashMap::new(),
+            retention,
+            completed_generation: 0,
+        }
+    }
+
+    fn active_generation(&self) -> u64 {
+        self.completed_generation.saturating_add(1)
+    }
 }
 
 impl CacheLayer for MemoryCacheLayer {
     fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry> {
-        self.entries
-            .get(address)
-            .filter(|entry| entry.etag.as_ref() == etag)
-            .cloned()
+        let active_generation = self.active_generation();
+        let entry = self
+            .entries
+            .get_mut(address)
+            .filter(|entry| entry.entry.etag.as_ref() == etag)?;
+        entry.last_used_generation = active_generation;
+        Some(entry.entry.clone())
     }
 
     fn store(&mut self, address: CacheAddress, entry: CacheEntry) {
-        self.entries.insert(address, entry);
+        self.entries.insert(
+            address,
+            MemoryCacheEntry {
+                entry,
+                last_used_generation: self.active_generation(),
+            },
+        );
+    }
+
+    fn on_compilation_completed(&mut self) -> Vec<CacheItemFamily> {
+        self.completed_generation = self.completed_generation.saturating_add(1);
+        let MemoryRetention::Generations(limit) = self.retention else {
+            return Vec::new();
+        };
+        let completed_generation = self.completed_generation;
+        let mut evicted = Vec::new();
+        self.entries.retain(|_, entry| {
+            let should_retain =
+                completed_generation.saturating_sub(entry.last_used_generation) < limit;
+            if !should_retain {
+                evicted.push(entry.entry.family);
+            }
+            should_retain
+        });
+        evicted
     }
 
     fn clear(&mut self) { self.entries.clear(); }
@@ -438,7 +510,7 @@ impl CacheLayer for MemoryCacheLayer {
     fn entry_count(&self, family: CacheItemFamily) -> usize {
         self.entries
             .values()
-            .filter(|entry| entry.family == family)
+            .filter(|entry| entry.entry.family == family)
             .count()
     }
 }
@@ -705,11 +777,12 @@ struct Cache {
 impl Cache {
     fn from_options(options: &CacheOptions) -> Self {
         let mut layers = Vec::new();
-        if options.kind != CacheKind::Disabled {
+        let memory_retention = MemoryRetention::from_options(options);
+        if memory_retention != MemoryRetention::Disabled {
             layers.push(CacheLayerSlot {
                 kind: CacheLayerKind::Memory,
                 writable: true,
-                layer: Box::<MemoryCacheLayer>::default(),
+                layer: Box::new(MemoryCacheLayer::new(memory_retention)),
             });
         }
         if options.kind == CacheKind::Filesystem {
@@ -825,12 +898,21 @@ impl Cache {
         self.layers.iter_mut().find(|slot| slot.kind == CacheLayerKind::Persistent).is_some_and(|slot| slot.layer.prepare_persistent(guard, build_inputs, resolved_build_inputs, file_system_info, build_dependency_snapshot_strategy, resolve_build_dependency_snapshot_strategy))
     }
 
+    fn on_compilation_completed(&mut self) {
+        for slot in &mut self.layers {
+            for family in slot.layer.on_compilation_completed() {
+                self.work.for_family_mut(family).evictions += 1;
+            }
+        }
+    }
+
     fn publish_persistent(
         &mut self,
         guard: PackFileGuardDto,
         stamp: AccessStamp,
         max_age: Duration,
     ) -> io::Result<()> {
+
         let Some(slot) = self
             .layers
             .iter_mut()
@@ -1326,6 +1408,13 @@ impl BuildCache {
         );
     }
 
+    pub(crate) fn on_compilation_completed(&self) {
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .cache
+            .on_compilation_completed();
+    }
 }
 
 impl<K, V> CacheFacade<K, V>
@@ -1601,6 +1690,196 @@ mod tests {
                 stores: 1,
                 restores: 1,
                 evictions: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn finite_memory_generations_evict_only_entries_left_unused_for_the_limit() {
+        let mut options = CacheOptions::memory();
+        options.max_memory_generations = Some(1);
+        let build_cache = BuildCache::new(options, SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let unused = TestCacheKey("unused");
+        let kept = TestCacheKey("kept");
+
+        code_generation.store(unused.clone(), None, "unused source".to_string());
+        code_generation.store(kept.clone(), None, "kept source".to_string());
+        build_cache.on_compilation_completed();
+
+        assert_eq!(
+            code_generation
+                .get(&kept, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("kept source")
+        );
+        build_cache.on_compilation_completed();
+
+        assert!(code_generation.get(&unused, None).is_none());
+        assert_eq!(
+            code_generation
+                .get(&kept, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("kept source")
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration)
+                .evictions,
+            1
+        );
+    }
+
+    #[test]
+    fn finite_memory_generations_keep_entries_until_the_completed_generation_boundary() {
+        let mut options = CacheOptions::memory();
+        options.max_memory_generations = Some(2);
+        let build_cache = BuildCache::new(options, SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("generation-boundary");
+
+        code_generation.store(identifier.clone(), None, "source".to_string());
+        build_cache.on_compilation_completed();
+        build_cache.on_compilation_completed();
+
+        assert_eq!(
+            code_generation
+                .get(&identifier, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("source")
+        );
+        build_cache.on_compilation_completed();
+        build_cache.on_compilation_completed();
+        build_cache.on_compilation_completed();
+
+        assert!(code_generation.get(&identifier, None).is_none());
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration)
+                .evictions,
+            1
+        );
+    }
+
+    #[test]
+    fn etag_mismatch_does_not_refresh_an_entrys_generation() {
+        let mut options = CacheOptions::memory();
+        options.max_memory_generations = Some(2);
+        let build_cache = BuildCache::new(options, SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("etag-mismatch");
+
+        code_generation.store(
+            identifier.clone(),
+            Some(CacheETag::new("expected")),
+            "source".to_string(),
+        );
+        build_cache.on_compilation_completed();
+        assert!(
+            code_generation
+                .get(&identifier, Some(&CacheETag::new("different")))
+                .is_none()
+        );
+        build_cache.on_compilation_completed();
+        build_cache.on_compilation_completed();
+
+        assert!(
+            code_generation
+                .get(&identifier, Some(&CacheETag::new("expected")))
+                .is_none()
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration)
+                .evictions,
+            1
+        );
+    }
+
+    #[test]
+    fn unbounded_memory_generations_never_age_entries() {
+        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("unbounded");
+
+        code_generation.store(identifier.clone(), None, "source".to_string());
+        for _ in 0..100 {
+            build_cache.on_compilation_completed();
+        }
+
+        assert_eq!(
+            code_generation
+                .get(&identifier, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("source")
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration)
+                .evictions,
+            0
+        );
+    }
+
+    #[test]
+    fn zero_filesystem_memory_generations_keep_no_memory_layer() {
+        let mut options = CacheOptions::filesystem();
+        options.max_memory_generations = Some(0);
+        let build_cache = BuildCache::new(options, SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("persistent-only");
+
+        code_generation.store(identifier.clone(), None, "source".to_string());
+
+        assert_eq!(
+            build_cache
+                .inner
+                .lock()
+                .expect("build cache mutex should not be poisoned")
+                .cache
+                .entry_count(CacheItemFamily::CodeGeneration),
+            0
+        );
+        assert_eq!(
+            code_generation
+                .get(&identifier, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("source")
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration),
+            CacheItemWork {
+                hits: 1,
+                misses: 0,
+                stores: 1,
+                restores: 0,
+                evictions: 0,
             }
         );
     }

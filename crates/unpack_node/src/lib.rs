@@ -316,7 +316,7 @@ fn cache_options_from_native(options: NativeCacheOptions) -> Result<CacheOptions
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    cache.max_memory_generations = options.max_memory_generations.map(|generations| generations as u32);
+    cache.max_memory_generations = options.max_memory_generations.map(|generations| generations as u64);
     if let Some(max_age) = options.max_age {
         if max_age.is_nan() || max_age < 0.0 {
             return Err(napi::Error::from_reason(

@@ -667,6 +667,7 @@ impl Compiler {
         .await;
         if result.is_ok() {
             self.build_cache.store_build_dependencies();
+            self.build_cache.on_compilation_completed();
         }
         self.build_cache.trace_work_counters();
         result.map(|compilation| PendingCompilation {
@@ -1169,6 +1170,145 @@ mod tests {
                 evictions: 0,
             }
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aged_filesystem_entries_restore_from_pack_without_reusing_a_compilation_graph()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let entry = temp.path().join("index.js");
+        write(
+            &entry,
+            r#"
+                import { value } from "./dep";
+                export const result = value;
+            "#,
+        )?;
+        write(
+            temp.path().join("dep.js"),
+            "export const value = 'from-stable-dependency';",
+        )?;
+        let cache_location = temp.path().join(".cache/unpack/generations");
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location);
+        options.cache.max_memory_generations = Some(1);
+        options.snapshot.module = crate::SnapshotStrategy::hash();
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        compiler.flush_cache()?;
+        assert!(
+            asset_sources(&first)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("from-stable-dependency")
+        );
+
+        write(&entry, "export const result = 'dependency-unused';")?;
+        let second = compiler.run().await?;
+        assert!(
+            asset_sources(&second)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("dependency-unused")
+        );
+        assert_eq!(
+            compiler
+                .build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::ModuleBuild)
+                .evictions,
+            1
+        );
+
+        write(
+            &entry,
+            r#"
+                import { value } from "./dep";
+                export const result = value;
+            "#,
+        )?;
+        let third = compiler.run().await?;
+        let work = compiler.build_cache.work_counters();
+
+        assert!(
+            asset_sources(&third)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("from-stable-dependency")
+        );
+        assert_eq!(work.for_family(CacheItemFamily::Resolve).restores, 1);
+        assert_eq!(work.for_family(CacheItemFamily::ModuleBuild).restores, 1);
+        assert_ne!(
+            second.module_graph().modules().as_ptr(),
+            third.module_graph().modules().as_ptr()
+        );
+        assert_ne!(
+            second.chunk_graph().chunks().as_ptr(),
+            third.chunk_graph().chunks().as_ptr()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_filesystem_memory_generations_read_directly_from_pack()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(
+            temp.path().join("index.js"),
+            r#"
+                import "./dep";
+                export const result = "ok";
+            "#,
+        )?;
+        write(temp.path().join("dep.js"), "export const value = 1;")?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(temp.path().join(".cache/unpack/no-memory"));
+        options.cache.max_memory_generations = Some(0);
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        compiler.flush_cache()?;
+        let second = compiler.run().await?;
+        let work = compiler.build_cache.work_counters();
+
+        assert_eq!(asset_sources(&first), asset_sources(&second));
+        assert_eq!(
+            work.for_family(CacheItemFamily::Resolve),
+            CacheItemWork {
+                hits: 2,
+                misses: 2,
+                stores: 2,
+                restores: 0,
+                evictions: 0,
+            }
+        );
+        assert_eq!(
+            work.for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 2,
+                misses: 2,
+                stores: 2,
+                restores: 0,
+                evictions: 0,
+            }
+        );
+        assert_eq!(compiler.build_cache.stats().module_entries, 0);
+        assert_ne!(
+            first.module_graph().modules().as_ptr(),
+            second.module_graph().modules().as_ptr()
+        );
+        assert_ne!(
+            first.chunk_graph().chunks().as_ptr(),
+            second.chunk_graph().chunks().as_ptr()
+        );
+
         Ok(())
     }
 

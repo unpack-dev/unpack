@@ -123,6 +123,7 @@ mod tests {
     use std::{collections::BTreeMap, fs, path::Path};
 
     use super::*;
+    use crate::build_cache::{CacheItemFamily, CacheItemWork};
 
     #[tokio::test]
     async fn repeated_runs_reuse_memory_module_build_records_without_sharing_compilations()
@@ -150,6 +151,27 @@ mod tests {
         assert_eq!(first_cache.resolve_entries, 2);
         assert_eq!(first_cache.resolve_hits, 0);
         assert_eq!(first_cache.resolve_misses, 2);
+        let first_work = compiler.build_cache.work_counters();
+        assert_eq!(
+            first_work.for_family(CacheItemFamily::Resolve),
+            CacheItemWork {
+                hits: 0,
+                misses: 2,
+                stores: 2,
+                restores: 0,
+                evictions: 0
+            }
+        );
+        assert_eq!(
+            first_work.for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 0,
+                misses: 2,
+                stores: 2,
+                restores: 0,
+                evictions: 0
+            }
+        );
 
         let second = compiler.run().await?;
         let second_cache = compiler.build_cache.stats();
@@ -159,6 +181,27 @@ mod tests {
         assert_eq!(second_cache.resolve_entries, 2);
         assert_eq!(second_cache.resolve_hits, 2);
         assert_eq!(second_cache.resolve_misses, 2);
+        let second_work = compiler.build_cache.work_counters();
+        assert_eq!(
+            second_work.for_family(CacheItemFamily::Resolve),
+            CacheItemWork {
+                hits: 2,
+                misses: 2,
+                stores: 2,
+                restores: 0,
+                evictions: 0
+            }
+        );
+        assert_eq!(
+            second_work.for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 2,
+                misses: 2,
+                stores: 2,
+                restores: 0,
+                evictions: 0
+            }
+        );
 
         assert_eq!(first.errors(), []);
         assert_eq!(second.errors(), []);
@@ -167,6 +210,10 @@ mod tests {
         assert_ne!(
             first.module_graph().modules().as_ptr(),
             second.module_graph().modules().as_ptr()
+        );
+        assert_ne!(
+            first.chunk_graph().chunks().as_ptr(),
+            second.chunk_graph().chunks().as_ptr()
         );
 
         Ok(())
@@ -245,6 +292,59 @@ mod tests {
         assert_eq!(second_cache.resolve_hits, 2);
         assert_eq!(second_cache.module_hits, 2);
         assert_eq!(asset_sources(&first), asset_sources(&second));
+        let restored_work = second_compiler.build_cache.work_counters();
+        assert_eq!(
+            restored_work.for_family(CacheItemFamily::Resolve),
+            CacheItemWork {
+                hits: 2,
+                misses: 0,
+                stores: 0,
+                restores: 2,
+                evictions: 0
+            }
+        );
+        assert_eq!(
+            restored_work.for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 2,
+                misses: 0,
+                stores: 0,
+                restores: 2,
+                evictions: 0
+            }
+        );
+
+        let third = second_compiler.run().await?;
+        let repopulated_work = second_compiler.build_cache.work_counters();
+        assert_eq!(
+            repopulated_work.for_family(CacheItemFamily::Resolve),
+            CacheItemWork {
+                hits: 4,
+                misses: 0,
+                stores: 0,
+                restores: 2,
+                evictions: 0
+            }
+        );
+        assert_eq!(
+            repopulated_work.for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 4,
+                misses: 0,
+                stores: 0,
+                restores: 2,
+                evictions: 0
+            }
+        );
+        assert_eq!(asset_sources(&second), asset_sources(&third));
+        assert_ne!(
+            second.module_graph().modules().as_ptr(),
+            third.module_graph().modules().as_ptr()
+        );
+        assert_ne!(
+            second.chunk_graph().chunks().as_ptr(),
+            third.chunk_graph().chunks().as_ptr()
+        );
 
         Ok(())
     }

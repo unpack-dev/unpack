@@ -1,8 +1,8 @@
 use std::{
+    any::Any,
     collections::{BTreeSet, HashMap},
-    fs,
-    hash::Hash,
-    io,
+    fmt, fs, io,
+    marker::PhantomData,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -19,6 +19,8 @@ const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
 const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
 const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
 const MANIFEST_FILE: &str = "container.json";
+const RESOLVE_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/resolve");
+const MODULE_BUILD_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/module-build");
 
 #[derive(Debug, Clone)]
 pub(crate) struct BuildCache {
@@ -32,13 +34,104 @@ pub(crate) struct BuildCache {
 #[derive(Debug, Clone)]
 pub(crate) struct CacheFacade<K, V> {
     build_cache: BuildCache,
-    store: CacheStoreAccessor<K, V>,
+    namespace: CacheNamespace,
+    family: CacheItemFamily,
+    marker: PhantomData<fn(K) -> V>,
 }
 
 pub(crate) type NormalModuleFactoryCache = CacheFacade<ResolveRequest, ResolveRecord>;
 pub(crate) type ModuleBuildCache = CacheFacade<ModuleIdentity, ModuleBuildRecord>;
 
-type CacheStoreAccessor<K, V> = for<'a> fn(&'a mut BuildCacheInner) -> &'a mut CacheStore<K, V>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CacheNamespace(&'static str);
+
+impl CacheNamespace {
+    pub(crate) const fn new(value: &'static str) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CacheIdentifier(Vec<u8>);
+
+impl CacheIdentifier {
+    #[allow(dead_code)]
+    pub(crate) fn new(value: impl AsRef<[u8]>) -> Self {
+        Self(value.as_ref().to_vec())
+    }
+
+    fn from_parts(parts: impl IntoIterator<Item = Vec<u8>>) -> Self {
+        let mut bytes = Vec::new();
+        for part in parts {
+            bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&part);
+        }
+        Self(bytes)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CacheETag(Vec<u8>);
+
+impl CacheETag {
+    #[allow(dead_code)]
+    pub(crate) fn new(value: impl AsRef<[u8]>) -> Self {
+        Self(value.as_ref().to_vec())
+    }
+}
+
+pub(crate) trait CacheKey: Clone + Send + Sync + 'static {
+    fn cache_identifier(&self) -> CacheIdentifier;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheItemFamily {
+    Resolve,
+    ModuleBuild,
+    #[allow(dead_code)]
+    CodeGeneration,
+    #[allow(dead_code)]
+    AssetRender,
+}
+
+impl CacheItemFamily {
+    #[cfg(test)]
+    const fn index(self) -> usize {
+        match self {
+            Self::Resolve => 0,
+            Self::ModuleBuild => 1,
+            Self::CodeGeneration => 2,
+            Self::AssetRender => 3,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CacheItemWork {
+    pub hits: usize,
+    pub misses: usize,
+    pub stores: usize,
+    pub restores: usize,
+    pub evictions: usize,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CacheWorkCounters {
+    by_family: [CacheItemWork; 4],
+}
+
+#[cfg(test)]
+impl CacheWorkCounters {
+    pub(crate) fn for_family(self, family: CacheItemFamily) -> CacheItemWork {
+        self.by_family[family.index()]
+    }
+
+    fn for_family_mut(&mut self, family: CacheItemFamily) -> &mut CacheItemWork {
+        &mut self.by_family[family.index()]
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheOptions {
@@ -116,53 +209,283 @@ pub struct BuildDependency {
     pub files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct BuildCacheInner {
-    resolve_records: CacheStore<ResolveRequest, ResolveRecord>,
-    module_builds: CacheStore<ModuleIdentity, ModuleBuildRecord>,
+    cache: Cache,
     filesystem_manifest: Option<CacheManifest>,
     records_restored: bool,
     dirty: bool,
 }
 
-#[derive(Debug)]
-struct CacheStore<K, V> {
-    records: HashMap<K, Arc<V>>,
-    hits: usize,
-    misses: usize,
-}
-
-impl<K, V> Default for CacheStore<K, V> {
-    fn default() -> Self {
+impl BuildCacheInner {
+    fn new(options: &CacheOptions) -> Self {
         Self {
-            records: HashMap::new(),
-            hits: 0,
-            misses: 0,
+            cache: Cache::from_options(options),
+            filesystem_manifest: None,
+            records_restored: false,
+            dirty: false,
         }
     }
 }
 
-impl<K, V> CacheStore<K, V>
-where
-    K: Eq + Hash,
-{
-    fn get(&mut self, key: &K) -> Option<Arc<V>> {
-        let record = self.records.get(key).cloned();
-        if record.is_some() {
-            self.hits += 1;
-        } else {
-            self.misses += 1;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheAddress {
+    namespace: CacheNamespace,
+    identifier: CacheIdentifier,
+}
+
+#[derive(Clone)]
+struct CacheEntry {
+    family: CacheItemFamily,
+    etag: Option<CacheETag>,
+    source_key: Arc<dyn Any + Send + Sync>,
+    value: Arc<dyn Any + Send + Sync>,
+}
+
+impl CacheEntry {
+    fn new<K, V>(family: CacheItemFamily, etag: Option<CacheETag>, key: K, value: V) -> Self
+    where
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        Self {
+            family,
+            etag,
+            source_key: Arc::new(key),
+            value: Arc::new(value),
         }
-        record
     }
 
-    fn store(&mut self, key: K, value: V) {
-        self.records.insert(key, Arc::new(value));
+    fn key<K: Send + Sync + 'static>(&self) -> Option<&K> {
+        self.source_key.downcast_ref::<K>()
+    }
+
+    fn value<V: Send + Sync + 'static>(&self) -> Option<Arc<V>> {
+        Arc::clone(&self.value).downcast::<V>().ok()
+    }
+}
+
+impl fmt::Debug for CacheEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CacheEntry")
+            .field("family", &self.family)
+            .field("etag", &self.etag)
+            .finish_non_exhaustive()
+    }
+}
+
+trait CacheLayer: fmt::Debug + Send + Sync {
+    fn get(&self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry>;
+    fn store(&mut self, address: CacheAddress, entry: CacheEntry);
+    #[allow(dead_code)]
+    fn evict(&mut self, address: &CacheAddress) -> bool;
+    fn entries(&self) -> Vec<(CacheAddress, CacheEntry)>;
+}
+
+#[derive(Debug, Default)]
+struct MemoryCacheLayer {
+    entries: HashMap<CacheAddress, CacheEntry>,
+}
+
+impl CacheLayer for MemoryCacheLayer {
+    fn get(&self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry> {
+        self.entries
+            .get(address)
+            .filter(|entry| entry.etag.as_ref() == etag)
+            .cloned()
+    }
+
+    fn store(&mut self, address: CacheAddress, entry: CacheEntry) {
+        self.entries.insert(address, entry);
+    }
+
+    fn evict(&mut self, address: &CacheAddress) -> bool {
+        self.entries.remove(address).is_some()
+    }
+
+    fn entries(&self) -> Vec<(CacheAddress, CacheEntry)> {
+        self.entries
+            .iter()
+            .map(|(address, entry)| (address.clone(), entry.clone()))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheLayerKind {
+    Memory,
+    Persistent,
+}
+
+#[derive(Debug)]
+struct CacheLayerSlot {
+    kind: CacheLayerKind,
+    writable: bool,
+    layer: Box<dyn CacheLayer>,
+}
+
+#[derive(Debug)]
+struct Cache {
+    layers: Vec<CacheLayerSlot>,
+    #[cfg(test)]
+    work: CacheWorkCounters,
+}
+
+impl Cache {
+    fn from_options(options: &CacheOptions) -> Self {
+        let mut layers = Vec::new();
+        if options.kind != CacheKind::Disabled {
+            layers.push(CacheLayerSlot {
+                kind: CacheLayerKind::Memory,
+                writable: true,
+                layer: Box::<MemoryCacheLayer>::default(),
+            });
+        }
+        if options.kind == CacheKind::Filesystem {
+            layers.push(CacheLayerSlot {
+                kind: CacheLayerKind::Persistent,
+                writable: !options.readonly,
+                layer: Box::<MemoryCacheLayer>::default(),
+            });
+        }
+        Self {
+            layers,
+            #[cfg(test)]
+            work: CacheWorkCounters::default(),
+        }
+    }
+
+    fn get<V>(
+        &mut self,
+        _family: CacheItemFamily,
+        address: &CacheAddress,
+        etag: Option<&CacheETag>,
+    ) -> Option<Arc<V>>
+    where
+        V: Send + Sync + 'static,
+    {
+        for index in 0..self.layers.len() {
+            let entry = self.layers[index].layer.get(address, etag);
+            let Some(entry) = entry else {
+                continue;
+            };
+            let Some(value) = entry.value::<V>() else {
+                continue;
+            };
+
+            if index > 0 {
+                for earlier in &mut self.layers[..index] {
+                    if earlier.writable {
+                        earlier.layer.store(address.clone(), entry.clone());
+                    }
+                }
+                #[cfg(test)]
+                {
+                    self.work.for_family_mut(_family).restores += 1;
+                }
+            }
+            #[cfg(test)]
+            {
+                self.work.for_family_mut(_family).hits += 1;
+            }
+            return Some(value);
+        }
+
+        #[cfg(test)]
+        {
+            self.work.for_family_mut(_family).misses += 1;
+        }
+        None
+    }
+
+    fn store<K, V>(
+        &mut self,
+        family: CacheItemFamily,
+        address: CacheAddress,
+        etag: Option<CacheETag>,
+        key: K,
+        value: V,
+    ) -> bool
+    where
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        let entry = CacheEntry::new(family, etag, key, value);
+        let mut stored_persistently = false;
+        for slot in &mut self.layers {
+            if !slot.writable {
+                continue;
+            }
+            slot.layer.store(address.clone(), entry.clone());
+            stored_persistently |= slot.kind == CacheLayerKind::Persistent;
+        }
+        #[cfg(test)]
+        {
+            self.work.for_family_mut(family).stores += 1;
+        }
+        stored_persistently
+    }
+
+    fn restore<K, V>(
+        &mut self,
+        family: CacheItemFamily,
+        namespace: CacheNamespace,
+        identifier: CacheIdentifier,
+        etag: Option<CacheETag>,
+        key: K,
+        value: V,
+    ) where
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        let address = CacheAddress {
+            namespace,
+            identifier,
+        };
+        let entry = CacheEntry::new(family, etag, key, value);
+        if let Some(persistent) = self
+            .layers
+            .iter_mut()
+            .find(|slot| slot.kind == CacheLayerKind::Persistent)
+        {
+            persistent.layer.store(address, entry);
+        }
+    }
+
+    fn persistent_entries(&self) -> Vec<(CacheAddress, CacheEntry)> {
+        self.layers
+            .iter()
+            .find(|slot| slot.kind == CacheLayerKind::Persistent)
+            .map(|slot| slot.layer.entries())
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
-    fn entries(&self) -> usize {
-        self.records.len()
+    fn evict_memory(&mut self, family: CacheItemFamily, address: &CacheAddress) {
+        let evicted = self
+            .layers
+            .iter_mut()
+            .filter(|slot| slot.kind == CacheLayerKind::Memory)
+            .any(|slot| slot.layer.evict(address));
+        if evicted {
+            self.work.for_family_mut(family).evictions += 1;
+        }
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self, family: CacheItemFamily) -> usize {
+        self.layers
+            .iter()
+            .flat_map(|slot| slot.layer.entries())
+            .filter_map(|(address, entry)| (entry.family == family).then_some(address))
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    #[cfg(test)]
+    fn work_counters(&self) -> CacheWorkCounters {
+        self.work
     }
 }
 
@@ -178,6 +501,44 @@ impl ResolveRequest {
             context: context.into(),
             request: request.into(),
         }
+    }
+}
+
+impl CacheKey for ResolveRequest {
+    fn cache_identifier(&self) -> CacheIdentifier {
+        CacheIdentifier::from_parts([
+            self.context.as_os_str().as_encoded_bytes().to_vec(),
+            self.request.as_bytes().to_vec(),
+        ])
+    }
+}
+
+impl CacheKey for ModuleIdentity {
+    fn cache_identifier(&self) -> CacheIdentifier {
+        let mut parts = vec![
+            match self.module_type {
+                crate::ModuleType::JavaScriptAuto => b"javascript/auto".to_vec(),
+            },
+            self.resource.as_os_str().as_encoded_bytes().to_vec(),
+            optional_identifier_part(self.query.as_deref()),
+            optional_identifier_part(self.fragment.as_deref()),
+            optional_identifier_part(self.layer.as_deref()),
+            (self.loaders.len() as u64).to_le_bytes().to_vec(),
+        ];
+        parts.extend(self.loaders.iter().map(|loader| loader.as_bytes().to_vec()));
+        CacheIdentifier::from_parts(parts)
+    }
+}
+
+fn optional_identifier_part(value: Option<&str>) -> Vec<u8> {
+    match value {
+        Some(value) => {
+            let mut bytes = Vec::with_capacity(value.len() + 1);
+            bytes.push(1);
+            bytes.extend_from_slice(value.as_bytes());
+            bytes
+        }
+        None => vec![0],
     }
 }
 
@@ -341,28 +702,36 @@ impl BuildCache {
         let build_dependency_snapshot_strategy = snapshot_options.build_dependencies;
         let resolve_build_dependency_snapshot_strategy =
             snapshot_options.resolve_build_dependencies;
+        let inner = BuildCacheInner::new(&options);
         let cache = Self {
             options,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
             file_system_info: FileSystemInfo::from_snapshot_options(&snapshot_options),
-            inner: Arc::new(Mutex::new(BuildCacheInner::default())),
+            inner: Arc::new(Mutex::new(inner)),
         };
         cache.restore_from_filesystem();
         cache
     }
 
     pub(crate) fn normal_module_factory(&self) -> NormalModuleFactoryCache {
-        CacheFacade {
-            build_cache: self.clone(),
-            store: resolve_records,
-        }
+        self.facade(RESOLVE_CACHE_NAMESPACE, CacheItemFamily::Resolve)
     }
 
     pub(crate) fn module_builds(&self) -> ModuleBuildCache {
+        self.facade(MODULE_BUILD_CACHE_NAMESPACE, CacheItemFamily::ModuleBuild)
+    }
+
+    fn facade<K, V>(
+        &self,
+        namespace: CacheNamespace,
+        family: CacheItemFamily,
+    ) -> CacheFacade<K, V> {
         CacheFacade {
             build_cache: self.clone(),
-            store: module_builds,
+            namespace,
+            family,
+            marker: PhantomData,
         }
     }
 
@@ -379,10 +748,7 @@ impl BuildCache {
             if !inner.dirty {
                 return Ok(());
             }
-            (
-                inner.resolve_records.records.clone(),
-                inner.module_builds.records.clone(),
-            )
+            legacy_filesystem_records(&inner.cache)
         };
 
         self.write_filesystem_cache(&resolve_records, &module_builds)?;
@@ -400,26 +766,44 @@ impl BuildCache {
             .inner
             .lock()
             .expect("build cache mutex should not be poisoned");
+        let work = inner.cache.work_counters();
+        let resolve = work.for_family(CacheItemFamily::Resolve);
+        let module = work.for_family(CacheItemFamily::ModuleBuild);
         BuildCacheStats {
-            resolve_entries: inner.resolve_records.entries(),
-            resolve_hits: inner.resolve_records.hits,
-            resolve_misses: inner.resolve_records.misses,
-            module_entries: inner.module_builds.entries(),
-            module_hits: inner.module_builds.hits,
-            module_misses: inner.module_builds.misses,
+            resolve_entries: inner.cache.entry_count(CacheItemFamily::Resolve),
+            resolve_hits: resolve.hits,
+            resolve_misses: resolve.misses,
+            module_entries: inner.cache.entry_count(CacheItemFamily::ModuleBuild),
+            module_hits: module.hits,
+            module_misses: module.misses,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn work_counters(&self) -> CacheWorkCounters {
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .cache
+            .work_counters()
     }
 }
 
 impl<K, V> CacheFacade<K, V>
 where
-    K: Eq + Hash,
+    K: CacheKey,
+    V: Send + Sync + 'static,
 {
     pub(crate) fn is_enabled(&self) -> bool {
         self.build_cache.options.kind != CacheKind::Disabled
     }
 
-    pub(crate) fn get(&self, key: &K) -> Option<Arc<V>> {
+    #[allow(dead_code)]
+    pub(crate) fn namespace(&self) -> CacheNamespace {
+        self.namespace
+    }
+
+    pub(crate) fn get(&self, key: &K, etag: Option<&CacheETag>) -> Option<Arc<V>> {
         if !self.is_enabled() {
             return None;
         }
@@ -431,10 +815,14 @@ where
             .inner
             .lock()
             .expect("build cache mutex should not be poisoned");
-        (self.store)(&mut inner).get(key)
+        let address = CacheAddress {
+            namespace: self.namespace,
+            identifier: key.cache_identifier(),
+        };
+        inner.cache.get(self.family, &address, etag)
     }
 
-    pub(crate) fn store(&self, key: K, value: V) {
+    pub(crate) fn store(&self, key: K, etag: Option<CacheETag>, value: V) {
         if !self.is_enabled() {
             return;
         }
@@ -444,12 +832,27 @@ where
             .inner
             .lock()
             .expect("build cache mutex should not be poisoned");
-        (self.store)(&mut inner).store(key, value);
-        if self.build_cache.options.kind == CacheKind::Filesystem
-            && !self.build_cache.options.readonly
-        {
+        let address = CacheAddress {
+            namespace: self.namespace,
+            identifier: key.cache_identifier(),
+        };
+        if inner.cache.store(self.family, address, etag, key, value) {
             inner.dirty = true;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evict_memory(&self, key: &K) {
+        let address = CacheAddress {
+            namespace: self.namespace,
+            identifier: key.cache_identifier(),
+        };
+        self.build_cache
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .cache
+            .evict_memory(self.family, &address);
     }
 }
 
@@ -516,16 +919,26 @@ impl BuildCache {
             .inner
             .lock()
             .expect("build cache mutex should not be poisoned");
-        inner.resolve_records.records = pack
-            .resolve_records
-            .into_iter()
-            .map(|(request, record)| (request, Arc::new(record)))
-            .collect();
-        inner.module_builds.records = pack
-            .module_builds
-            .into_iter()
-            .map(|(identity, record)| (identity, Arc::new(record)))
-            .collect();
+        for (request, record) in pack.resolve_records {
+            inner.cache.restore(
+                CacheItemFamily::Resolve,
+                RESOLVE_CACHE_NAMESPACE,
+                request.cache_identifier(),
+                None,
+                request,
+                record,
+            );
+        }
+        for (identity, record) in pack.module_builds {
+            inner.cache.restore(
+                CacheItemFamily::ModuleBuild,
+                MODULE_BUILD_CACHE_NAMESPACE,
+                identity.cache_identifier(),
+                None,
+                identity,
+                record,
+            );
+        }
         inner.records_restored = true;
     }
 
@@ -638,6 +1051,38 @@ impl BuildCache {
     }
 }
 
+fn legacy_filesystem_records(
+    cache: &Cache,
+) -> (
+    HashMap<ResolveRequest, Arc<ResolveRecord>>,
+    HashMap<ModuleIdentity, Arc<ModuleBuildRecord>>,
+) {
+    let mut resolve_records = HashMap::new();
+    let mut module_builds = HashMap::new();
+    for (_, entry) in cache.persistent_entries() {
+        match entry.family {
+            CacheItemFamily::Resolve => {
+                if let (Some(key), Some(value)) = (
+                    entry.key::<ResolveRequest>(),
+                    entry.value::<ResolveRecord>(),
+                ) {
+                    resolve_records.insert(key.clone(), value);
+                }
+            }
+            CacheItemFamily::ModuleBuild => {
+                if let (Some(key), Some(value)) = (
+                    entry.key::<ModuleIdentity>(),
+                    entry.value::<ModuleBuildRecord>(),
+                ) {
+                    module_builds.insert(key.clone(), value);
+                }
+            }
+            CacheItemFamily::CodeGeneration | CacheItemFamily::AssetRender => {}
+        }
+    }
+    (resolve_records, module_builds)
+}
+
 fn read_manifest(cache_location: &Path) -> Option<CacheManifest> {
     let bytes = fs::read(cache_location.join(MANIFEST_FILE)).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -677,10 +1122,6 @@ pub(crate) struct BuildCacheStats {
     pub module_misses: usize,
 }
 
-fn resolve_records(inner: &mut BuildCacheInner) -> &mut CacheStore<ResolveRequest, ResolveRecord> {
-    &mut inner.resolve_records
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, fs, path::Path};
@@ -690,6 +1131,155 @@ mod tests {
 
     use super::*;
     use crate::{ModuleIdentity, snapshot::FileSystemInfo};
+
+    #[derive(Debug, Clone)]
+    struct TestCacheKey(&'static str);
+
+    impl CacheKey for TestCacheKey {
+        fn cache_identifier(&self) -> CacheIdentifier {
+            CacheIdentifier::new(self.0)
+        }
+    }
+
+    #[test]
+    fn cache_facades_scope_identical_identifiers_by_namespace_and_etag() {
+        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let asset_render = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/asset-render"),
+            CacheItemFamily::AssetRender,
+        );
+        assert_eq!(
+            code_generation.namespace(),
+            CacheNamespace::new("unpack/code-generation")
+        );
+        assert_eq!(
+            asset_render.namespace(),
+            CacheNamespace::new("unpack/asset-render")
+        );
+        let identifier = TestCacheKey("shared-identifier");
+        let current = CacheETag::new("current");
+        let stale = CacheETag::new("stale");
+
+        code_generation.store(
+            identifier.clone(),
+            Some(current.clone()),
+            "generated source".to_string(),
+        );
+        asset_render.store(
+            identifier.clone(),
+            Some(current.clone()),
+            "rendered asset".to_string(),
+        );
+
+        assert_eq!(
+            code_generation
+                .get(&identifier, Some(&current))
+                .as_deref()
+                .map(String::as_str),
+            Some("generated source")
+        );
+        assert_eq!(
+            asset_render
+                .get(&identifier, Some(&current))
+                .as_deref()
+                .map(String::as_str),
+            Some("rendered asset")
+        );
+        assert!(code_generation.get(&identifier, Some(&stale)).is_none());
+
+        let counters = build_cache.work_counters();
+        assert_eq!(
+            counters.for_family(CacheItemFamily::CodeGeneration),
+            CacheItemWork {
+                hits: 1,
+                misses: 1,
+                stores: 1,
+                restores: 0,
+                evictions: 0,
+            }
+        );
+        assert_eq!(
+            counters.for_family(CacheItemFamily::AssetRender),
+            CacheItemWork {
+                hits: 1,
+                misses: 0,
+                stores: 1,
+                restores: 0,
+                evictions: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn cache_facade_accounts_for_memory_eviction_by_item_family() {
+        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("evicted-identifier");
+
+        code_generation.store(identifier.clone(), None, "generated source".to_string());
+        code_generation.evict_memory(&identifier);
+
+        assert!(code_generation.get(&identifier, None).is_none());
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration),
+            CacheItemWork {
+                hits: 0,
+                misses: 1,
+                stores: 1,
+                restores: 0,
+                evictions: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn lower_layer_hit_repopulates_the_earlier_memory_cache() {
+        let build_cache = BuildCache::new(CacheOptions::filesystem(), SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("restored-identifier");
+
+        code_generation.store(identifier.clone(), None, "generated source".to_string());
+        code_generation.evict_memory(&identifier);
+
+        assert_eq!(
+            code_generation
+                .get(&identifier, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("generated source")
+        );
+        assert_eq!(
+            code_generation
+                .get(&identifier, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("generated source")
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration),
+            CacheItemWork {
+                hits: 2,
+                misses: 0,
+                stores: 1,
+                restores: 1,
+                evictions: 1,
+            }
+        );
+    }
 
     #[test]
     fn module_build_record_without_source_hash_deserializes_with_empty_hash()
@@ -750,10 +1340,4 @@ mod tests {
         }
         fs::write(path, source)
     }
-}
-
-fn module_builds(
-    inner: &mut BuildCacheInner,
-) -> &mut CacheStore<ModuleIdentity, ModuleBuildRecord> {
-    &mut inner.module_builds
 }

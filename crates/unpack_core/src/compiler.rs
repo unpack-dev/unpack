@@ -82,6 +82,7 @@ impl Compiler {
             let mut compilation = self.create_compilation();
             compilation.make().await?;
             compilation.build_chunk_graph();
+            compilation.code_generation();
             compilation.create_assets();
             Ok(compilation)
         }

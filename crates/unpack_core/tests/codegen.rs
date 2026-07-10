@@ -7,6 +7,139 @@ use std::{
 use unpack_core::{ChunkGroupKind, Compiler, CompilerOptions, Entry};
 
 #[tokio::test]
+async fn separates_module_code_generation_from_asset_rendering()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            export const value = 42;
+        "#,
+    )?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ));
+    let mut compilation = compiler.create_compilation();
+
+    compilation.make().await?;
+    compilation.build_chunk_graph();
+    compilation.code_generation();
+
+    assert_eq!(compilation.assets(), []);
+
+    compilation.create_assets();
+
+    assert_eq!(compilation.errors(), []);
+    assert_eq!(
+        compilation
+            .assets()
+            .iter()
+            .map(|asset| asset.filename.as_str())
+            .collect::<Vec<_>>(),
+        ["main.js", "main.js.map"]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn builds_a_render_manifest_before_creating_asset_bookkeeping()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            export async function load() {
+                return import("./feature");
+            }
+        "#,
+    )?;
+    write(
+        temp.path().join("src/feature.js"),
+        "export const value = 42;",
+    )?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ));
+    let mut compilation = compiler.create_compilation();
+
+    compilation.make().await?;
+    compilation.build_chunk_graph();
+    compilation.code_generation();
+    compilation.create_asset_render_manifest();
+
+    assert_eq!(compilation.assets(), []);
+
+    compilation.render_asset_sources();
+
+    assert_eq!(compilation.assets(), []);
+
+    compilation.emit_assets();
+
+    assert_eq!(compilation.errors(), []);
+    assert_eq!(
+        compilation
+            .assets()
+            .iter()
+            .map(|asset| asset.filename.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "main.js",
+            "main.js.map",
+            "src_feature_js.js",
+            "src_feature_js.js.map"
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rebuilding_graphs_invalidates_generated_and_rendered_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        "export const value = 'before';",
+    )?;
+
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ));
+    let mut compilation = compiler.create_compilation();
+    compilation.make().await?;
+    compilation.build_chunk_graph();
+    compilation.create_assets();
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .any(|asset| asset.filename == "main.js" && asset.source.contains("before"))
+    );
+
+    write(
+        temp.path().join("src/index.js"),
+        "export const value = 'after';",
+    )?;
+    compilation.make().await?;
+    compilation.build_chunk_graph();
+    compilation.create_assets();
+    assert!(
+        compilation
+            .assets()
+            .iter()
+            .any(|asset| asset.filename == "main.js" && asset.source.contains("after"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn emits_node_require_chunks_for_dynamic_import() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     write(

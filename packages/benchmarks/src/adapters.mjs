@@ -15,6 +15,7 @@ const DEFAULT_UNPACK_TRACING_FILTER = "unpack_core=trace,unpack_node=trace";
 const TURBOPACK_TRACING_ENV = "TURBOPACK_TRACING";
 const DEFAULT_TURBOPACK_TRACING_FILTER = "turbo-tasks";
 const METRO_COMMONJS_TRANSFORMER = require.resolve("./metro-commonjs-transformer.cjs");
+const UNPACK_PACKAGE_ROOT = resolve(dirname(require.resolve("@unpack-js/core")), "..");
 
 export const adapters = {
   unpack: {
@@ -38,6 +39,9 @@ export const adapters = {
         entry: fixture.entry,
         output: { path: outputDir },
         sourcemap: false,
+        snapshot: {
+          managedPaths: [UNPACK_PACKAGE_ROOT]
+        },
         cache: persistentCache
           ? {
               type: "filesystem",

@@ -310,6 +310,33 @@ test("filesystem cache falls back to cwd and explicit cache name overrides top-l
   }
 });
 
+test("empty top-level name uses the default derived cache name", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+
+  try {
+    const observation = await runCacheProcess(
+      {
+        bundler: "unpack",
+        options: {
+          context: fixture,
+          mode: "production",
+          name: "",
+          outputPath: join(fixture, "dist"),
+          cache: { type: "filesystem" }
+        }
+      },
+      { cwd: fixture }
+    );
+
+    assert.equal(observation.error, null);
+    assert.ok(await stat(join(fixture, ".cache/unpack/default-production")));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("Context Module and cache-unaffected surfaces remain synchronously unsupported", () => {
   const createCompiler = (options: Record<string, unknown>) => () =>
     unpack(

@@ -978,7 +978,7 @@ function normalizeCacheOptions(
 
   const name =
     filesystemCache.name === undefined
-      ? `${compilerName ?? "default"}-${mode}`
+      ? `${compilerName || "default"}-${mode}`
       : assertString(filesystemCache.name, "options.cache.name");
   const cacheDirectory =
     filesystemCache.cacheDirectory === undefined

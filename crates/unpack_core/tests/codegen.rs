@@ -274,7 +274,7 @@ async fn produces_stable_static_async_and_sourcemap_outputs()
     assert_eq!(
         fingerprints,
         [
-            ("main.js", 3166, 6672719859425331571),
+            ("main.js", 3166, 11891285027332120831),
             ("main.js.map", 480, 5745374754696300241),
             ("src_feature_js.js", 398, 7014656015713497901),
             ("src_feature_js.js.map", 164, 2414748877879059404)

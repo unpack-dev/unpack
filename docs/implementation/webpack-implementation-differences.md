@@ -144,6 +144,11 @@ Necessity:
 
 Unpack preserves source and applies templates for const replacements, import side effects, import specifier reads, export headers, export specifiers, default exports, re-exports, and dynamic imports. It intentionally uses webpack-shaped names and getter-based export bindings.
 
+Init fragments follow webpack's cyclic-Harmony ordering: compatibility setup runs
+first, export getters are installed before ordinary imports execute, and star
+re-exports run after their import namespace is available. This keeps early
+namespace reads safe while preserving later live-binding updates.
+
 Webpack templates include additional behavior for used exports, inlined exports, export presence diagnostics, CommonJS/default interop, module concatenation, deferred imports, dead branch imports, async modules, namespace object variants, and precise star re-export conflict handling.
 
 Necessity:

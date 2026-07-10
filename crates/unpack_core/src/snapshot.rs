@@ -1,10 +1,13 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap},
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 use crate::{Error, Result};
 use regex::RegexBuilder;
@@ -143,6 +146,14 @@ impl FileSystemInfo {
         }
     }
 
+    pub(crate) fn for_build_dependencies() -> Self {
+        Self {
+            managed_paths: Vec::new(),
+            immutable_paths: Vec::new(),
+            unmanaged_paths: Vec::new(),
+        }
+    }
+
     pub(crate) async fn create_file_snapshot(
         &self,
         path: &Path,
@@ -217,6 +228,7 @@ impl FileSystemInfo {
         snapshot.is_valid_sync(strategy, self)
     }
 
+    #[cfg(test)]
     pub(crate) fn merge_snapshots<'a>(
         &self,
         snapshots: impl IntoIterator<Item = &'a Snapshot>,
@@ -548,6 +560,21 @@ impl Snapshot {
                 .all(|(entry, path)| entry.path() == path)
     }
 
+    pub(crate) fn has_valid_paths_sync(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> bool {
+        normalize_paths(paths).iter().all(|path| {
+            self.entries
+                .iter()
+                .find(|entry| entry.path() == path)
+                .is_some_and(|entry| entry.is_valid_sync(strategy, file_system_info))
+        })
+    }
+
+    #[cfg(test)]
     fn merge<'a>(snapshots: impl IntoIterator<Item = &'a Snapshot>) -> Self {
         let mut entries = BTreeMap::new();
         for snapshot in snapshots {

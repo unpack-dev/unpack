@@ -1,7 +1,7 @@
 use std::{
     any::Any,
     collections::{BTreeSet, HashMap},
-    fmt, io,
+    fmt, fs, io,
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -12,7 +12,7 @@ use std::{
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
-    ModuleIdentity, SnapshotOptions, SnapshotStrategy,
+    ModuleIdentity, SnapshotOptions, SnapshotStrategy, UnpackResolver,
     cache_hash::stable_hash,
     code_generation_record::CodeGenerationResult,
     pack_file::{
@@ -38,7 +38,7 @@ pub(crate) struct BuildCache {
     options: CacheOptions,
     build_dependency_snapshot_strategy: SnapshotStrategy,
     resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-    file_system_info: FileSystemInfo,
+    build_dependency_file_system_info: FileSystemInfo,
     inner: Arc<Mutex<BuildCacheInner>>,
 }
 
@@ -158,6 +158,7 @@ pub struct CacheOptions {
     pub name: Option<String>,
     pub version: Option<String>,
     pub build_dependencies: Vec<BuildDependency>,
+    pub automatic_build_dependencies: Vec<PathBuf>,
     pub max_age: Duration,
     pub max_memory_generations: Option<u32>,
     pub idle_timeout: Option<u32>,
@@ -181,6 +182,7 @@ impl CacheOptions {
             name: None,
             version: None,
             build_dependencies: Vec::new(),
+            automatic_build_dependencies: Vec::new(),
             max_age: DEFAULT_MAX_AGE,
             max_memory_generations: None,
             idle_timeout: None,
@@ -198,6 +200,7 @@ impl CacheOptions {
             name: None,
             version: None,
             build_dependencies: Vec::new(),
+            automatic_build_dependencies: Vec::new(),
             max_age: DEFAULT_MAX_AGE,
             max_memory_generations: None,
             idle_timeout: None,
@@ -215,6 +218,7 @@ impl CacheOptions {
             name: None,
             version: None,
             build_dependencies: Vec::new(),
+            automatic_build_dependencies: Vec::new(),
             max_age: DEFAULT_MAX_AGE,
             max_memory_generations: None,
             idle_timeout: Some(60_000),
@@ -235,7 +239,7 @@ pub enum CacheKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildDependency {
     pub name: String,
-    pub files: Vec<PathBuf>,
+    pub requests: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -299,17 +303,9 @@ impl CacheClock for ManualCacheClock {
 impl BuildCacheInner {
     fn new(
         options: &CacheOptions,
-        file_system_info: &FileSystemInfo,
-        build_dependency_snapshot_strategy: SnapshotStrategy,
-        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
         clock: Arc<dyn CacheClock>,
     ) -> Self {
-        let cache = Cache::from_options(
-            options,
-            file_system_info,
-            build_dependency_snapshot_strategy,
-            resolve_build_dependency_snapshot_strategy,
-        );
+        let cache = Cache::from_options(options);
         let initial_store_pending = !cache.has_persistent_publication();
         Self {
             cache,
@@ -380,6 +376,16 @@ impl fmt::Debug for CacheEntry {
 trait CacheLayer: fmt::Debug + Send + Sync {
     fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry>;
     fn store(&mut self, address: CacheAddress, entry: CacheEntry);
+    fn clear(&mut self) {}
+    fn prepare_persistent(
+        &mut self,
+        _guard: &PackFileGuardDto,
+        _build_inputs: &BTreeSet<PathBuf>,
+        _resolved_build_inputs: &BTreeSet<PathBuf>,
+        _file_system_info: &FileSystemInfo,
+        _build_dependency_snapshot_strategy: SnapshotStrategy,
+        _resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    ) -> bool { false }
     fn touch(
         &mut self,
         _address: &CacheAddress,
@@ -422,6 +428,8 @@ impl CacheLayer for MemoryCacheLayer {
         self.entries.insert(address, entry);
     }
 
+    fn clear(&mut self) { self.entries.clear(); }
+
     fn evict(&mut self, address: &CacheAddress) -> bool {
         self.entries.remove(address).is_some()
     }
@@ -446,44 +454,18 @@ struct PackFileCacheLayer {
 }
 
 impl PackFileCacheLayer {
-    fn open(
-        options: &CacheOptions,
-        file_system_info: &FileSystemInfo,
-        build_dependency_snapshot_strategy: SnapshotStrategy,
-        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-    ) -> Self {
+    fn open(options: &CacheOptions) -> Self {
         let registry = persistent_codec_registry();
         let root = options.cache_location.clone();
         let pack_file = root
             .as_ref()
             .map(|root| PackFile::open(root, registry.clone()));
-        let active = pack_file.as_ref().is_some_and(|pack_file| {
-            pack_file.guard().is_some_and(|guard| {
-                persistent_guard_is_valid(
-                    guard,
-                    options,
-                    file_system_info,
-                    build_dependency_snapshot_strategy,
-                    resolve_build_dependency_snapshot_strategy,
-                )
-            })
-        });
-        let publication_base = if active {
-            PublicationBase::PreserveEntries {
-                expected_revision: pack_file
-                    .as_ref()
-                    .expect("active PackFile should be open")
-                    .revision(),
-            }
-        } else {
-            PublicationBase::ReplaceAll
-        };
         Self {
             root,
             registry,
             pack_file,
-            publication_base,
-            active,
+            publication_base: PublicationBase::ReplaceAll,
+            active: false,
             pending: HashMap::new(),
         }
     }
@@ -628,6 +610,37 @@ impl CacheLayer for PackFileCacheLayer {
         self.pending.insert(address, entry);
     }
 
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.active = false;
+        self.publication_base = PublicationBase::ReplaceAll;
+    }
+
+    fn prepare_persistent(
+        &mut self,
+        guard: &PackFileGuardDto,
+        build_inputs: &BTreeSet<PathBuf>,
+        resolved_build_inputs: &BTreeSet<PathBuf>,
+        file_system_info: &FileSystemInfo,
+        build_dependency_snapshot_strategy: SnapshotStrategy,
+        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    ) -> bool {
+        let active = self.pack_file.as_ref().is_some_and(|pack_file| {
+            pack_file.guard().is_some_and(|candidate| {
+                let build_dependencies = Snapshot::try_from(candidate.build_dependencies.clone()).ok();
+                let resolve_build_dependencies = Snapshot::try_from(candidate.resolve_build_dependencies.clone()).ok();
+                candidate.version == guard.version
+                    && build_dependencies.is_some_and(|snapshot| snapshot.has_exact_paths(build_inputs.iter().cloned()) && file_system_info.is_snapshot_valid_sync(&snapshot, build_dependency_snapshot_strategy))
+                    && resolve_build_dependencies.is_some_and(|snapshot| file_system_info.is_snapshot_valid_sync(&snapshot, resolve_build_dependency_snapshot_strategy) || snapshot.has_valid_paths_sync(resolved_build_inputs.iter().cloned(), resolve_build_dependency_snapshot_strategy, file_system_info))
+            })
+        });
+        self.active = active;
+        self.publication_base = if active {
+            PublicationBase::PreserveEntries { expected_revision: self.pack_file.as_ref().expect("active PackFile should be open").revision() }
+        } else { PublicationBase::ReplaceAll };
+        self.pack_file.as_ref().and_then(PackFile::guard) != Some(guard)
+    }
+
     fn touch(
         &mut self,
         address: &CacheAddress,
@@ -690,12 +703,7 @@ struct Cache {
 }
 
 impl Cache {
-    fn from_options(
-        options: &CacheOptions,
-        file_system_info: &FileSystemInfo,
-        build_dependency_snapshot_strategy: SnapshotStrategy,
-        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-    ) -> Self {
+    fn from_options(options: &CacheOptions) -> Self {
         let mut layers = Vec::new();
         if options.kind != CacheKind::Disabled {
             layers.push(CacheLayerSlot {
@@ -708,12 +716,7 @@ impl Cache {
             layers.push(CacheLayerSlot {
                 kind: CacheLayerKind::Persistent,
                 writable: !options.readonly,
-                layer: Box::new(PackFileCacheLayer::open(
-                    options,
-                    file_system_info,
-                    build_dependency_snapshot_strategy,
-                    resolve_build_dependency_snapshot_strategy,
-                )),
+                layer: Box::new(PackFileCacheLayer::open(options)),
             });
         }
         Self {
@@ -812,6 +815,14 @@ impl Cache {
 
     fn work_counters(&self) -> CacheWorkCounters {
         self.work
+    }
+
+    fn clear(&mut self) { for slot in &mut self.layers { slot.layer.clear(); } }
+
+    fn prepare_persistent(
+        &mut self, guard: &PackFileGuardDto, build_inputs: &BTreeSet<PathBuf>, resolved_build_inputs: &BTreeSet<PathBuf>, file_system_info: &FileSystemInfo, build_dependency_snapshot_strategy: SnapshotStrategy, resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    ) -> bool {
+        self.layers.iter_mut().find(|slot| slot.kind == CacheLayerKind::Persistent).is_some_and(|slot| slot.layer.prepare_persistent(guard, build_inputs, resolved_build_inputs, file_system_info, build_dependency_snapshot_strategy, resolve_build_dependency_snapshot_strategy))
     }
 
     fn publish_persistent(
@@ -1096,19 +1107,16 @@ impl BuildCache {
         let build_dependency_snapshot_strategy = snapshot_options.build_dependencies;
         let resolve_build_dependency_snapshot_strategy =
             snapshot_options.resolve_build_dependencies;
-        let file_system_info = FileSystemInfo::from_snapshot_options(&snapshot_options);
+        let build_dependency_file_system_info = FileSystemInfo::for_build_dependencies();
         let inner = BuildCacheInner::new(
             &options,
-            &file_system_info,
-            build_dependency_snapshot_strategy,
-            resolve_build_dependency_snapshot_strategy,
             clock,
         );
         Self {
             options,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
-            file_system_info,
+            build_dependency_file_system_info,
             inner: Arc::new(Mutex::new(inner)),
         }
     }
@@ -1145,27 +1153,49 @@ impl BuildCache {
         }
     }
 
+    pub(crate) async fn prepare_for_compilation(
+        &self,
+        context: &Path,
+        resolver: &UnpackResolver,
+    ) -> crate::Result<()> {
+        if self.options.kind != CacheKind::Filesystem { return Ok(()); }
+        let requests = self.options.build_dependencies.iter().flat_map(|dependency| dependency.requests.iter().cloned()).collect::<BTreeSet<_>>();
+        let mut build_inputs = self.options.automatic_build_dependencies.iter().map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone())).collect::<BTreeSet<_>>();
+        let mut resolved_build_inputs = BTreeSet::new();
+        let mut resolution_files = BTreeSet::new();
+        let mut resolution_contexts = BTreeSet::new();
+        let mut resolution_missing = BTreeSet::new();
+        for request in requests {
+            let resolved = resolver.resolve_with_dependencies(context, &request).await?;
+            let resource = resolved.resource.path;
+            build_inputs.insert(resource.clone());
+            resolved_build_inputs.insert(resource.clone());
+            resolution_files.insert(resource);
+            resolution_files.extend(resolved.file_dependencies);
+            resolution_contexts.extend(resolved.context_dependencies);
+            resolution_missing.extend(resolved.missing_dependencies);
+        }
+        let build_dependencies = self.build_dependency_file_system_info.create_snapshot_sync(build_inputs.iter().cloned(), self.build_dependency_snapshot_strategy)?;
+        let resolve_build_dependencies = self.build_dependency_file_system_info.create_resolve_snapshot_with_cache(resolution_files, resolution_contexts, resolution_missing, self.resolve_build_dependency_snapshot_strategy, &SnapshotCache::default()).await?;
+        let guard = PackFileGuardDto {
+            version: self.cache_version().into_bytes(),
+            build_dependencies: SnapshotDto::try_from(&build_dependencies).expect("fresh Build Dependency Snapshot should encode"),
+            resolve_build_dependencies: SnapshotDto::try_from(&resolve_build_dependencies).expect("fresh Resolve Build Dependency Snapshot should encode"),
+        };
+        let mut inner = self.inner.lock().expect("build cache mutex should not be poisoned");
+        let previous_build_inputs_are_valid = inner.persistent_guard.as_ref().and_then(|previous| Snapshot::try_from(previous.build_dependencies.clone()).ok()).is_some_and(|snapshot| snapshot.has_exact_paths(build_inputs.iter().cloned()) && self.build_dependency_file_system_info.is_snapshot_valid_sync(&snapshot, self.build_dependency_snapshot_strategy));
+        if inner.persistent_guard.is_some() && !previous_build_inputs_are_valid { inner.cache.clear(); }
+        let guard_changed = inner.cache.prepare_persistent(&guard, &build_inputs, &resolved_build_inputs, &self.build_dependency_file_system_info, self.build_dependency_snapshot_strategy, self.resolve_build_dependency_snapshot_strategy);
+        inner.persistent_guard = Some(guard);
+        if guard_changed { inner.dirty_generation = inner.dirty_generation.saturating_add(1); }
+        Ok(())
+    }
+
     pub(crate) fn store_build_dependencies(&self) {
         if self.options.kind != CacheKind::Filesystem || self.options.readonly {
             return;
         }
-        let guard = self
-            .current_persistent_guard()
-            .map_err(|error| error.to_string());
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("build cache mutex should not be poisoned");
-        match guard {
-            Ok(guard) => {
-                inner.persistent_guard = Some(guard);
-                inner.persistent_guard_error = None;
-            }
-            Err(error) => {
-                inner.persistent_guard = None;
-                inner.persistent_guard_error = Some(error);
-            }
-        }
+        // `prepare_for_compilation` records the resolved Build Dependency guard before work begins.
     }
 
     pub(crate) fn pending_generation(&self) -> Option<u64> {
@@ -1296,17 +1326,6 @@ impl BuildCache {
         );
     }
 
-    fn current_persistent_guard(&self) -> io::Result<PackFileGuardDto> {
-        Ok(PackFileGuardDto {
-            version: self.cache_version().into_bytes(),
-            build_dependencies: SnapshotDto::try_from(
-                &self.build_dependency_snapshot(self.build_dependency_snapshot_strategy)?,
-            )?,
-            resolve_build_dependencies: SnapshotDto::try_from(
-                &self.build_dependency_snapshot(self.resolve_build_dependency_snapshot_strategy)?,
-            )?,
-        })
-    }
 }
 
 impl<K, V> CacheFacade<K, V>
@@ -1384,21 +1403,6 @@ impl BuildCache {
     fn cache_version(&self) -> String {
         self.options.version.clone().unwrap_or_default()
     }
-
-    fn build_dependency_snapshot(&self, strategy: SnapshotStrategy) -> io::Result<Snapshot> {
-        let snapshots = self
-            .options
-            .build_dependencies
-            .iter()
-            .map(|dependency| {
-                self.file_system_info
-                    .create_snapshot_sync(dependency.files.clone(), strategy)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-
-        Ok(self.file_system_info.merge_snapshots(snapshots.iter()))
-    }
 }
 
 fn persistent_codec_registry() -> CodecRegistry {
@@ -1407,39 +1411,6 @@ fn persistent_codec_registry() -> CodecRegistry {
         .with_module_build_record(ModuleBuildRecordCodec::current())
         .with_code_generation_record(CodeGenerationRecordCodec::current())
         .with_asset_render_record(AssetRenderRecordCodec::current())
-}
-
-fn persistent_guard_is_valid(
-    guard: &PackFileGuardDto,
-    options: &CacheOptions,
-    file_system_info: &FileSystemInfo,
-    build_dependency_snapshot_strategy: SnapshotStrategy,
-    resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-) -> bool {
-    if guard.version != options.version.clone().unwrap_or_default().as_bytes() {
-        return false;
-    }
-    let Ok(build_dependencies) = Snapshot::try_from(guard.build_dependencies.clone()) else {
-        return false;
-    };
-    let Ok(resolve_build_dependencies) =
-        Snapshot::try_from(guard.resolve_build_dependencies.clone())
-    else {
-        return false;
-    };
-    let paths = options
-        .build_dependencies
-        .iter()
-        .flat_map(|dependency| dependency.files.iter().cloned())
-        .collect::<Vec<_>>();
-    build_dependencies.has_exact_paths(paths.clone())
-        && file_system_info
-            .is_snapshot_valid_sync(&build_dependencies, build_dependency_snapshot_strategy)
-        && resolve_build_dependencies.has_exact_paths(paths)
-        && file_system_info.is_snapshot_valid_sync(
-            &resolve_build_dependencies,
-            resolve_build_dependency_snapshot_strategy,
-        )
 }
 
 #[cfg(test)]

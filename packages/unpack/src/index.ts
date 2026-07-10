@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { statSync, watch as watchFileSystem } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface UnpackOptions {
   name?: string;
@@ -25,6 +26,7 @@ export type CacheOptions =
 
 export interface MemoryCacheOptions {
   type: "memory";
+  maxGenerations?: number;
 }
 
 export interface FilesystemCacheOptions {
@@ -34,6 +36,7 @@ export interface FilesystemCacheOptions {
   name?: string;
   version?: string;
   buildDependencies?: Record<string, string[]>;
+  maxMemoryGenerations?: number;
   maxAge?: number;
   idleTimeout?: number;
   idleTimeoutForInitialStore?: number;
@@ -150,6 +153,8 @@ interface NormalizedCacheOptions {
   name?: string;
   version?: string;
   buildDependencies: NormalizedBuildDependency[];
+  maxMemoryGenerations?: number;
+  automaticBuildDependencies: string[];
   maxAge?: number;
   idleTimeout?: number;
   idleTimeoutForInitialStore?: number;
@@ -159,7 +164,7 @@ interface NormalizedCacheOptions {
 
 interface NormalizedBuildDependency {
   name: string;
-  files: string[];
+  requests: string[];
 }
 
 interface NormalizedSnapshotOptions {
@@ -261,9 +266,8 @@ interface NativeFlushResult {
 }
 
 interface NativeCompiler {
-  run(idleReason?: "ordinary" | "largeChange"): Promise<NativeRunResult>;
-  settleCache(): Promise<NativeFlushResult>;
-  shutdown(): Promise<NativeFlushResult>;
+  run(): Promise<NativeRunResult>;
+  flushCache(): Promise<NativeFlushResult>;
   close(): void;
 }
 
@@ -273,17 +277,31 @@ interface NativeBinding {
 
 const require = createRequire(import.meta.url);
 const native = require("./unpack_node.node") as NativeBinding;
+const unpackJavaScriptPath = fileURLToPath(import.meta.url);
+// The native addon is the compiled closure of the Rust compiler, parser, and
+// resolver; together with the JS entry and package metadata it is the runtime toolchain.
+const unpackToolchainBuildDependencies = [
+  unpackJavaScriptPath,
+  require.resolve("./unpack_node.node"),
+  resolve(dirname(unpackJavaScriptPath), "../package.json")
+];
 
 class CompilerImpl implements Compiler {
   #closed = false;
-  #closing: Promise<Error | null> | undefined;
   #running = false;
   #watching: WatchingImpl | undefined;
+  #idleFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  #pendingCacheFlush: Promise<NativeFlushResult> | undefined;
+  readonly #writableFilesystemCache: boolean;
+  readonly #cacheIdleTimeout: number;
   readonly #infrastructureLoggingLevel: InfrastructureLoggingLevel;
   readonly #nativeCompiler: NativeCompiler;
 
   constructor(options: NormalizedOptions) {
     this.#nativeCompiler = native.createCompiler(options);
+    this.#writableFilesystemCache =
+      options.cache.type === "filesystem" && !options.cache.readonly;
+    this.#cacheIdleTimeout = options.cache.idleTimeout ?? 0;
     this.#infrastructureLoggingLevel = options.infrastructureLogging.level;
   }
 
@@ -315,7 +333,7 @@ class CompilerImpl implements Compiler {
     let run: Promise<NativeRunResult>;
     try {
       this.#emitInfrastructureLog("info", "unpack.Compiler", "run started");
-      run = this.#nativeCompiler.run("ordinary");
+      run = this.#nativeCompiler.run();
     } catch (error) {
       this.#running = false;
       const infrastructureError = toError(error, "InfrastructureError");
@@ -335,6 +353,7 @@ class CompilerImpl implements Compiler {
           return;
         }
 
+        this.#scheduleIdleCacheFlush();
         this.#emitInfrastructureLog("info", "unpack.Compiler", "run completed");
         callback(null, new StatsImpl(normalizeNativeStats(result.stats)));
       },
@@ -355,10 +374,11 @@ class CompilerImpl implements Compiler {
       const error = namedError("CompilerClosedError", "compiler is closed");
       this.#emitInfrastructureLog("error", "unpack.Watch", error.message);
       const watching = new WatchingImpl(
-        (_idleReason, watchHandler) => {
+        (watchHandler) => {
           defer(() => watchHandler(error));
         },
-        async () => null,
+        () => Promise.resolve(null),
+        () => {},
         defaultWatchOptions()
       );
       watching.start(handler);
@@ -369,10 +389,11 @@ class CompilerImpl implements Compiler {
       const error = namedError("ConcurrentRunError", "compiler is already running");
       this.#emitInfrastructureLog("error", "unpack.Watch", error.message);
       const watching = new WatchingImpl(
-        (_idleReason, watchHandler) => {
+        (watchHandler) => {
           defer(() => watchHandler(error));
         },
-        async () => null,
+        () => Promise.resolve(null),
+        () => {},
         defaultWatchOptions()
       );
       watching.start(handler);
@@ -380,13 +401,12 @@ class CompilerImpl implements Compiler {
     }
 
     const watching = new WatchingImpl(
-      (idleReason, watchHandler) => this.#runWatchCompilation(idleReason, watchHandler),
-      async () => {
-        const settleError = await this.#settleCache();
+      (watchHandler) => this.#runWatchCompilation(watchHandler),
+      () => this.#flushCacheNow(),
+      () => {
         if (this.#watching === watching) {
           this.#watching = undefined;
         }
-        return settleError;
       },
       normalizedWatchOptions
     );
@@ -418,23 +438,36 @@ class CompilerImpl implements Compiler {
       return;
     }
 
-    if (this.#closed) {
-      defer(() => callback(null));
-      return;
-    }
+    try {
+      this.#clearIdleFlushTimer();
+      this.#flushCacheNow().then((flushError) => {
+        if (flushError) {
+          callback(flushError);
+          return;
+        }
 
-    this.#closing ??= this.#shutdownAndClose();
-    void this.#closing.then((error) => callback(error));
+        try {
+          this.#nativeCompiler.close();
+          this.#closed = true;
+          callback(null);
+        } catch (error) {
+          const infrastructureError = toError(error, "InfrastructureError");
+          this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
+          callback(infrastructureError);
+        }
+      });
+    } catch (error) {
+      const infrastructureError = toError(error, "InfrastructureError");
+      this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
+      defer(() => callback(infrastructureError));
+    }
   }
 
-  async #runWatchCompilation(
-    idleReason: "ordinary" | "largeChange",
-    handler: WatchHandler
-  ): Promise<void> {
+  async #runWatchCompilation(handler: WatchHandler): Promise<void> {
     let run: Promise<NativeRunResult>;
     try {
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation started");
-      run = this.#nativeCompiler.run(idleReason);
+      run = this.#nativeCompiler.run();
     } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
       this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
@@ -452,6 +485,7 @@ class CompilerImpl implements Compiler {
         return;
       }
 
+      this.#scheduleIdleCacheFlush();
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation completed");
       handler(null, new StatsImpl(normalizeNativeStats(result.stats)));
     } catch (error) {
@@ -461,40 +495,60 @@ class CompilerImpl implements Compiler {
     }
   }
 
-  async #settleCache(): Promise<Error | null> {
-    try {
-      const result = await this.#nativeCompiler.settleCache();
-      if (result.error) {
-        return namedError(result.error.name, result.error.message);
-      }
-      return null;
-    } catch (error) {
-      return toError(error, "InfrastructureError");
+  #scheduleIdleCacheFlush(): void {
+    if (!this.#writableFilesystemCache || this.#closed) {
+      return;
+    }
+
+    this.#clearIdleFlushTimer();
+    this.#idleFlushTimer = setTimeout(() => {
+      this.#idleFlushTimer = undefined;
+      void this.#flushCacheNow();
+    }, this.#cacheIdleTimeout);
+  }
+
+  #clearIdleFlushTimer(): void {
+    if (this.#idleFlushTimer !== undefined) {
+      clearTimeout(this.#idleFlushTimer);
+      this.#idleFlushTimer = undefined;
     }
   }
 
-  async #shutdown(): Promise<Error | null> {
+  async #flushCacheNow(): Promise<Error | null> {
+    if (!this.#writableFilesystemCache) {
+      return null;
+    }
+
+    const startsFlush = this.#pendingCacheFlush === undefined;
+    if (startsFlush) {
+      this.#emitInfrastructureLog("info", "unpack.Cache", "cache flush started");
+    }
+    const flush = this.#pendingCacheFlush ?? this.#nativeCompiler.flushCache();
+    this.#pendingCacheFlush = flush;
+
     try {
-      const result = await this.#nativeCompiler.shutdown();
+      const result = await flush;
       if (result.error) {
-        return namedError(result.error.name, result.error.message);
+        const error = namedError(result.error.name, result.error.message);
+        if (startsFlush) {
+          this.#emitInfrastructureLog("warn", "unpack.Cache", error.message);
+        }
+        return error;
+      }
+      if (startsFlush) {
+        this.#emitInfrastructureLog("info", "unpack.Cache", "cache flush completed");
       }
       return null;
-    } catch (error) {
-      return toError(error, "InfrastructureError");
-    }
-  }
-
-  async #shutdownAndClose(): Promise<Error | null> {
-    const shutdownError = await this.#shutdown();
-    try {
-      this.#nativeCompiler.close();
-      this.#closed = true;
-      return shutdownError;
     } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
-      this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
+      if (startsFlush) {
+        this.#emitInfrastructureLog("error", "unpack.Cache", infrastructureError.message);
+      }
       return infrastructureError;
+    } finally {
+      if (this.#pendingCacheFlush === flush) {
+        this.#pendingCacheFlush = undefined;
+      }
     }
   }
 
@@ -521,36 +575,32 @@ class CompilerImpl implements Compiler {
 
 class WatchingImpl implements Watching {
   #closed = false;
-  #closing: Promise<Error | null> | undefined;
   #running = false;
   #invalidated = false;
   #handler: WatchHandler | undefined;
   #rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #watchers: WatchSubscription[] = [];
-  readonly #runCompilation: (
-    idleReason: "ordinary" | "largeChange",
-    handler: WatchHandler
-  ) => Promise<void> | void;
-  readonly #onClose: () => Promise<Error | null>;
+  readonly #runCompilation: (handler: WatchHandler) => Promise<void> | void;
+  readonly #flushCache: () => Promise<Error | null>;
+  readonly #onClose: () => void;
   readonly #watchOptions: NormalizedWatchOptions;
   readonly #closeCallbacks: CloseCallback[] = [];
 
   constructor(
-    runCompilation: (
-      idleReason: "ordinary" | "largeChange",
-      handler: WatchHandler
-    ) => Promise<void> | void,
-    onClose: () => Promise<Error | null>,
+    runCompilation: (handler: WatchHandler) => Promise<void> | void,
+    flushCache: () => Promise<Error | null>,
+    onClose: () => void,
     watchOptions: NormalizedWatchOptions
   ) {
     this.#runCompilation = runCompilation;
+    this.#flushCache = flushCache;
     this.#onClose = onClose;
     this.#watchOptions = watchOptions;
   }
 
   start(handler: WatchHandler): void {
     this.#handler = handler;
-    this.#run("ordinary");
+    this.#run();
   }
 
   invalidate(): void {
@@ -565,13 +615,13 @@ class WatchingImpl implements Watching {
       return;
     }
 
-    this.#run("largeChange");
+    this.#run();
   }
 
   close(callback: CloseCallback): void {
     assertFunction(callback, "callback");
 
-    if (this.#closed && !this.#running && !this.#closing) {
+    if (this.#closed && !this.#running) {
       defer(() => callback(null));
       return;
     }
@@ -587,7 +637,7 @@ class WatchingImpl implements Watching {
     }
   }
 
-  async #run(idleReason: "ordinary" | "largeChange"): Promise<void> {
+  async #run(): Promise<void> {
     if (this.#closed || this.#running || !this.#handler) {
       return;
     }
@@ -596,7 +646,7 @@ class WatchingImpl implements Watching {
     this.#closeWatchers();
     this.#running = true;
     let latestStats: Stats | undefined;
-    await this.#runCompilation(idleReason, (err, stats) => {
+    await this.#runCompilation((err, stats) => {
       if (!err && stats) {
         latestStats = stats;
       }
@@ -616,17 +666,16 @@ class WatchingImpl implements Watching {
 
     if (this.#invalidated) {
       this.#invalidated = false;
-      await this.#run("largeChange");
+      await this.#run();
     }
   }
 
   async #finishClose(): Promise<void> {
-    this.#closing ??= this.#onClose();
-    const closeError = await this.#closing;
     const callbacks = this.#closeCallbacks.splice(0);
-    this.#closing = undefined;
+    const flushError = await this.#flushCache();
+    this.#onClose();
     for (const callback of callbacks) {
-      callback(closeError);
+      callback(flushError);
     }
   }
 
@@ -869,6 +918,7 @@ function normalizeCacheOptions(
     return {
       type: mode === "development" ? "memory" : "disabled",
       buildDependencies: [],
+      automaticBuildDependencies: [],
       readonly: false
     };
   }
@@ -877,6 +927,7 @@ function normalizeCacheOptions(
     return {
       type: "memory",
       buildDependencies: [],
+      automaticBuildDependencies: [],
       readonly: false
     };
   }
@@ -885,6 +936,7 @@ function normalizeCacheOptions(
     return {
       type: "disabled",
       buildDependencies: [],
+      automaticBuildDependencies: [],
       readonly: false
     };
   }
@@ -900,10 +952,21 @@ function normalizeCacheOptions(
   const cacheRecord = cache as unknown as Record<string, unknown>;
 
   if (type === "memory") {
-    assertCacheKeysForType(cacheRecord, ["type"], "memory");
+    assertCacheKeysForType(cacheRecord, ["type", "maxGenerations"], "memory");
+    const memoryCache = cache as MemoryCacheOptions;
+    const maxMemoryGenerations =
+      memoryCache.maxGenerations === undefined
+        ? undefined
+        : normalizeGenerationLimit(
+            memoryCache.maxGenerations,
+            "options.cache.maxGenerations",
+            false
+          );
     return {
       type: "memory",
       buildDependencies: [],
+      automaticBuildDependencies: [],
+      ...(maxMemoryGenerations === undefined ? {} : { maxMemoryGenerations }),
       readonly: false
     };
   }
@@ -922,6 +985,7 @@ function normalizeCacheOptions(
       "name",
       "version",
       "buildDependencies",
+      "maxMemoryGenerations",
       "maxAge",
       "idleTimeout",
       "idleTimeoutForInitialStore",
@@ -977,6 +1041,16 @@ function normalizeCacheOptions(
     filesystemCache.readonly === undefined
       ? false
       : assertBoolean(filesystemCache.readonly, "options.cache.readonly");
+  const maxMemoryGenerations =
+    filesystemCache.maxMemoryGenerations === undefined
+      ? mode === "development"
+        ? 5
+        : undefined
+      : normalizeGenerationLimit(
+          filesystemCache.maxMemoryGenerations,
+          "options.cache.maxMemoryGenerations",
+          true
+        );
 
   return {
     type,
@@ -992,39 +1066,21 @@ function normalizeCacheOptions(
           )
         }),
     buildDependencies: normalizeBuildDependencies(
-      filesystemCache.buildDependencies,
-      context
+      filesystemCache.buildDependencies
     ),
-    ...(filesystemCache.maxAge === undefined
-      ? {}
-      : {
-          maxAge: assertNonNegativeNumber(
-            filesystemCache.maxAge,
-            "options.cache.maxAge"
-          )
-        }),
+    automaticBuildDependencies: [...unpackToolchainBuildDependencies],
+    ...(maxMemoryGenerations === undefined ? {} : { maxMemoryGenerations }),
+    ...(filesystemCache.maxAge === undefined ? {} : { maxAge: assertNonNegativeNumber(filesystemCache.maxAge, "options.cache.maxAge") }),
     ...(filesystemCache.idleTimeout === undefined
       ? {}
       : {
           idleTimeout: assertNonNegativeInteger(
             filesystemCache.idleTimeout,
             "options.cache.idleTimeout"
-          ),
+          )
         }),
-    idleTimeoutForInitialStore:
-      filesystemCache.idleTimeoutForInitialStore === undefined
-        ? 5_000
-        : assertNonNegativeInteger(
-            filesystemCache.idleTimeoutForInitialStore,
-            "options.cache.idleTimeoutForInitialStore"
-          ),
-    idleTimeoutAfterLargeChanges:
-      filesystemCache.idleTimeoutAfterLargeChanges === undefined
-        ? 1_000
-        : assertNonNegativeInteger(
-            filesystemCache.idleTimeoutAfterLargeChanges,
-            "options.cache.idleTimeoutAfterLargeChanges"
-          ),
+    ...(filesystemCache.idleTimeoutForInitialStore === undefined ? {} : { idleTimeoutForInitialStore: assertNonNegativeInteger(filesystemCache.idleTimeoutForInitialStore, "options.cache.idleTimeoutForInitialStore") }),
+    ...(filesystemCache.idleTimeoutAfterLargeChanges === undefined ? {} : { idleTimeoutAfterLargeChanges: assertNonNegativeInteger(filesystemCache.idleTimeoutAfterLargeChanges, "options.cache.idleTimeoutAfterLargeChanges") }),
     readonly
   };
 }
@@ -1086,7 +1142,7 @@ function assertCacheKeysForType(
     return;
   }
 
-  if (key === "cacheUnaffected" || key === "memoryCacheUnaffected" || key === "maxMemoryGenerations") {
+  if (key === "cacheUnaffected" || key === "memoryCacheUnaffected") {
     throw new TypeError(`options.cache contains unsupported option '${key}'`);
   }
 
@@ -1096,7 +1152,7 @@ function assertCacheKeysForType(
     "name",
     "version",
     "buildDependencies",
-    "maxAge",
+    "maxMemoryGenerations",
     "idleTimeout",
     "readonly",
     "hashAlgorithm",
@@ -1111,8 +1167,7 @@ function assertCacheKeysForType(
 }
 
 function normalizeBuildDependencies(
-  buildDependencies: Record<string, string[]> | undefined,
-  context: string
+  buildDependencies: Record<string, string[]> | undefined
 ): NormalizedBuildDependency[] {
   if (buildDependencies === undefined) {
     return [];
@@ -1125,8 +1180,11 @@ function normalizeBuildDependencies(
     }
     return {
       name,
-      files: files.map((file, index) =>
-        normalizePath(file, `options.cache.buildDependencies.${name}[${index}]`, context)
+      requests: files.map((file, index) =>
+        assertNonEmptyString(
+          file,
+          `options.cache.buildDependencies.${name}[${index}]`
+        )
       )
     };
   });
@@ -1627,6 +1685,28 @@ function assertNonNegativeNumber(value: unknown, name: string): number {
     throw new TypeError(`${name} must be a non-negative number`);
   }
   return value;
+}
+
+function normalizeGenerationLimit(
+  value: unknown,
+  name: string,
+  allowZero: boolean
+): number | undefined {
+  const valid =
+    typeof value === "number" &&
+    !Number.isNaN(value) &&
+    value !== Number.NEGATIVE_INFINITY &&
+    (allowZero ? value >= 0 : value >= 1);
+  if (!valid) {
+    throw new TypeError(
+      `${name} must be ${allowZero ? "non-negative" : "at least 1"}`
+    );
+  }
+  if (value === Number.POSITIVE_INFINITY) {
+    return undefined;
+  }
+
+  return Math.ceil(value);
 }
 
 function assertPositiveInteger(value: unknown, name: string): number {

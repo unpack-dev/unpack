@@ -37,18 +37,66 @@ test("cache objects require a type and reject fields outside the selected cache 
     /options\.cache\.cacheLocation is only valid for filesystem cache/
   );
   assert.throws(
-    createCompiler({ type: "filesystem", maxMemoryGenerations: 2 }),
-    /options\.cache contains unsupported option 'maxMemoryGenerations'/
-  );
-  assert.throws(
     createCompiler({ type: "memory", cacheUnaffected: true }),
     /options\.cache contains unsupported option 'cacheUnaffected'/
+  );
+  assert.throws(
+    createCompiler({
+      type: "filesystem",
+      buildDependencies: { config: [""] }
+    }),
+    /options\.cache\.buildDependencies\.config\[0\] must not be empty/
   );
   assert.throws(
     createCompiler({ type: "filesystem", memoryCacheUnaffected: true }),
     /options\.cache contains unsupported option 'memoryCacheUnaffected'/
   );
   assert.doesNotThrow(createCompiler({ type: "memory" }));
+});
+
+test("memory generation limits follow webpack's zero, finite, and unbounded contract", () => {
+  const createCompiler = (cache: CacheOptions) => () =>
+    unpack({ entry: "./src/index.js", cache });
+
+  assert.throws(
+    createCompiler({ type: "memory", maxGenerations: 0 }),
+    /options\.cache\.maxGenerations must be at least 1/
+  );
+  assert.throws(
+    createCompiler({ type: "memory", maxGenerations: Number.NaN }),
+    /options\.cache\.maxGenerations must be at least 1/
+  );
+  assert.throws(
+    createCompiler({ type: "memory", maxGenerations: 0.25 }),
+    /options\.cache\.maxGenerations must be at least 1/
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "memory", maxGenerations: 1.25 })
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "memory", maxGenerations: Number.POSITIVE_INFINITY })
+  );
+
+  assert.throws(
+    createCompiler({ type: "filesystem", maxMemoryGenerations: -1 }),
+    /options\.cache\.maxMemoryGenerations must be non-negative/
+  );
+  assert.throws(
+    createCompiler({ type: "filesystem", maxMemoryGenerations: Number.NaN }),
+    /options\.cache\.maxMemoryGenerations must be non-negative/
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "filesystem", maxMemoryGenerations: 0 })
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "filesystem", maxMemoryGenerations: 0.25 })
+  );
+  assert.doesNotThrow(
+    createCompiler({
+      type: "filesystem",
+      maxMemoryGenerations: Number.POSITIVE_INFINITY
+    })
+  );
 });
 
 test("filesystem cache derives its name and directory from the top-level contract across processes", async () => {
@@ -512,6 +560,160 @@ test("Asset Render records restore source while each process finalizes and emits
   }
 });
 
+test("resolved Build Dependency requests guard PackFile entries across processes", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const result = 'ok';",
+    "config/tool.js": "export default 'before';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/resolved-build-dependencies");
+  const build = (label: string) =>
+    runCacheProcess({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "none",
+        outputPath: join(fixture, "dist"),
+        cache: {
+          type: "filesystem",
+          cacheLocation,
+          buildDependencies: {
+            [label]: ["./config/tool"]
+          }
+        }
+      }
+    });
+
+  try {
+    const cold = await build("config");
+    const relabeledWarm = await build("label-is-nonsemantic");
+    await writeFile(
+      join(fixture, "config/tool.js"),
+      "export default 'after';",
+      "utf8"
+    );
+    const changed = await build("config");
+
+    assert.equal(cold.error, null);
+    assert.equal(relabeledWarm.error, null);
+    assert.equal(changed.error, null);
+    assert.deepEqual(cold.cacheWork, {
+      resolve: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 },
+      moduleBuild: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
+    });
+    assert.deepEqual(relabeledWarm.cacheWork, {
+      resolve: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 },
+      moduleBuild: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 },
+      assetRender: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 }
+    });
+    assert.deepEqual(changed.cacheWork, cold.cacheWork);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Build Dependency re-resolution preserves PackFile when package metadata selects the same input", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const result = 'ok';",
+    "node_modules/config-pkg/package.json": JSON.stringify({
+      name: "config-pkg",
+      version: "1.0.0",
+      main: "config.js",
+      exports: { ".": "./config.js" }
+    }),
+    "node_modules/config-pkg/config.js": "export default 'config';",
+    "node_modules/config-pkg/alternate.js": "export default 'alternate';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/package-build-dependency");
+  const build = () =>
+    runCacheProcess({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "none",
+        outputPath: join(fixture, "dist"),
+        cache: {
+          type: "filesystem",
+          cacheLocation,
+          buildDependencies: { config: ["config-pkg"] }
+        }
+      }
+    });
+
+  try {
+    const cold = await build();
+    await writeFile(
+      join(fixture, "node_modules/config-pkg/package.json"),
+      JSON.stringify({
+        name: "config-pkg",
+        version: "1.0.0",
+        main: "config.js",
+        exports: { ".": "./config.js" },
+        description: "resolution transcript changed"
+      }),
+      "utf8"
+    );
+    const sameSelection = await build();
+    await writeFile(
+      join(fixture, "node_modules/config-pkg/package.json"),
+      JSON.stringify({
+        name: "config-pkg",
+        version: "1.0.0",
+        main: "alternate.js",
+        exports: { ".": "./alternate.js" }
+      }),
+      "utf8"
+    );
+    const differentSelection = await build();
+
+    assert.deepEqual(cold.cacheWork, singleModuleCacheWork("cold"));
+    assert.deepEqual(sameSelection.cacheWork, singleModuleCacheWork("warm"));
+    assert.deepEqual(differentSelection.cacheWork, singleModuleCacheWork("cold"));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Build Dependency re-resolution goes cold when Context candidates appear or disappear", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const result = 'ok';",
+    "config.js": "export default 'javascript';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/context-build-dependency");
+  const build = () =>
+    runCacheProcess({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "none",
+        outputPath: join(fixture, "dist"),
+        cache: {
+          type: "filesystem",
+          cacheLocation,
+          buildDependencies: { config: ["./config"] }
+        }
+      }
+    });
+
+  try {
+    const javascriptSelection = await build();
+    await writeFile(
+      join(fixture, "config.ts"),
+      "export default 'typescript';",
+      "utf8"
+    );
+    const higherPriorityCandidate = await build();
+    await rm(join(fixture, "config.ts"));
+    const candidateRemoved = await build();
+
+    assert.deepEqual(javascriptSelection.cacheWork, singleModuleCacheWork("cold"));
+    assert.deepEqual(higherPriorityCandidate.cacheWork, singleModuleCacheWork("cold"));
+    assert.deepEqual(candidateRemoved.cacheWork, singleModuleCacheWork("cold"));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("a source mutation rebuilds only the affected Module Build record", async () => {
   const fixture = await createFixture({
     "src/index.js": [
@@ -805,6 +1007,18 @@ function publicBuildOutcome(observation: CacheProcessObservation) {
     hasStats: observation.hasStats,
     hasErrors: observation.hasErrors,
     assets: observation.assets
+  };
+}
+
+function singleModuleCacheWork(kind: "cold" | "warm") {
+  const item =
+    kind === "cold"
+      ? { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
+      : { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 };
+  return {
+    resolve: { ...item },
+    moduleBuild: { ...item },
+    assetRender: { ...item }
   };
 }
 

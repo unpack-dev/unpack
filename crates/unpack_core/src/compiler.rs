@@ -648,6 +648,12 @@ impl Compiler {
         &self,
         idle_reason: CacheIdleReason,
     ) -> Result<PendingCompilation> {
+        self.build_cache
+            .prepare_for_compilation(
+                &self.options.context,
+                &UnpackResolver::new(self.options.resolve.clone()),
+            )
+            .await?;
         let cache_activity = self.cache_lifecycle.end_idle(idle_reason)?;
         let result = async {
             let mut compilation = self.create_compilation();

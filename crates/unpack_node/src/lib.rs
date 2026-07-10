@@ -73,10 +73,12 @@ pub struct NativeCacheOptions {
     pub version: Option<String>,
     #[napi(js_name = "buildDependencies")]
     pub build_dependencies: Vec<NativeBuildDependency>,
+    #[napi(js_name = "automaticBuildDependencies")]
+    pub automatic_build_dependencies: Vec<String>,
     #[napi(js_name = "maxAge")]
     pub max_age: Option<f64>,
     #[napi(js_name = "maxMemoryGenerations")]
-    pub max_memory_generations: Option<u32>,
+    pub max_memory_generations: Option<f64>,
     #[napi(js_name = "idleTimeout")]
     pub idle_timeout: Option<u32>,
     #[napi(js_name = "idleTimeoutForInitialStore")]
@@ -90,7 +92,7 @@ pub struct NativeCacheOptions {
 #[napi(object)]
 pub struct NativeBuildDependency {
     pub name: String,
-    pub files: Vec<String>,
+    pub requests: Vec<String>,
 }
 
 #[napi(object)]
@@ -306,9 +308,15 @@ fn cache_options_from_native(options: NativeCacheOptions) -> Result<CacheOptions
         .into_iter()
         .map(|dependency| BuildDependency {
             name: dependency.name,
-            files: dependency.files.into_iter().map(PathBuf::from).collect(),
+            requests: dependency.requests,
         })
         .collect();
+    cache.automatic_build_dependencies = options
+        .automatic_build_dependencies
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    cache.max_memory_generations = options.max_memory_generations.map(|generations| generations as u32);
     if let Some(max_age) = options.max_age {
         if max_age.is_nan() || max_age < 0.0 {
             return Err(napi::Error::from_reason(
@@ -322,7 +330,6 @@ fn cache_options_from_native(options: NativeCacheOptions) -> Result<CacheOptions
                 .unwrap_or(std::time::Duration::MAX)
         };
     }
-    cache.max_memory_generations = options.max_memory_generations;
     cache.idle_timeout = options.idle_timeout;
     cache.idle_timeout_for_initial_store = options.idle_timeout_for_initial_store;
     cache.idle_timeout_after_large_changes = options.idle_timeout_after_large_changes;

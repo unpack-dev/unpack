@@ -43,6 +43,7 @@ export interface FilesystemCacheOptions {
   idleTimeout?: number;
   idleTimeoutForInitialStore?: number;
   idleTimeoutAfterLargeChanges?: number;
+  profile?: boolean;
   readonly?: boolean;
   hashAlgorithm?: string;
   managedPaths?: SnapshotPathPattern[];
@@ -163,6 +164,7 @@ interface NormalizedCacheOptions {
   idleTimeout?: number;
   idleTimeoutForInitialStore?: number;
   idleTimeoutAfterLargeChanges?: number;
+  profile: boolean;
   readonly: boolean;
 }
 
@@ -267,6 +269,7 @@ interface NativeFlushResult {
     name: string;
     message: string;
   } | null;
+  logs?: InfrastructureLogEvent[] | null;
 }
 
 interface NativeCompiler {
@@ -527,6 +530,7 @@ class CompilerImpl implements Compiler {
 
     try {
       const result = await flush;
+      this.#emitInfrastructureLogs(result.logs);
       if (result.error) {
         const error = namedError(result.error.name, result.error.message);
         if (startsFlush) {
@@ -918,6 +922,7 @@ function normalizeCacheOptions(
       type: mode === "development" ? "memory" : "disabled",
       buildDependencies: [],
       automaticBuildDependencies: [],
+      profile: false,
       readonly: false
     };
   }
@@ -927,6 +932,7 @@ function normalizeCacheOptions(
       type: "memory",
       buildDependencies: [],
       automaticBuildDependencies: [],
+      profile: false,
       readonly: false
     };
   }
@@ -936,6 +942,7 @@ function normalizeCacheOptions(
       type: "disabled",
       buildDependencies: [],
       automaticBuildDependencies: [],
+      profile: false,
       readonly: false
     };
   }
@@ -966,6 +973,7 @@ function normalizeCacheOptions(
       buildDependencies: [],
       automaticBuildDependencies: [],
       ...(maxMemoryGenerations === undefined ? {} : { maxMemoryGenerations }),
+      profile: false,
       readonly: false
     };
   }
@@ -991,6 +999,7 @@ function normalizeCacheOptions(
       "idleTimeout",
       "idleTimeoutForInitialStore",
       "idleTimeoutAfterLargeChanges",
+      "profile",
       "readonly",
       "hashAlgorithm",
       "managedPaths",
@@ -1088,6 +1097,10 @@ function normalizeCacheOptions(
         }),
     ...(filesystemCache.idleTimeoutForInitialStore === undefined ? {} : { idleTimeoutForInitialStore: assertNonNegativeInteger(filesystemCache.idleTimeoutForInitialStore, "options.cache.idleTimeoutForInitialStore") }),
     ...(filesystemCache.idleTimeoutAfterLargeChanges === undefined ? {} : { idleTimeoutAfterLargeChanges: assertNonNegativeInteger(filesystemCache.idleTimeoutAfterLargeChanges, "options.cache.idleTimeoutAfterLargeChanges") }),
+    profile:
+      filesystemCache.profile === undefined
+        ? false
+        : assertBoolean(filesystemCache.profile, "options.cache.profile"),
     readonly
   };
 }
@@ -1160,7 +1173,11 @@ function assertCacheKeysForType(
     "version",
     "buildDependencies",
     "maxMemoryGenerations",
+    "maxAge",
     "idleTimeout",
+    "idleTimeoutForInitialStore",
+    "idleTimeoutAfterLargeChanges",
+    "profile",
     "readonly",
     "hashAlgorithm",
     "managedPaths",

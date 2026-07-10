@@ -1159,6 +1159,52 @@ test("infrastructure logging level verbose reports compilation phases", async ()
   }
 });
 
+test("cache profile reports persistent activity through infrastructure logging only", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const captured = captureConsole();
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation: join(fixture, ".cache/unpack/profile"),
+      profile: true,
+      idleTimeout: 0
+    },
+    infrastructureLogging: { level: "log" }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    await closeCompiler(compiler);
+
+    assert.equal(result.err, null);
+    assert.ok(result.stats);
+    assert.equal("cache" in result.stats.toJson(), false);
+    assert.equal("logs" in result.stats.toJson(), false);
+    const profile = captured.calls.log.filter((message) =>
+      message.startsWith("[unpack.Cache.Profile]")
+    );
+    for (const activity of [
+      "restore",
+      "store",
+      "serialization",
+      "deserialization",
+      "garbage collection",
+      "merge",
+      "split",
+      "compaction"
+    ]) {
+      assert.ok(profile.some((message) => message.includes(activity)), activity);
+    }
+  } finally {
+    captured.restore();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("top-level option validation throws synchronously", () => {
   assert.throws(
     () =>

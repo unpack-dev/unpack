@@ -4,15 +4,16 @@ use std::{
     fmt, fs, io,
     marker::PhantomData,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use crate::{
-    ModuleIdentity, SnapshotOptions, SnapshotStrategy, UnpackResolver,
+    InfrastructureLogEvent, InfrastructureLogLevel, ModuleIdentity, SnapshotOptions,
+    SnapshotStrategy, UnpackResolver,
     cache_hash::stable_hash,
     code_generation_record::CodeGenerationResult,
     pack_file::{
@@ -37,6 +38,56 @@ const MODULE_BUILD_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack
 const CODE_GENERATION_CACHE_NAMESPACE: CacheNamespace =
     CacheNamespace::new("unpack/code-generation");
 const ASSET_RENDER_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/asset-render");
+const CACHE_PROFILE_LOGGER: &str = "unpack.Cache.Profile";
+const CACHE_WRITER_LOGGER: &str = "unpack.Cache.Writer";
+
+#[derive(Debug)]
+struct CacheDiagnostics {
+    profile: bool,
+    events: Mutex<Vec<InfrastructureLogEvent>>,
+}
+
+impl CacheDiagnostics {
+    fn new(profile: bool) -> Self {
+        Self {
+            profile,
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn profile(&self, message: impl Into<String>) {
+        if self.profile {
+            self.events
+                .lock()
+                .expect("cache diagnostics mutex should not be poisoned")
+                .push(InfrastructureLogEvent::new(
+                    InfrastructureLogLevel::Log,
+                    CACHE_PROFILE_LOGGER,
+                    message,
+                ));
+        }
+    }
+
+    fn warn(&self, message: impl Into<String>) {
+        self.events
+            .lock()
+            .expect("cache diagnostics mutex should not be poisoned")
+            .push(InfrastructureLogEvent::new(
+                InfrastructureLogLevel::Warn,
+                CACHE_WRITER_LOGGER,
+                message,
+            ));
+    }
+
+    fn drain(&self) -> Vec<InfrastructureLogEvent> {
+        std::mem::take(
+            &mut *self
+                .events
+                .lock()
+                .expect("cache diagnostics mutex should not be poisoned"),
+        )
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct BuildCache {
@@ -44,6 +95,7 @@ pub(crate) struct BuildCache {
     build_dependency_snapshot_strategy: SnapshotStrategy,
     resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
     build_dependency_file_system_info: FileSystemInfo,
+    diagnostics: Arc<CacheDiagnostics>,
     inner: Arc<Mutex<BuildCacheInner>>,
 }
 
@@ -171,6 +223,7 @@ pub struct CacheOptions {
     pub idle_timeout: Option<u32>,
     pub idle_timeout_for_initial_store: Option<u32>,
     pub idle_timeout_after_large_changes: Option<u32>,
+    pub profile: bool,
     pub readonly: bool,
 }
 
@@ -197,6 +250,7 @@ impl CacheOptions {
             idle_timeout: None,
             idle_timeout_for_initial_store: None,
             idle_timeout_after_large_changes: None,
+            profile: false,
             readonly: false,
         }
     }
@@ -217,6 +271,7 @@ impl CacheOptions {
             idle_timeout: None,
             idle_timeout_for_initial_store: None,
             idle_timeout_after_large_changes: None,
+            profile: false,
             readonly: false,
         }
     }
@@ -237,6 +292,7 @@ impl CacheOptions {
             idle_timeout: Some(60_000),
             idle_timeout_for_initial_store: Some(5_000),
             idle_timeout_after_large_changes: Some(1_000),
+            profile: false,
             readonly: false,
         }
     }
@@ -335,8 +391,9 @@ impl BuildCacheInner {
     fn new(
         options: &CacheOptions,
         clock: Arc<dyn CacheClock>,
+        diagnostics: Arc<CacheDiagnostics>,
     ) -> Self {
-        let cache = Cache::from_options(options);
+        let cache = Cache::from_options(options, diagnostics);
         let initial_store_pending = !cache.has_persistent_publication();
         Self {
             cache,
@@ -416,7 +473,9 @@ trait CacheLayer: fmt::Debug + Send + Sync {
         _file_system_info: &FileSystemInfo,
         _build_dependency_snapshot_strategy: SnapshotStrategy,
         _resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-    ) -> bool { false }
+    ) -> bool {
+        false
+    }
     fn touch(
         &mut self,
         _address: &CacheAddress,
@@ -531,7 +590,9 @@ impl CacheLayer for MemoryCacheLayer {
         evicted
     }
 
-    fn clear(&mut self) { self.entries.clear(); }
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
 
     fn evict(&mut self, address: &CacheAddress) -> bool {
         self.entries.remove(address).is_some()
@@ -556,10 +617,118 @@ struct PackFileCacheLayer {
     publication_base: PublicationBase,
     active: bool,
     pending: HashMap<CacheAddress, CacheEntry>,
+    diagnostics: Arc<CacheDiagnostics>,
+    _writer_marker: Option<CacheWriterMarker>,
+}
+
+#[derive(Debug)]
+struct CacheWriterMarker {
+    path: PathBuf,
+    contents: String,
+}
+
+static NEXT_WRITER_TOKEN: AtomicU64 = AtomicU64::new(1);
+static PROCESS_START_ID: OnceLock<String> = OnceLock::new();
+
+impl CacheWriterMarker {
+    fn acquire(root: &Path, diagnostics: &CacheDiagnostics) -> Option<Self> {
+        if let Err(error) = fs::create_dir_all(root) {
+            diagnostics.warn(format!(
+                "single-writer diagnostic unavailable at {}: {error}; continuing best-effort",
+                root.display()
+            ));
+            return None;
+        }
+        let path = root.join(".unpack-writer");
+        let pid = std::process::id();
+        let start = current_process_start_id();
+        let token = NEXT_WRITER_TOKEN.fetch_add(1, Ordering::Relaxed);
+        let contents = format!("UNPACK-WRITER-1\npid={pid}\nstart={start}\ntoken={token}\n");
+        for _ in 0..2 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if file.write_all(contents.as_bytes()).is_ok() {
+                        return Some(Self { path, contents });
+                    }
+                    let _ = fs::remove_file(&path);
+                    return None;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let existing = fs::read_to_string(&path).unwrap_or_default();
+                    if writer_marker_is_live(&existing) {
+                        diagnostics.warn(format!(
+                            "detected another live writer for Persistent Cache location {}; continuing best-effort without a cross-process lock or merge protocol; contract=trusted-local,linux-supported,single-writer",
+                            root.display()
+                        ));
+                        return None;
+                    }
+                    let _ = fs::remove_file(&path);
+                }
+                Err(error) => {
+                    diagnostics.warn(format!(
+                        "single-writer diagnostic unavailable at {}: {error}; continuing best-effort",
+                        root.display()
+                    ));
+                    return None;
+                }
+            }
+        }
+        None
+    }
+}
+
+impl Drop for CacheWriterMarker {
+    fn drop(&mut self) {
+        if fs::read_to_string(&self.path).ok().as_deref() == Some(self.contents.as_str()) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn current_process_start_id() -> &'static str {
+    PROCESS_START_ID.get_or_init(|| {
+        linux_process_start_id(std::process::id()).unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string()
+        })
+    })
+}
+
+fn linux_process_start_id(pid: u32) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    fields.get(19).map(|value| (*value).to_string())
+}
+
+fn writer_marker_is_live(contents: &str) -> bool {
+    let value = |prefix: &str| contents.lines().find_map(|line| line.strip_prefix(prefix));
+    let Some(pid) = value("pid=").and_then(|pid| pid.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(start) = value("start=") else {
+        return false;
+    };
+    if pid == std::process::id() {
+        return start == current_process_start_id();
+    }
+    linux_process_start_id(pid).is_some_and(|candidate| candidate == start)
+        || !cfg!(target_os = "linux")
 }
 
 impl PackFileCacheLayer {
-    fn open(options: &CacheOptions) -> Self {
+    fn open(options: &CacheOptions, diagnostics: Arc<CacheDiagnostics>) -> Self {
         let registry = persistent_codec_registry();
         let root = options.cache_location.clone();
         let compression = options.compression.into();
@@ -583,6 +752,12 @@ impl PackFileCacheLayer {
         } else {
             PublicationBase::ReplaceAll
         };
+        let writer_marker = if options.readonly {
+            None
+        } else {
+            root.as_deref()
+                .and_then(|root| CacheWriterMarker::acquire(root, &diagnostics))
+        };
         Self {
             root,
             registry,
@@ -595,6 +770,8 @@ impl PackFileCacheLayer {
             // restore the legacy empty-guard PackFile directly.
             active: true,
             pending: HashMap::new(),
+            diagnostics,
+            _writer_marker: writer_marker,
         }
     }
 
@@ -608,6 +785,9 @@ impl PackFileCacheLayer {
             self.pending.clear();
             return Ok(());
         };
+        let before_entries = self.pack_file.as_ref().map_or(0, PackFile::entry_count);
+        let queued_items = self.pending.len();
+        let serialization_started = Instant::now();
         let mut batch = PackFileWriteBatch::new();
         if let Some(pack_file) = &self.pack_file {
             pack_file.copy_access_updates_to(&mut batch);
@@ -658,6 +838,11 @@ impl PackFileCacheLayer {
                 }
             }
         }
+        self.diagnostics.profile(format!(
+            "serialization items={queued_items} duration_us={}",
+            serialization_started.elapsed().as_micros()
+        ));
+        let store_started = Instant::now();
         PackFile::publish_batch_with_options(
             root,
             Some(guard),
@@ -670,6 +855,12 @@ impl PackFileCacheLayer {
         )?;
         self.pending.clear();
         let pack_file = PackFile::open_with_options(root, self.registry.clone(), self.open_options);
+        let after_entries = pack_file.entry_count();
+        self.diagnostics.profile(format!(
+            "store items={queued_items} duration_us={}; garbage collection removed_items={}; merge packs=0; split packs=0; compaction packs=0",
+            store_started.elapsed().as_micros(),
+            before_entries.saturating_sub(after_entries)
+        ));
         self.publication_base = PublicationBase::PreserveEntries {
             expected_revision: pack_file.revision(),
         };
@@ -691,10 +882,11 @@ impl CacheLayer for PackFileCacheLayer {
         if !self.active {
             return None;
         }
+        let started = Instant::now();
         let pack_file = self.pack_file.as_mut()?;
         let pack_address = address.to_pack_file_address();
         let pack_etag = etag.map(CacheETag::to_pack_file_etag);
-        match address.namespace {
+        let restored = match address.namespace {
             RESOLVE_CACHE_NAMESPACE => {
                 let dto = pack_file.get_resolve_record(&pack_address, pack_etag.as_ref())?;
                 let record = ResolveRecord::try_from((*dto).clone()).ok()?;
@@ -734,10 +926,18 @@ impl CacheLayer for PackFileCacheLayer {
                 ))
             }
             _ => None,
+        };
+        if restored.is_some() {
+            self.diagnostics.profile(format!(
+                "restore items=1; deserialization items=1 duration_us={}",
+                started.elapsed().as_micros()
+            ));
         }
+        restored
     }
 
     fn store(&mut self, address: CacheAddress, entry: CacheEntry) {
+        self.diagnostics.profile("store queued_items=1");
         self.pending.insert(address, entry);
     }
 
@@ -758,17 +958,42 @@ impl CacheLayer for PackFileCacheLayer {
     ) -> bool {
         let active = self.pack_file.as_ref().is_some_and(|pack_file| {
             pack_file.guard().is_some_and(|candidate| {
-                let build_dependencies = Snapshot::try_from(candidate.build_dependencies.clone()).ok();
-                let resolve_build_dependencies = Snapshot::try_from(candidate.resolve_build_dependencies.clone()).ok();
+                let build_dependencies =
+                    Snapshot::try_from(candidate.build_dependencies.clone()).ok();
+                let resolve_build_dependencies =
+                    Snapshot::try_from(candidate.resolve_build_dependencies.clone()).ok();
                 candidate.version == guard.version
-                    && build_dependencies.is_some_and(|snapshot| snapshot.has_exact_paths(build_inputs.iter().cloned()) && file_system_info.is_snapshot_valid_sync(&snapshot, build_dependency_snapshot_strategy))
-                    && resolve_build_dependencies.is_some_and(|snapshot| file_system_info.is_snapshot_valid_sync(&snapshot, resolve_build_dependency_snapshot_strategy) || snapshot.has_valid_paths_sync(resolved_build_inputs.iter().cloned(), resolve_build_dependency_snapshot_strategy, file_system_info))
+                    && build_dependencies.is_some_and(|snapshot| {
+                        snapshot.has_exact_paths(build_inputs.iter().cloned())
+                            && file_system_info.is_snapshot_valid_sync(
+                                &snapshot,
+                                build_dependency_snapshot_strategy,
+                            )
+                    })
+                    && resolve_build_dependencies.is_some_and(|snapshot| {
+                        file_system_info.is_snapshot_valid_sync(
+                            &snapshot,
+                            resolve_build_dependency_snapshot_strategy,
+                        ) || snapshot.has_valid_paths_sync(
+                            resolved_build_inputs.iter().cloned(),
+                            resolve_build_dependency_snapshot_strategy,
+                            file_system_info,
+                        )
+                    })
             })
         });
         self.active = active;
         self.publication_base = if active {
-            PublicationBase::PreserveEntries { expected_revision: self.pack_file.as_ref().expect("active PackFile should be open").revision() }
-        } else { PublicationBase::ReplaceAll };
+            PublicationBase::PreserveEntries {
+                expected_revision: self
+                    .pack_file
+                    .as_ref()
+                    .expect("active PackFile should be open")
+                    .revision(),
+            }
+        } else {
+            PublicationBase::ReplaceAll
+        };
         self.pack_file.as_ref().and_then(PackFile::guard) != Some(guard)
     }
 
@@ -834,7 +1059,7 @@ struct Cache {
 }
 
 impl Cache {
-    fn from_options(options: &CacheOptions) -> Self {
+    fn from_options(options: &CacheOptions, diagnostics: Arc<CacheDiagnostics>) -> Self {
         let mut layers = Vec::new();
         let memory_retention = MemoryRetention::from_options(options);
         if memory_retention != MemoryRetention::Disabled {
@@ -848,7 +1073,7 @@ impl Cache {
             layers.push(CacheLayerSlot {
                 kind: CacheLayerKind::Persistent,
                 writable: !options.readonly,
-                layer: Box::new(PackFileCacheLayer::open(options)),
+                layer: Box::new(PackFileCacheLayer::open(options, diagnostics)),
             });
         }
         Self {
@@ -949,12 +1174,34 @@ impl Cache {
         self.work
     }
 
-    fn clear(&mut self) { for slot in &mut self.layers { slot.layer.clear(); } }
+    fn clear(&mut self) {
+        for slot in &mut self.layers {
+            slot.layer.clear();
+        }
+    }
 
     fn prepare_persistent(
-        &mut self, guard: &PackFileGuardDto, build_inputs: &BTreeSet<PathBuf>, resolved_build_inputs: &BTreeSet<PathBuf>, file_system_info: &FileSystemInfo, build_dependency_snapshot_strategy: SnapshotStrategy, resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+        &mut self,
+        guard: &PackFileGuardDto,
+        build_inputs: &BTreeSet<PathBuf>,
+        resolved_build_inputs: &BTreeSet<PathBuf>,
+        file_system_info: &FileSystemInfo,
+        build_dependency_snapshot_strategy: SnapshotStrategy,
+        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
     ) -> bool {
-        self.layers.iter_mut().find(|slot| slot.kind == CacheLayerKind::Persistent).is_some_and(|slot| slot.layer.prepare_persistent(guard, build_inputs, resolved_build_inputs, file_system_info, build_dependency_snapshot_strategy, resolve_build_dependency_snapshot_strategy))
+        self.layers
+            .iter_mut()
+            .find(|slot| slot.kind == CacheLayerKind::Persistent)
+            .is_some_and(|slot| {
+                slot.layer.prepare_persistent(
+                    guard,
+                    build_inputs,
+                    resolved_build_inputs,
+                    file_system_info,
+                    build_dependency_snapshot_strategy,
+                    resolve_build_dependency_snapshot_strategy,
+                )
+            })
     }
 
     fn on_compilation_completed(&mut self) {
@@ -971,7 +1218,6 @@ impl Cache {
         stamp: AccessStamp,
         max_age: Duration,
     ) -> io::Result<()> {
-
         let Some(slot) = self
             .layers
             .iter_mut()
@@ -1249,21 +1495,27 @@ impl BuildCache {
         let resolve_build_dependency_snapshot_strategy =
             snapshot_options.resolve_build_dependencies;
         let build_dependency_file_system_info = FileSystemInfo::for_build_dependencies();
-        let inner = BuildCacheInner::new(
-            &options,
-            clock,
+        let diagnostics = Arc::new(CacheDiagnostics::new(options.profile));
+        diagnostics.profile(
+            "restore items=0; deserialization items=0; contract=trusted-local,linux-supported,single-writer coordination=none",
         );
+        let inner = BuildCacheInner::new(&options, clock, diagnostics.clone());
         Self {
             options,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
             build_dependency_file_system_info,
+            diagnostics,
             inner: Arc::new(Mutex::new(inner)),
         }
     }
 
     pub(crate) fn normal_module_factory(&self) -> NormalModuleFactoryCache {
         self.facade(RESOLVE_CACHE_NAMESPACE, CacheItemFamily::Resolve)
+    }
+
+    pub(crate) fn take_infrastructure_log_events(&self) -> Vec<InfrastructureLogEvent> {
+        self.diagnostics.drain()
     }
 
     pub(crate) fn module_builds(&self) -> ModuleBuildCache {
@@ -1299,15 +1551,29 @@ impl BuildCache {
         context: &Path,
         resolver: &UnpackResolver,
     ) -> crate::Result<()> {
-        if self.options.kind != CacheKind::Filesystem { return Ok(()); }
-        let requests = self.options.build_dependencies.iter().flat_map(|dependency| dependency.requests.iter().cloned()).collect::<BTreeSet<_>>();
-        let mut build_inputs = self.options.automatic_build_dependencies.iter().map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone())).collect::<BTreeSet<_>>();
+        if self.options.kind != CacheKind::Filesystem {
+            return Ok(());
+        }
+        let requests = self
+            .options
+            .build_dependencies
+            .iter()
+            .flat_map(|dependency| dependency.requests.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut build_inputs = self
+            .options
+            .automatic_build_dependencies
+            .iter()
+            .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .collect::<BTreeSet<_>>();
         let mut resolved_build_inputs = BTreeSet::new();
         let mut resolution_files = BTreeSet::new();
         let mut resolution_contexts = BTreeSet::new();
         let mut resolution_missing = BTreeSet::new();
         for request in requests {
-            let resolved = resolver.resolve_with_dependencies(context, &request).await?;
+            let resolved = resolver
+                .resolve_with_dependencies(context, &request)
+                .await?;
             let resource = resolved.resource.path;
             build_inputs.insert(resource.clone());
             resolved_build_inputs.insert(resource.clone());
@@ -1316,19 +1582,58 @@ impl BuildCache {
             resolution_contexts.extend(resolved.context_dependencies);
             resolution_missing.extend(resolved.missing_dependencies);
         }
-        let build_dependencies = self.build_dependency_file_system_info.create_snapshot_sync(build_inputs.iter().cloned(), self.build_dependency_snapshot_strategy)?;
-        let resolve_build_dependencies = self.build_dependency_file_system_info.create_resolve_snapshot_with_cache(resolution_files, resolution_contexts, resolution_missing, self.resolve_build_dependency_snapshot_strategy, &SnapshotCache::default()).await?;
+        let build_dependencies = self
+            .build_dependency_file_system_info
+            .create_snapshot_sync(
+                build_inputs.iter().cloned(),
+                self.build_dependency_snapshot_strategy,
+            )?;
+        let resolve_build_dependencies = self
+            .build_dependency_file_system_info
+            .create_resolve_snapshot_with_cache(
+                resolution_files,
+                resolution_contexts,
+                resolution_missing,
+                self.resolve_build_dependency_snapshot_strategy,
+                &SnapshotCache::default(),
+            )
+            .await?;
         let guard = PackFileGuardDto {
             version: self.cache_version().into_bytes(),
-            build_dependencies: SnapshotDto::try_from(&build_dependencies).expect("fresh Build Dependency Snapshot should encode"),
-            resolve_build_dependencies: SnapshotDto::try_from(&resolve_build_dependencies).expect("fresh Resolve Build Dependency Snapshot should encode"),
+            build_dependencies: SnapshotDto::try_from(&build_dependencies)
+                .expect("fresh Build Dependency Snapshot should encode"),
+            resolve_build_dependencies: SnapshotDto::try_from(&resolve_build_dependencies)
+                .expect("fresh Resolve Build Dependency Snapshot should encode"),
         };
-        let mut inner = self.inner.lock().expect("build cache mutex should not be poisoned");
-        let previous_build_inputs_are_valid = inner.persistent_guard.as_ref().and_then(|previous| Snapshot::try_from(previous.build_dependencies.clone()).ok()).is_some_and(|snapshot| snapshot.has_exact_paths(build_inputs.iter().cloned()) && self.build_dependency_file_system_info.is_snapshot_valid_sync(&snapshot, self.build_dependency_snapshot_strategy));
-        if inner.persistent_guard.is_some() && !previous_build_inputs_are_valid { inner.cache.clear(); }
-        let guard_changed = inner.cache.prepare_persistent(&guard, &build_inputs, &resolved_build_inputs, &self.build_dependency_file_system_info, self.build_dependency_snapshot_strategy, self.resolve_build_dependency_snapshot_strategy);
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        let previous_build_inputs_are_valid = inner
+            .persistent_guard
+            .as_ref()
+            .and_then(|previous| Snapshot::try_from(previous.build_dependencies.clone()).ok())
+            .is_some_and(|snapshot| {
+                snapshot.has_exact_paths(build_inputs.iter().cloned())
+                    && self
+                        .build_dependency_file_system_info
+                        .is_snapshot_valid_sync(&snapshot, self.build_dependency_snapshot_strategy)
+            });
+        if inner.persistent_guard.is_some() && !previous_build_inputs_are_valid {
+            inner.cache.clear();
+        }
+        let guard_changed = inner.cache.prepare_persistent(
+            &guard,
+            &build_inputs,
+            &resolved_build_inputs,
+            &self.build_dependency_file_system_info,
+            self.build_dependency_snapshot_strategy,
+            self.resolve_build_dependency_snapshot_strategy,
+        );
         inner.persistent_guard = Some(guard);
-        if guard_changed { inner.dirty_generation = inner.dirty_generation.saturating_add(1); }
+        if guard_changed {
+            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+        }
         Ok(())
     }
 
@@ -1610,6 +1915,30 @@ mod tests {
             overridden.max_age,
             Duration::from_millis(u64::from(u32::MAX) + 1)
         );
+    }
+
+    #[test]
+    fn shared_persistent_location_warns_without_locking_the_second_writer() {
+        let temp = tempdir().expect("create shared cache location");
+        let mut options = CacheOptions::filesystem();
+        options.cache_location = Some(temp.path().join("cache"));
+        let first = BuildCache::new(options.clone(), SnapshotOptions::default());
+        let second = BuildCache::new(options, SnapshotOptions::default());
+
+        let warnings = second.take_infrastructure_log_events();
+        assert!(warnings.iter().any(|event| {
+            event.level == InfrastructureLogLevel::Warn
+                && event.name == CACHE_WRITER_LOGGER
+                && event.message.contains("another live writer")
+                && event
+                    .message
+                    .contains("without a cross-process lock or merge protocol")
+                && event
+                    .message
+                    .contains("trusted-local,linux-supported,single-writer")
+        }));
+        assert!(first.normal_module_factory().is_enabled());
+        assert!(second.normal_module_factory().is_enabled());
     }
 
     #[test]

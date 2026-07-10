@@ -85,6 +85,13 @@ impl Compilation {
         &self.infrastructure_log_events
     }
 
+    pub(crate) fn extend_infrastructure_log_events(
+        &mut self,
+        events: impl IntoIterator<Item = InfrastructureLogEvent>,
+    ) {
+        self.infrastructure_log_events.extend(events);
+    }
+
     pub async fn make(&mut self) -> Result<()> {
         async {
             self.log_infrastructure(

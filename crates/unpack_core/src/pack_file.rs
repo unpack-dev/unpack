@@ -4190,8 +4190,7 @@ impl PackFile {
         }
     }
 
-    #[cfg(test)]
-    fn entry_count(&self) -> usize {
+    pub(crate) fn entry_count(&self) -> usize {
         self.index.entries.len()
     }
 

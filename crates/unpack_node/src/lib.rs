@@ -88,6 +88,7 @@ pub struct NativeCacheOptions {
     pub idle_timeout_for_initial_store: Option<u32>,
     #[napi(js_name = "idleTimeoutAfterLargeChanges")]
     pub idle_timeout_after_large_changes: Option<u32>,
+    pub profile: Option<bool>,
     #[napi(js_name = "readonly")]
     pub readonly: Option<bool>,
 }
@@ -190,6 +191,7 @@ pub struct NativeRunResult {
 #[napi(object)]
 pub struct NativeFlushResult {
     pub error: Option<NativeInfrastructureError>,
+    pub logs: Vec<NativeInfrastructureLogEvent>,
 }
 
 #[napi(js_name = "createCompiler")]
@@ -224,6 +226,11 @@ impl NativeCompiler {
             return closed_cache_lifecycle_result();
         };
         cache_lifecycle_result(compiler.settle_cache().await)
+    }
+
+    #[napi(js_name = "flushCache")]
+    pub async fn flush_cache(&self) -> NativeFlushResult {
+        self.settle_cache().await
     }
 
     #[napi]
@@ -319,7 +326,9 @@ fn cache_options_from_native(options: NativeCacheOptions) -> Result<CacheOptions
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    cache.max_memory_generations = options.max_memory_generations.map(|generations| generations as u64);
+    cache.max_memory_generations = options
+        .max_memory_generations
+        .map(|generations| generations as u64);
     if let Some(max_age) = options.max_age {
         if max_age.is_nan() || max_age < 0.0 {
             return Err(napi::Error::from_reason(
@@ -347,6 +356,7 @@ fn cache_options_from_native(options: NativeCacheOptions) -> Result<CacheOptions
     cache.idle_timeout = options.idle_timeout;
     cache.idle_timeout_for_initial_store = options.idle_timeout_for_initial_store;
     cache.idle_timeout_after_large_changes = options.idle_timeout_after_large_changes;
+    cache.profile = options.profile.unwrap_or(false);
     cache.readonly = options.readonly.unwrap_or(false);
     Ok(cache)
 }
@@ -434,6 +444,7 @@ fn closed_cache_lifecycle_result() -> NativeFlushResult {
             name: "CompilerClosedError".to_string(),
             message: "compiler is closed".to_string(),
         }),
+        logs: Vec::new(),
     }
 }
 
@@ -445,6 +456,7 @@ fn cache_lifecycle_result(outcome: unpack_core::CacheLifecycleOutcome) -> Native
                 name: "CacheFlushError".to_string(),
                 message: message.to_string(),
             }),
+        logs: infrastructure_log_events(outcome.infrastructure_log_events()),
     }
 }
 

@@ -70,11 +70,16 @@ pub struct PendingCompilation {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CacheLifecycleOutcome {
     diagnostic: Option<String>,
+    infrastructure_log_events: Vec<crate::InfrastructureLogEvent>,
 }
 
 impl CacheLifecycleOutcome {
     pub fn diagnostic(&self) -> Option<&str> {
         self.diagnostic.as_deref()
+    }
+
+    pub fn infrastructure_log_events(&self) -> &[crate::InfrastructureLogEvent] {
+        &self.infrastructure_log_events
     }
 }
 
@@ -429,6 +434,7 @@ impl CacheLifecycle {
                     }
                     Action::Done(CacheLifecycleOutcome {
                         diagnostic: Some(diagnostic),
+                        ..CacheLifecycleOutcome::default()
                     })
                 } else if matches!(state.activity, CacheActivity::Active { .. })
                     || state.flush.is_some()
@@ -466,10 +472,14 @@ impl CacheLifecycle {
                     if changed.changed().await.is_err() {
                         return CacheLifecycleOutcome {
                             diagnostic: Some("cache lifecycle stopped unexpectedly".to_string()),
+                            ..CacheLifecycleOutcome::default()
                         };
                     }
                 }
-                Action::Done(outcome) => {
+                Action::Done(mut outcome) => {
+                    outcome
+                        .infrastructure_log_events
+                        .extend(self.build_cache.take_infrastructure_log_events());
                     self.notify_changed();
                     return outcome;
                 }
@@ -527,7 +537,10 @@ impl CacheLifecycle {
                             if state.shutdown_run_id.is_some() || state.flush.is_some() {
                                 Action::Wait
                             } else if diagnostic.is_some() {
-                                let outcome = CacheLifecycleOutcome { diagnostic };
+                                let outcome = CacheLifecycleOutcome {
+                                    diagnostic,
+                                    ..CacheLifecycleOutcome::default()
+                                };
                                 state.activity = CacheActivity::Closed;
                                 state.shutdown_outcome = Some(outcome.clone());
                                 Action::Done(outcome)
@@ -553,13 +566,17 @@ impl CacheLifecycle {
                     if changed.changed().await.is_err() {
                         return CacheLifecycleOutcome {
                             diagnostic: Some("cache lifecycle stopped unexpectedly".to_string()),
+                            ..CacheLifecycleOutcome::default()
                         };
                     }
                 }
                 Action::Retry => {
                     self.notify_changed();
                 }
-                Action::Done(outcome) => {
+                Action::Done(mut outcome) => {
+                    outcome
+                        .infrastructure_log_events
+                        .extend(self.build_cache.take_infrastructure_log_events());
                     self.notify_changed();
                     return outcome;
                 }
@@ -670,9 +687,14 @@ impl Compiler {
             self.build_cache.on_compilation_completed();
         }
         self.build_cache.trace_work_counters();
-        result.map(|compilation| PendingCompilation {
-            compilation: Some(compilation),
-            cache_activity: Some(cache_activity),
+        result.map(|mut compilation| {
+            compilation.extend_infrastructure_log_events(
+                self.build_cache.take_infrastructure_log_events(),
+            );
+            PendingCompilation {
+                compilation: Some(compilation),
+                cache_activity: Some(cache_activity),
+            }
         })
     }
 

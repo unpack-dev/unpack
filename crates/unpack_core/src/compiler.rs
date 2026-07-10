@@ -1142,6 +1142,7 @@ mod tests {
 
         assert_eq!(settling.await?.diagnostic(), None);
         assert_eq!(running.await??.errors(), []);
+        assert_eq!(compiler.settle_cache().await.diagnostic(), None);
         let registry = CodecRegistry::new()
             .with_resolve_record(ResolveRecordCodec::current())
             .with_module_build_record(ModuleBuildRecordCodec::current());

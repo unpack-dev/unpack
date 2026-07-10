@@ -128,7 +128,7 @@ impl Module {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ModuleIdentity {
     pub module_type: ModuleType,
     pub resource: PathBuf,
@@ -151,7 +151,7 @@ impl ModuleIdentity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ModuleType {
     JavaScriptAuto,
 }

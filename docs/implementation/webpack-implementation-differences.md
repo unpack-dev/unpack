@@ -89,14 +89,22 @@ Necessity:
 
 ## Chunk graph
 
-Unpack creates one entrypoint chunk group per entry, assigns statically reachable modules to the initial chunk, creates or reuses async chunk groups for dynamic import targets, excludes modules already present in the parent initial chunk, and stores many-to-many module/chunk membership.
+Unpack creates one entrypoint chunk group per entry, assigns statically reachable
+modules to the initial chunk, and creates or reuses async chunk groups by dynamic
+import target. Shared Async Chunk planning is two-phase: it intersects the modules
+available on every parent Entrypoint path, then emits the target's static closure
+minus that intersection. Modules available on only some parents therefore remain
+in the shared payload. Each Entrypoint keeps its own Runtime Modules and installed
+chunk state while requirements from the shared child group propagate to every
+reachable runtime tree.
 
 Webpack's `buildChunkGraph` is much broader. It tracks runtime per chunk group, chunk loading and async chunk flags, named async chunk reuse, async entrypoints, available-module masks, skipped modules, conditional connections, nested blocks, pre/post order indices, child/parent updates, and block-to-chunk-group links.
 
 Necessity:
 
 - Unpack's chunk group and many-to-many membership model is necessary because it preserves the shape needed for later split chunks and runtime chunks.
-- Excluding parent initial modules is necessary for basic async chunk correctness.
+- Intersecting parent available-module sets is necessary: excluding a module
+  seen on only one path would make the shared payload unusable from another.
 - Split chunks, cache groups, min-size/min-chunks/max-request rules, runtime chunks, and named chunk options are not necessary for the first implementation.
 - Nested async blocks are a current required semantic: Unpack only scans async blocks found in initial modules when creating async groups, while webpack recursively processes nested dependency blocks. A dynamic import reachable from an async chunk must create its own async chunk group; ignoring it is a parity gap against Unpack's chosen dynamic import semantics, not a compatibility luxury.
 

@@ -178,6 +178,18 @@ pub struct AsyncBlockOrigin {
     pub block_index: usize,
 }
 
+struct EntrypointAsyncPlan {
+    group: ChunkGroupId,
+    available_modules: HashSet<ModuleId>,
+    origins: Vec<(AsyncBlockOrigin, ModuleId)>,
+}
+
+struct SharedAsyncPlan {
+    target: ModuleId,
+    available_modules: HashSet<ModuleId>,
+    parents: Vec<(ChunkGroupId, AsyncBlockOrigin)>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ChunkGraph {
     chunks: Vec<Chunk>,
@@ -200,7 +212,7 @@ impl ChunkGraph {
         entries: &[ModuleId],
     ) -> Self {
         let mut graph = Self::default();
-        let mut async_groups_by_target = HashMap::new();
+        let mut entrypoint_plans = Vec::new();
         for (entry_index, entry_module) in entries.iter().copied().enumerate() {
             let entry_name = options
                 .entries
@@ -222,8 +234,8 @@ impl ChunkGraph {
                 graph.connect_chunk_and_module(entry_chunk, *module);
             }
 
-            let initial_set = initial_modules.iter().copied().collect::<HashSet<_>>();
-            let mut async_origins = Vec::new();
+            let available_modules = initial_modules.iter().copied().collect::<HashSet<_>>();
+            let mut origins = Vec::new();
             for module in &initial_modules {
                 if let Some(module_ref) = module_graph.module(*module) {
                     for (block_index, block) in module_ref.blocks().iter().enumerate() {
@@ -232,48 +244,77 @@ impl ChunkGraph {
                             .iter()
                             .any(|dep| dep.is_import_dependency())
                         {
-                            async_origins.push(AsyncBlockOrigin {
+                            let origin = AsyncBlockOrigin {
                                 module: *module,
                                 block_index,
-                            });
+                            };
+                            if let Some(target) = import_block_target(module_graph, origin) {
+                                origins.push((origin, target));
+                            }
                         }
                     }
                 }
             }
 
-            for origin in async_origins {
-                let Some(target) = import_block_target(module_graph, origin) else {
-                    continue;
-                };
-                let async_modules =
-                    collect_static_reachable(module_graph, target, Some(&initial_set));
-                if async_modules.is_empty() {
-                    continue;
-                }
+            entrypoint_plans.push(EntrypointAsyncPlan {
+                group: entry_group,
+                available_modules,
+                origins,
+            });
+        }
 
-                let async_group = if let Some(group) = async_groups_by_target.get(&target).copied()
-                {
-                    group
+        let mut shared_plans = HashMap::<ModuleId, SharedAsyncPlan>::new();
+        for entrypoint in entrypoint_plans {
+            for (origin, target) in entrypoint.origins {
+                if let Some(plan) = shared_plans.get_mut(&target) {
+                    plan.available_modules
+                        .retain(|module| entrypoint.available_modules.contains(module));
+                    plan.parents.push((entrypoint.group, origin));
                 } else {
-                    let chunk = graph.add_chunk(None, vec![target]);
-                    let group = graph.add_chunk_group(ChunkGroupKind::Async, Some(origin));
-                    graph.connect_chunk_and_group(chunk, group);
-                    async_groups_by_target.insert(target, group);
-                    group
-                };
-
-                if let Some(chunk) = graph.chunk_groups()[async_group.index()]
-                    .chunks()
-                    .first()
-                    .copied()
-                {
-                    for module in async_modules {
-                        graph.connect_chunk_and_module(chunk, module);
-                    }
+                    shared_plans.insert(
+                        target,
+                        SharedAsyncPlan {
+                            target,
+                            available_modules: entrypoint.available_modules.clone(),
+                            parents: vec![(entrypoint.group, origin)],
+                        },
+                    );
                 }
+            }
+        }
 
+        let mut shared_plans = shared_plans.into_values().collect::<Vec<_>>();
+        shared_plans.sort_by(|left, right| {
+            let left_identity = module_graph
+                .module(left.target)
+                .expect("Shared Async target must exist in the Module Graph")
+                .identity();
+            let right_identity = module_graph
+                .module(right.target)
+                .expect("Shared Async target must exist in the Module Graph")
+                .identity();
+            left_identity.cmp(right_identity)
+        });
+        for plan in shared_plans {
+            let async_modules =
+                collect_static_reachable(module_graph, plan.target, Some(&plan.available_modules));
+            if async_modules.is_empty() {
+                continue;
+            }
+            let origin = plan
+                .parents
+                .first()
+                .map(|(_, origin)| *origin)
+                .expect("Shared Async Plan must have at least one parent origin");
+            let chunk = graph.add_chunk(None, vec![plan.target]);
+            let async_group = graph.add_chunk_group(ChunkGroupKind::Async, Some(origin));
+            graph.connect_chunk_and_group(chunk, async_group);
+            for module in async_modules {
+                graph.connect_chunk_and_module(chunk, module);
+            }
+            for (parent, origin) in plan.parents {
                 graph.block_chunk_groups.insert(origin, async_group);
-                graph.connect_chunk_groups(entry_group, async_group);
+                graph.connect_chunk_groups(parent, async_group);
             }
         }
 

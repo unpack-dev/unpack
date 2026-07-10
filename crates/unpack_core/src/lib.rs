@@ -8,6 +8,7 @@ mod compiler;
 mod dependency;
 mod error;
 mod exports_info;
+mod id_assignment;
 mod logging;
 mod make;
 mod module;

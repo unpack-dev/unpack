@@ -7,6 +7,7 @@ use crate::{
     ModuleGraph, ModuleId, Result, UnpackResolver,
     build_cache::BuildCache,
     code_generation::{self, CodeGenerationResults, RenderManifest},
+    id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
     make::{self, MakeState},
     snapshot::FileSystemInfo,
 };
@@ -19,6 +20,7 @@ pub struct Compilation {
     build_cache: BuildCache,
     module_graph: ModuleGraph,
     chunk_graph: ChunkGraph,
+    render_ids_assigned: bool,
     code_generation_results: Option<CodeGenerationResults>,
     asset_render_manifest: Option<RenderManifest>,
     assets: Vec<Asset>,
@@ -42,6 +44,7 @@ impl Compilation {
             build_cache,
             module_graph: ModuleGraph::default(),
             chunk_graph: ChunkGraph::default(),
+            render_ids_assigned: false,
             code_generation_results: None,
             asset_render_manifest: None,
             assets: Vec::new(),
@@ -148,11 +151,26 @@ impl Compilation {
             "chunk graph build started",
         );
         self.chunk_graph = ChunkGraph::build(&self.options, &self.module_graph, &self.entries);
+        self.render_ids_assigned = false;
         self.log_infrastructure(
             InfrastructureLogLevel::Verbose,
             "unpack.Compilation",
             "chunk graph build completed",
         );
+    }
+
+    pub(crate) fn assign_render_ids(&mut self) {
+        self.assign_module_ids();
+        self.assign_chunk_ids();
+        self.render_ids_assigned = true;
+    }
+
+    fn assign_module_ids(&mut self) {
+        assign_module_render_ids(&self.options, &self.module_graph, &mut self.chunk_graph);
+    }
+
+    fn assign_chunk_ids(&mut self) {
+        assign_chunk_render_ids(&self.options, &self.module_graph, &mut self.chunk_graph);
     }
 
     pub fn create_assets(&mut self) {
@@ -204,6 +222,9 @@ impl Compilation {
     pub fn code_generation(&mut self) {
         let span = tracing::trace_span!("Compilation::code_generation");
         let _enter = span.enter();
+        if !self.render_ids_assigned {
+            self.assign_render_ids();
+        }
         self.code_generation_results = Some(code_generation::generate_code(
             &self.options,
             &self.build_cache,

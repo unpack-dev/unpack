@@ -1,4 +1,3 @@
-use std::path::{Path, PathBuf};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     hash::{Hash, Hasher},
@@ -19,6 +18,7 @@ use crate::{
     code_generation_record::{
         CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
     },
+    id_assignment::RenderId,
     rendered_source::RenderedSource,
 };
 
@@ -123,7 +123,7 @@ impl CacheKey for CodeGenerationKey {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CodeGenerationResults {
-    module_render_ids: HashMap<ModuleId, String>,
+    module_render_ids: HashMap<ModuleId, RenderId>,
     module_identities: HashMap<ModuleId, ModuleIdentity>,
     results: HashMap<CodeGenerationKey, CodeGenerationResult>,
 }
@@ -141,7 +141,7 @@ struct CodeGenerationInput<'a> {
     module: &'a Module,
     module_graph: &'a ModuleGraph,
     chunk_graph: &'a ChunkGraph,
-    module_render_ids: &'a HashMap<ModuleId, String>,
+    module_render_ids: &'a HashMap<ModuleId, RenderId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,25 +160,25 @@ enum AssetRenderManifest {
     InitialChunk {
         modules: Vec<ModuleRenderManifest>,
         chunk_filename_map: String,
-        entry_id: String,
-        chunk_id: String,
+        entry_id: RenderId,
+        chunk_id: RenderId,
     },
     AsyncChunk {
         modules: Vec<ModuleRenderManifest>,
-        chunk_id: String,
+        chunk_id: RenderId,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModuleRenderManifest {
-    render_id: String,
+    render_id: RenderId,
     code_generation_key: CodeGenerationKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AssetRenderKey {
     kind: AssetRenderKind,
-    chunk_id: String,
+    chunk_id: RenderId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +194,7 @@ impl CacheKey for AssetRenderKey {
                 AssetRenderKind::Initial => b"initial".to_vec(),
                 AssetRenderKind::Async => b"async".to_vec(),
             },
-            self.chunk_id.as_bytes().to_vec(),
+            self.chunk_id.to_string().into_bytes(),
         ])
     }
 }
@@ -219,8 +219,23 @@ pub(crate) fn generate_code(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
 ) -> CodeGenerationResults {
-    let render_context = RenderPathContext::new(options.context.as_path());
-    let module_render_ids = module_render_ids(&render_context, module_graph);
+    let module_render_ids = module_graph
+        .modules()
+        .iter()
+        .filter(|module| !chunk_graph.module_chunks(module.id()).is_empty())
+        .map(|module| {
+            let render_id = chunk_graph
+                .module_render_id(module.id())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "module {:?} must have an assigned Render ID before code generation",
+                        module.id()
+                    )
+                })
+                .clone();
+            (module.id(), render_id)
+        })
+        .collect::<HashMap<_, _>>();
     let module_identities = module_graph
         .modules()
         .iter()
@@ -374,12 +389,12 @@ pub(crate) fn create_render_manifest(
         };
         let modules = module_render_manifest(chunk_graph, chunk, code_generation_results);
         manifest_entries.push(RenderManifestEntry {
-            filename: chunk.filename().to_string(),
+            filename: resolve_chunk_filename(chunk),
             render: AssetRenderManifest::InitialChunk {
                 modules,
                 chunk_filename_map: render_chunk_filename_map(chunk_graph),
                 entry_id: code_generation_results.module_render_ids[&entry_module].clone(),
-                chunk_id: chunk.render_id().to_string(),
+                chunk_id: chunk.render_id().clone(),
             },
         });
     }
@@ -395,14 +410,15 @@ pub(crate) fn create_render_manifest(
             continue;
         }
         manifest_entries.push(RenderManifestEntry {
-            filename: chunk.filename().to_string(),
+            filename: resolve_chunk_filename(chunk),
             render: AssetRenderManifest::AsyncChunk {
                 modules: module_render_manifest(chunk_graph, chunk, code_generation_results),
-                chunk_id: chunk.render_id().to_string(),
+                chunk_id: chunk.render_id().clone(),
             },
         });
     }
 
+    manifest_entries.sort_by(|left, right| left.filename.cmp(&right.filename));
     RenderManifest {
         entries: manifest_entries,
     }
@@ -508,7 +524,7 @@ fn module_render_manifest(
     code_generation_results: &CodeGenerationResults,
 ) -> Vec<ModuleRenderManifest> {
     let runtime = RuntimeSpec::for_chunk(chunk_graph, chunk);
-    chunk_graph
+    let mut modules = chunk_graph
         .chunk_modules(chunk.id())
         .iter()
         .filter_map(|module_id| {
@@ -522,7 +538,9 @@ fn module_render_manifest(
                     code_generation_key,
                 })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    modules.sort_by(|left, right| left.render_id.cmp(&right.render_id));
+    modules
 }
 
 fn render_asset(
@@ -583,13 +601,13 @@ fn emit_asset(filename: String, rendered: &RenderedSource, sourcemap: bool) -> V
 fn render_initial_asset(
     modules: &[ModuleRenderManifest],
     chunk_filename_map: &str,
-    entry_id: &str,
-    chunk_id: &str,
+    entry_id: &RenderId,
+    chunk_id: &RenderId,
     code_generation_results: &CodeGenerationResults,
 ) -> ConcatSource {
     let modules = render_module_table(modules, code_generation_results);
-    let entry_id = json_string(entry_id);
-    let chunk_id = json_string(chunk_id);
+    let entry_id = json_render_id(entry_id);
+    let chunk_id = json_render_id(chunk_id);
 
     let mut source = ConcatSource::default();
     source.add(RawStringSource::from(
@@ -671,11 +689,11 @@ module.exports = __webpack_require__({entry_id});
 
 fn render_async_chunk_asset(
     modules: &[ModuleRenderManifest],
-    chunk_id: &str,
+    chunk_id: &RenderId,
     code_generation_results: &CodeGenerationResults,
 ) -> ConcatSource {
     let modules = render_module_table(modules, code_generation_results);
-    let chunk_id = json_string(chunk_id);
+    let chunk_id = json_render_id(chunk_id);
     let mut source = ConcatSource::default();
     source.add(RawStringSource::from(format!(
         r#""use strict";
@@ -709,7 +727,7 @@ fn render_module_table(
         }
         source.add(RawStringSource::from(format!(
             "{}: ",
-            json_string(&module.render_id)
+            json_render_id(&module.render_id)
         )));
         source.add(result.source().clone());
     }
@@ -731,9 +749,10 @@ fn generate_module_code(input: CodeGenerationInput<'_>) -> CodeGenerationResult 
 
     let module_id = module.id();
     let module_render_id = &module_render_ids[&module_id];
+    let module_render_name = module_render_id.to_string();
     let mut source = ReplaceSource::new(OriginalSource::new(
         module.source(),
-        module_render_id.as_str(),
+        module_render_name.as_str(),
     ));
     let mut init_fragments = Vec::new();
 
@@ -788,7 +807,7 @@ fn generate_module_code(input: CodeGenerationInput<'_>) -> CodeGenerationResult 
             "((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {{\n\"use strict\";\n__webpack_require__.r(__webpack_exports__);\n{init}"
         ),
         original_source: module.source().to_string(),
-        original_name: module_render_id.clone(),
+        original_name: module_render_name,
         replacements: source
             .replacements()
             .iter()
@@ -834,7 +853,7 @@ fn apply_dependency_template(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     exports_info: &ExportsInfo,
-    module_render_ids: &HashMap<ModuleId, String>,
+    module_render_ids: &HashMap<ModuleId, RenderId>,
     source: &mut ReplaceSource,
     init_fragments: &mut Vec<InitFragment>,
 ) {
@@ -910,7 +929,7 @@ fn apply_harmony_import_side_effect_dependency(
     module_id: ModuleId,
     dependency_id: Option<usize>,
     module_graph: &ModuleGraph,
-    module_render_ids: &HashMap<ModuleId, String>,
+    module_render_ids: &HashMap<ModuleId, RenderId>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
     let Some(dependency_id) = dependency_id else {
@@ -920,7 +939,7 @@ fn apply_harmony_import_side_effect_dependency(
         return;
     };
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
-    let target_id = json_string(&module_render_ids[&target]);
+    let target_id = json_render_id(&module_render_ids[&target]);
     push_init_fragment(
         init_fragments,
         InitFragmentStage::HarmonyImport,
@@ -933,7 +952,7 @@ fn apply_harmony_import_specifier_dependency(
     module_id: ModuleId,
     dependency_id: Option<usize>,
     module_graph: &ModuleGraph,
-    module_render_ids: &HashMap<ModuleId, String>,
+    module_render_ids: &HashMap<ModuleId, RenderId>,
     source: &mut ReplaceSource,
 ) {
     let Some(dependency_id) = dependency_id else {
@@ -1013,7 +1032,7 @@ fn apply_harmony_export_imported_specifier_dependency(
     dependency_id: Option<usize>,
     module_graph: &ModuleGraph,
     exports_info: &ExportsInfo,
-    module_render_ids: &HashMap<ModuleId, String>,
+    module_render_ids: &HashMap<ModuleId, RenderId>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
     let Some(dependency_id) = dependency_id else {
@@ -1053,7 +1072,7 @@ fn apply_import_dependency(
     dependency_id: Option<usize>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
-    module_render_ids: &HashMap<ModuleId, String>,
+    module_render_ids: &HashMap<ModuleId, RenderId>,
     source: &mut ReplaceSource,
 ) {
     let Some(block_index) = origin_block else {
@@ -1067,7 +1086,7 @@ fn apply_import_dependency(
     else {
         return;
     };
-    let target_id = json_string(&module_render_ids[&target]);
+    let target_id = json_render_id(&module_render_ids[&target]);
     let origin = AsyncBlockOrigin {
         module: module_id,
         block_index,
@@ -1078,7 +1097,7 @@ fn apply_import_dependency(
             .chunks()
             .first()
             .and_then(|chunk_id| chunk_graph.chunk(*chunk_id))
-            .map(|chunk| json_string(chunk.render_id()))
+            .map(|chunk| json_render_id(chunk.render_id()))
             .unwrap_or_else(|| "\"\"".to_string());
         format!(
             "__webpack_require__.e({chunk_id}).then(__webpack_require__.bind(__webpack_require__, {target_id}))"
@@ -1095,77 +1114,28 @@ fn replace(source: &mut ReplaceSource, range: SourceRange, content: String) {
     source.replace(range.start, range.end, content, None);
 }
 
-#[derive(Debug, Clone)]
-struct RenderPathContext {
-    raw_context: PathBuf,
-    context: PathBuf,
-}
-
-impl RenderPathContext {
-    fn new(context: &Path) -> Self {
-        Self {
-            raw_context: context.to_path_buf(),
-            context: std::fs::canonicalize(context).unwrap_or_else(|_| context.to_path_buf()),
-        }
-    }
-
-    fn make_relative(&self, resource: &Path) -> String {
-        if let Ok(relative) = resource
-            .strip_prefix(&self.context)
-            .or_else(|_| resource.strip_prefix(&self.raw_context))
-        {
-            return normalize_path(relative);
-        }
-
-        let resource = std::fs::canonicalize(resource).unwrap_or_else(|_| PathBuf::from(resource));
-        let relative = resource.strip_prefix(&self.context).unwrap_or(&resource);
-        normalize_path(relative)
-    }
-}
-
-fn module_render_ids(
-    context: &RenderPathContext,
-    module_graph: &ModuleGraph,
-) -> HashMap<ModuleId, String> {
-    module_graph
-        .modules()
-        .iter()
-        .map(|module| (module.id(), module_render_id(context, module)))
-        .collect()
-}
-
-fn module_render_id(context: &RenderPathContext, module: &Module) -> String {
-    let mut resource = context.make_relative(&module.identity().resource);
-    if !resource.starts_with("./") {
-        resource = format!("./{resource}");
-    }
-    if let Some(query) = &module.identity().query {
-        resource.push('?');
-        resource.push_str(query);
-    }
-    if let Some(fragment) = &module.identity().fragment {
-        resource.push('#');
-        resource.push_str(fragment);
-    }
-    resource
-}
-
-fn normalize_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
 fn render_chunk_filename_map(chunk_graph: &ChunkGraph) -> String {
     let mut entries = BTreeMap::new();
     for chunk in chunk_graph.chunks() {
-        entries.insert(chunk.render_id().to_string(), chunk.filename().to_string());
+        entries.insert(chunk.render_id().clone(), resolve_chunk_filename(chunk));
     }
     entries
         .into_iter()
         .map(|(chunk_id, filename)| {
-            format!("{}: {}", json_string(&chunk_id), json_string(&filename))
+            format!("{}: {}", json_render_id(&chunk_id), json_string(&filename))
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn resolve_chunk_filename(chunk: &Chunk) -> String {
+    if let Some(filename) = chunk.filename_override() {
+        return filename.to_string();
+    }
+    match chunk.name() {
+        Some(name) => format!("{name}.js"),
+        None => format!("{}.js", chunk.render_id()),
+    }
 }
 
 fn import_var(request: &str, source_order: usize) -> String {
@@ -1236,6 +1206,13 @@ fn json_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+fn json_render_id(render_id: &RenderId) -> String {
+    match render_id {
+        RenderId::String(value) => json_string(value),
+        RenderId::Number(value) => value.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1249,6 +1226,7 @@ mod tests {
         CacheOptions, ChunkGraph, ChunkGroupKind, Compiler, CompilerOptions, ConstDependency,
         Dependency, Entry, ModuleGraph, ModuleIdentity, SnapshotOptions, SourceRange,
         build_cache::{BuildCache, CacheIdentifier, CacheKey, CacheNamespace},
+        id_assignment::RenderId,
     };
 
     use super::{
@@ -1315,7 +1293,8 @@ mod tests {
                 "value".to_string(),
                 source_hash,
             );
-        let module_render_ids = HashMap::from([(module_id, "./src/index.js".to_string())]);
+        let module_render_ids =
+            HashMap::from([(module_id, RenderId::String("./src/index.js".to_string()))]);
         code_generation_etag(&CodeGenerationInput {
             module: module_graph
                 .module(module_id)
@@ -1337,11 +1316,11 @@ mod tests {
 
         let initial = AssetRenderKey {
             kind: AssetRenderKind::Initial,
-            chunk_id: "main".to_string(),
+            chunk_id: RenderId::String("main".to_string()),
         };
         let asynchronous = AssetRenderKey {
             kind: AssetRenderKind::Async,
-            chunk_id: "main".to_string(),
+            chunk_id: RenderId::String("main".to_string()),
         };
         assert_eq!(
             initial.cache_identifier(),
@@ -1357,12 +1336,12 @@ mod tests {
             RuntimeSpec(BTreeSet::from(["main".to_string()])),
         );
         let module = ModuleRenderManifest {
-            render_id: "./src/feature.js".to_string(),
+            render_id: RenderId::String("./src/feature.js".to_string()),
             code_generation_key: code_generation_key.clone(),
         };
         let render = AssetRenderManifest::AsyncChunk {
             modules: vec![module],
-            chunk_id: "src_feature_js".to_string(),
+            chunk_id: RenderId::String("src_feature_js".to_string()),
         };
         let mut results = CodeGenerationResults::default();
         results.results.insert(
@@ -1380,14 +1359,14 @@ mod tests {
         let initial = AssetRenderManifest::InitialChunk {
             modules: Vec::new(),
             chunk_filename_map: "{\"feature\":\"feature.js\"}".to_string(),
-            entry_id: "./src/index.js".to_string(),
-            chunk_id: "main".to_string(),
+            entry_id: RenderId::String("./src/index.js".to_string()),
+            chunk_id: RenderId::String("main".to_string()),
         };
         let changed_filename_map = AssetRenderManifest::InitialChunk {
             modules: Vec::new(),
             chunk_filename_map: "{\"feature\":\"renamed.js\"}".to_string(),
-            entry_id: "./src/index.js".to_string(),
-            chunk_id: "main".to_string(),
+            entry_id: RenderId::String("./src/index.js".to_string()),
+            chunk_id: RenderId::String("main".to_string()),
         };
         assert_ne!(
             initial.cache_etag(&results),

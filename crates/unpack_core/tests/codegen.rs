@@ -274,7 +274,7 @@ async fn produces_stable_static_async_and_sourcemap_outputs()
     assert_eq!(
         fingerprints,
         [
-            ("main.js", 3166, 13406043872577102803),
+            ("main.js", 3166, 6672719859425331571),
             ("main.js.map", 480, 5745374754696300241),
             ("src_feature_js.js", 398, 7014656015713497901),
             ("src_feature_js.js.map", 164, 2414748877879059404)
@@ -371,8 +371,34 @@ async fn emits_node_require_chunks_for_dynamic_import() -> Result<(), Box<dyn st
     assert!(main.source.contains("__webpack_require__.e"));
     assert!(main.source.contains("__webpack_require__.f.require"));
     assert!(main.source.contains("__webpack_require__.u"));
+    assert!(
+        main.source
+            .contains("__webpack_require__.m = __webpack_modules__")
+    );
+    assert!(main.source.contains("__webpack_require__.o"));
     assert!(main.source.contains("__webpack_require__.d"));
     assert!(main.source.contains("__webpack_require__.r"));
+    assert!(
+        main.source
+            .contains(r#"__webpack_require__.e("src_feature_js").then(__webpack_require__.bind"#)
+    );
+    assert!(
+        main.source
+            .contains(r#"require("./" + __webpack_require__.u(chunkId))"#)
+    );
+    let register_factory = main
+        .source
+        .find("__webpack_require__.m[moduleId] = moreModules[moduleId]")
+        .expect("Require Chunk Loading must register payload factories");
+    let execute_runtime = main
+        .source
+        .find("if(runtime) runtime(__webpack_require__)")
+        .expect("Require Chunk Loading must execute an optional payload runtime");
+    let mark_loaded = main
+        .source
+        .find("installedChunks[chunkIds[i]] = 1")
+        .expect("Require Chunk Loading must mark payload chunk IDs loaded");
+    assert!(register_factory < execute_runtime && execute_runtime < mark_loaded);
     assert!(main.source.contains("./src/index.js"));
     assert!(main.source.contains("//# sourceMappingURL=main.js.map"));
 

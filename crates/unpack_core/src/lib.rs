@@ -14,6 +14,7 @@ mod make;
 mod module;
 mod module_graph;
 mod normal_module_factory;
+mod output_filename;
 mod pack_file;
 mod parser;
 mod rendered_source;

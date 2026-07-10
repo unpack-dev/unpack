@@ -6,7 +6,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{Error, Result};
+use crate::{
+    Error, Result,
+    pack_file::{ManagedItemStateDto, PathBytes, SnapshotDto, SnapshotEntryDto, TimestampDto},
+};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
@@ -286,6 +289,111 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
+    pub(crate) fn to_pack_file_dto(&self) -> SnapshotDto {
+        SnapshotDto {
+            entries: self
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    SnapshotEntry::File(file) => SnapshotEntryDto::File {
+                        path: PathBytes::from_path(&file.path),
+                        exists: file.snapshot.exists,
+                        modified: file.snapshot.modified.map(system_time_to_dto),
+                        source_hash: file.snapshot.source_hash,
+                    },
+                    SnapshotEntry::Context(context) => SnapshotEntryDto::Context {
+                        path: PathBytes::from_path(&context.path),
+                        exists: context.snapshot.exists,
+                        timestamp_hash: context.snapshot.timestamp_hash,
+                        content_hash: context.snapshot.content_hash,
+                    },
+                    SnapshotEntry::MissingExistence { path } => {
+                        SnapshotEntryDto::MissingExistence {
+                            path: PathBytes::from_path(path),
+                        }
+                    }
+                    SnapshotEntry::ImmutablePath { path } => SnapshotEntryDto::ImmutablePath {
+                        path: PathBytes::from_path(path),
+                    },
+                    SnapshotEntry::ManagedPath(snapshot) => SnapshotEntryDto::ManagedPath {
+                        path: PathBytes::from_path(&snapshot.path),
+                        root: PathBytes::from_path(&snapshot.root),
+                        state: match &snapshot.state {
+                            ManagedItemState::NodeModules => ManagedItemStateDto::NodeModules,
+                            ManagedItemState::GroupingFolder => ManagedItemStateDto::GroupingFolder,
+                            ManagedItemState::Package { name, version } => {
+                                ManagedItemStateDto::Package {
+                                    name: name.clone(),
+                                    version: version.clone(),
+                                }
+                            }
+                        },
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn from_pack_file_dto(dto: SnapshotDto) -> Option<Self> {
+        let entries = dto
+            .entries
+            .into_iter()
+            .map(|entry| match entry {
+                SnapshotEntryDto::File {
+                    path,
+                    exists,
+                    modified,
+                    source_hash,
+                } => Some(SnapshotEntry::File(SnapshottedFile {
+                    path: path.to_path_buf(),
+                    snapshot: FileSnapshot {
+                        exists,
+                        modified: match modified {
+                            Some(value) => Some(system_time_from_dto(value)?),
+                            None => None,
+                        },
+                        source_hash,
+                    },
+                })),
+                SnapshotEntryDto::Context {
+                    path,
+                    exists,
+                    timestamp_hash,
+                    content_hash,
+                } => Some(SnapshotEntry::Context(SnapshottedContext {
+                    path: path.to_path_buf(),
+                    snapshot: ContextSnapshot {
+                        exists,
+                        timestamp_hash,
+                        content_hash,
+                    },
+                })),
+                SnapshotEntryDto::MissingExistence { path } => {
+                    Some(SnapshotEntry::MissingExistence {
+                        path: path.to_path_buf(),
+                    })
+                }
+                SnapshotEntryDto::ImmutablePath { path } => Some(SnapshotEntry::ImmutablePath {
+                    path: path.to_path_buf(),
+                }),
+                SnapshotEntryDto::ManagedPath { path, root, state } => {
+                    Some(SnapshotEntry::ManagedPath(ManagedPathSnapshot {
+                        path: path.to_path_buf(),
+                        root: root.to_path_buf(),
+                        state: match state {
+                            ManagedItemStateDto::NodeModules => ManagedItemState::NodeModules,
+                            ManagedItemStateDto::GroupingFolder => ManagedItemState::GroupingFolder,
+                            ManagedItemStateDto::Package { name, version } => {
+                                ManagedItemState::Package { name, version }
+                            }
+                        },
+                    }))
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { entries })
+    }
+
     async fn create_file(
         path: &Path,
         source: &str,
@@ -404,6 +512,48 @@ impl Snapshot {
         Self {
             entries: entries.into_values().collect(),
         }
+    }
+}
+
+fn system_time_to_dto(value: SystemTime) -> TimestampDto {
+    match value.duration_since(UNIX_EPOCH) {
+        Ok(duration) => TimestampDto {
+            seconds: i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+            nanoseconds: duration.subsec_nanos(),
+        },
+        Err(error) => {
+            let duration = error.duration();
+            if duration.subsec_nanos() == 0 {
+                TimestampDto {
+                    seconds: -i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+                    nanoseconds: 0,
+                }
+            } else {
+                TimestampDto {
+                    seconds: -i64::try_from(duration.as_secs()).unwrap_or(i64::MAX) - 1,
+                    nanoseconds: 1_000_000_000 - duration.subsec_nanos(),
+                }
+            }
+        }
+    }
+}
+
+fn system_time_from_dto(value: TimestampDto) -> Option<SystemTime> {
+    if value.nanoseconds >= 1_000_000_000 {
+        return None;
+    }
+    if value.seconds >= 0 {
+        UNIX_EPOCH.checked_add(std::time::Duration::new(
+            value.seconds as u64,
+            value.nanoseconds,
+        ))
+    } else if value.nanoseconds == 0 {
+        UNIX_EPOCH.checked_sub(std::time::Duration::new(value.seconds.unsigned_abs(), 0))
+    } else {
+        UNIX_EPOCH.checked_sub(std::time::Duration::new(
+            value.seconds.unsigned_abs() - 1,
+            1_000_000_000 - value.nanoseconds,
+        ))
     }
 }
 

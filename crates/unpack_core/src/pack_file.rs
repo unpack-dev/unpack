@@ -2,19 +2,40 @@
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{collections::BTreeSet, fs, path::Path};
 
     use tempfile::tempdir;
 
     use super::*;
+    use crate::{
+        ModuleIdentity, SnapshotStrategy, build_cache::ResolveRecord, snapshot::FileSystemInfo,
+    };
 
-    #[test]
-    fn resolve_records_round_trip_through_the_registered_private_codec()
+    #[tokio::test]
+    async fn resolve_records_round_trip_through_the_registered_private_codec()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
+        let source = temp.path().join("src/dep.js");
+        fs::create_dir_all(source.parent().expect("source should have a parent"))?;
+        fs::write(&source, "export const value = 1;")?;
+        let missing = temp.path().join("src/missing.js");
         let address = PackFileAddress::new("unpack/resolve", b"issuer:/project/src|request:./dep");
         let etag = PackFileETag::new(b"resolve-inputs-v1");
-        let record = resolve_record("dep.js");
+        let actual_record = ResolveRecord::new(
+            ModuleIdentity::new(&source),
+            source.clone(),
+            BTreeSet::from([source]),
+            BTreeSet::from([temp.path().join("src")]),
+            BTreeSet::from([missing]),
+            &FileSystemInfo::default(),
+            SnapshotStrategy::timestamp_and_hash(),
+        )
+        .await?;
+        let record = actual_record.to_pack_file_dto();
+        assert_eq!(
+            ResolveRecord::from_pack_file_dto(record.clone()).as_ref(),
+            Some(&actual_record)
+        );
         let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
 
         PackFile::publish_resolve_records(
@@ -31,11 +52,12 @@ mod tests {
 
         let mut pack_file = PackFile::open(temp.path(), registry);
         assert_eq!(pack_file.entry_count(), 1);
+        let restored_dto = pack_file
+            .get_resolve_record(&address, Some(&etag))
+            .expect("Resolve Record DTO should restore");
         assert_eq!(
-            pack_file
-                .get_resolve_record(&address, Some(&etag))
-                .as_deref(),
-            Some(&record)
+            ResolveRecord::from_pack_file_dto((*restored_dto).clone()).as_ref(),
+            Some(&actual_record)
         );
 
         Ok(())

@@ -553,6 +553,79 @@ pub(crate) struct ResolveRecord {
 }
 
 impl ResolveRecord {
+    pub(crate) fn to_pack_file_dto(&self) -> crate::pack_file::ResolveRecordDto {
+        use crate::pack_file::{ModuleIdentityDto, ModuleTypeDto, PathBytes, ResolveRecordDto};
+
+        ResolveRecordDto {
+            identity: ModuleIdentityDto {
+                module_type: match self.identity.module_type {
+                    crate::ModuleType::JavaScriptAuto => ModuleTypeDto::JavaScriptAuto,
+                },
+                resource: PathBytes::from_path(&self.identity.resource),
+                query: self.identity.query.clone(),
+                fragment: self.identity.fragment.clone(),
+                layer: self.identity.layer.clone(),
+                loaders: self.identity.loaders.clone(),
+            },
+            resource: PathBytes::from_path(&self.resource),
+            file_dependencies: self
+                .file_dependencies
+                .iter()
+                .map(|path| PathBytes::from_path(path))
+                .collect(),
+            context_dependencies: self
+                .context_dependencies
+                .iter()
+                .map(|path| PathBytes::from_path(path))
+                .collect(),
+            missing_dependencies: self
+                .missing_dependencies
+                .iter()
+                .map(|path| PathBytes::from_path(path))
+                .collect(),
+            snapshot: self.snapshot.to_pack_file_dto(),
+        }
+    }
+
+    pub(crate) fn from_pack_file_dto(dto: crate::pack_file::ResolveRecordDto) -> Option<Self> {
+        use crate::pack_file::{ModuleTypeDto, ResolveRecordDto};
+
+        let ResolveRecordDto {
+            identity,
+            resource,
+            file_dependencies,
+            context_dependencies,
+            missing_dependencies,
+            snapshot,
+        } = dto;
+        Some(Self {
+            identity: ModuleIdentity {
+                module_type: match identity.module_type {
+                    ModuleTypeDto::JavaScriptAuto => crate::ModuleType::JavaScriptAuto,
+                },
+                resource: identity.resource.to_path_buf(),
+                query: identity.query,
+                fragment: identity.fragment,
+                layer: identity.layer,
+                loaders: identity.loaders,
+            },
+            resource: resource.to_path_buf(),
+            file_dependencies: file_dependencies
+                .into_iter()
+                .map(|path| path.to_path_buf())
+                .collect(),
+            context_dependencies: context_dependencies
+                .into_iter()
+                .map(|path| path.to_path_buf())
+                .collect(),
+            missing_dependencies: missing_dependencies
+                .into_iter()
+                .map(|path| path.to_path_buf())
+                .collect(),
+            snapshot: Snapshot::from_pack_file_dto(snapshot)?,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) async fn new(
         identity: ModuleIdentity,

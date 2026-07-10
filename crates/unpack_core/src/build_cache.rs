@@ -1,7 +1,7 @@
 use std::{
     any::Any,
     collections::{BTreeSet, HashMap},
-    fmt, fs, io,
+    fmt, io,
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -10,15 +10,15 @@ use std::{
 use crate::{
     ModuleIdentity, SnapshotOptions, SnapshotStrategy,
     cache_hash::stable_hash,
+    pack_file::{
+        CodecRegistry, ModuleBuildRecordCodec, ModuleBuildRecordDto, PackFile, PackFileAddress,
+        PackFileETag, PackFileGuardDto, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
+        ResolveRecordDto, SnapshotDto,
+    },
     parser::ParsedModule,
     snapshot::{FileSystemInfo, Snapshot, SnapshotCache},
 };
-use serde::{Deserialize, Serialize};
 
-const CACHE_MAGIC: &str = "UNPACK_PERSISTENT_CACHE";
-const PACK_MAGIC: &[u8] = b"UNPACK-CACHE-PACK\0";
-const DEFAULT_PACK_FILE: &str = "packs/modules.cbor";
-const MANIFEST_FILE: &str = "container.json";
 const RESOLVE_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/resolve");
 const MODULE_BUILD_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/module-build");
 
@@ -49,6 +49,10 @@ impl CacheNamespace {
     pub(crate) const fn new(value: &'static str) -> Self {
         Self(value)
     }
+
+    const fn as_str(self) -> &'static str {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -68,6 +72,10 @@ impl CacheIdentifier {
         }
         Self(bytes)
     }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +85,10 @@ impl CacheETag {
     #[allow(dead_code)]
     pub(crate) fn new(value: impl AsRef<[u8]>) -> Self {
         Self(value.as_ref().to_vec())
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -95,7 +107,6 @@ pub(crate) enum CacheItemFamily {
 }
 
 impl CacheItemFamily {
-    #[cfg(test)]
     const fn index(self) -> usize {
         match self {
             Self::Resolve => 0,
@@ -106,7 +117,6 @@ impl CacheItemFamily {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CacheItemWork {
     pub hits: usize,
@@ -116,13 +126,11 @@ pub(crate) struct CacheItemWork {
     pub evictions: usize,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CacheWorkCounters {
     by_family: [CacheItemWork; 4],
 }
 
-#[cfg(test)]
 impl CacheWorkCounters {
     pub(crate) fn for_family(self, family: CacheItemFamily) -> CacheItemWork {
         self.by_family[family.index()]
@@ -212,17 +220,23 @@ pub struct BuildDependency {
 #[derive(Debug)]
 struct BuildCacheInner {
     cache: Cache,
-    filesystem_manifest: Option<CacheManifest>,
-    records_restored: bool,
     dirty: bool,
 }
 
 impl BuildCacheInner {
-    fn new(options: &CacheOptions) -> Self {
+    fn new(
+        options: &CacheOptions,
+        file_system_info: &FileSystemInfo,
+        build_dependency_snapshot_strategy: SnapshotStrategy,
+        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    ) -> Self {
         Self {
-            cache: Cache::from_options(options),
-            filesystem_manifest: None,
-            records_restored: false,
+            cache: Cache::from_options(
+                options,
+                file_system_info,
+                build_dependency_snapshot_strategy,
+                resolve_build_dependency_snapshot_strategy,
+            ),
             dirty: false,
         }
     }
@@ -234,30 +248,35 @@ struct CacheAddress {
     identifier: CacheIdentifier,
 }
 
+impl CacheAddress {
+    fn to_pack_file_address(&self) -> PackFileAddress {
+        PackFileAddress::new(self.namespace.as_str(), self.identifier.as_bytes())
+    }
+}
+
+impl CacheETag {
+    fn to_pack_file_etag(&self) -> PackFileETag {
+        PackFileETag::new(self.as_bytes())
+    }
+}
+
 #[derive(Clone)]
 struct CacheEntry {
     family: CacheItemFamily,
     etag: Option<CacheETag>,
-    source_key: Arc<dyn Any + Send + Sync>,
     value: Arc<dyn Any + Send + Sync>,
 }
 
 impl CacheEntry {
-    fn new<K, V>(family: CacheItemFamily, etag: Option<CacheETag>, key: K, value: V) -> Self
+    fn new<V>(family: CacheItemFamily, etag: Option<CacheETag>, value: V) -> Self
     where
-        K: Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
         Self {
             family,
             etag,
-            source_key: Arc::new(key),
             value: Arc::new(value),
         }
-    }
-
-    fn key<K: Send + Sync + 'static>(&self) -> Option<&K> {
-        self.source_key.downcast_ref::<K>()
     }
 
     fn value<V: Send + Sync + 'static>(&self) -> Option<Arc<V>> {
@@ -276,11 +295,15 @@ impl fmt::Debug for CacheEntry {
 }
 
 trait CacheLayer: fmt::Debug + Send + Sync {
-    fn get(&self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry>;
+    fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry>;
     fn store(&mut self, address: CacheAddress, entry: CacheEntry);
+    fn publish(&mut self, _guard: &PackFileGuardDto) -> io::Result<()> {
+        Ok(())
+    }
     #[allow(dead_code)]
     fn evict(&mut self, address: &CacheAddress) -> bool;
-    fn entries(&self) -> Vec<(CacheAddress, CacheEntry)>;
+    #[cfg(test)]
+    fn entry_count(&self, family: CacheItemFamily) -> usize;
 }
 
 #[derive(Debug, Default)]
@@ -289,7 +312,7 @@ struct MemoryCacheLayer {
 }
 
 impl CacheLayer for MemoryCacheLayer {
-    fn get(&self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry> {
+    fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry> {
         self.entries
             .get(address)
             .filter(|entry| entry.etag.as_ref() == etag)
@@ -304,11 +327,169 @@ impl CacheLayer for MemoryCacheLayer {
         self.entries.remove(address).is_some()
     }
 
-    fn entries(&self) -> Vec<(CacheAddress, CacheEntry)> {
+    #[cfg(test)]
+    fn entry_count(&self, family: CacheItemFamily) -> usize {
         self.entries
-            .iter()
-            .map(|(address, entry)| (address.clone(), entry.clone()))
-            .collect()
+            .values()
+            .filter(|entry| entry.family == family)
+            .count()
+    }
+}
+
+#[derive(Debug)]
+struct PackFileCacheLayer {
+    root: Option<PathBuf>,
+    registry: CodecRegistry,
+    pack_file: Option<PackFile>,
+    publication_base: PublicationBase,
+    active: bool,
+    pending: HashMap<CacheAddress, CacheEntry>,
+}
+
+impl PackFileCacheLayer {
+    fn open(
+        options: &CacheOptions,
+        file_system_info: &FileSystemInfo,
+        build_dependency_snapshot_strategy: SnapshotStrategy,
+        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    ) -> Self {
+        let registry = persistent_codec_registry();
+        let root = options.cache_location.clone();
+        let pack_file = root
+            .as_ref()
+            .map(|root| PackFile::open(root, registry.clone()));
+        let active = pack_file.as_ref().is_some_and(|pack_file| {
+            pack_file.guard().is_some_and(|guard| {
+                persistent_guard_is_valid(
+                    guard,
+                    options,
+                    file_system_info,
+                    build_dependency_snapshot_strategy,
+                    resolve_build_dependency_snapshot_strategy,
+                )
+            })
+        });
+        let publication_base = if active {
+            PublicationBase::PreserveEntries {
+                expected_revision: pack_file
+                    .as_ref()
+                    .expect("active PackFile should be open")
+                    .revision(),
+            }
+        } else {
+            PublicationBase::ReplaceAll
+        };
+        Self {
+            root,
+            registry,
+            pack_file,
+            publication_base,
+            active,
+            pending: HashMap::new(),
+        }
+    }
+
+    fn publish(&mut self, guard: PackFileGuardDto) -> io::Result<()> {
+        let Some(root) = self.root.as_ref() else {
+            self.pending.clear();
+            return Ok(());
+        };
+        let mut batch = PackFileWriteBatch::new();
+        for (address, entry) in &self.pending {
+            let pack_address = address.to_pack_file_address();
+            let pack_etag = entry.etag.as_ref().map(CacheETag::to_pack_file_etag);
+            match entry.family {
+                CacheItemFamily::Resolve => {
+                    let record = entry.value::<ResolveRecord>().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Resolve Cache Item contains an unexpected value",
+                        )
+                    })?;
+                    let dto = ResolveRecordDto::try_from(record.as_ref())?;
+                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                }
+                CacheItemFamily::ModuleBuild => {
+                    let record = entry.value::<ModuleBuildRecord>().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Module Build Cache Item contains an unexpected value",
+                        )
+                    })?;
+                    let dto = ModuleBuildRecordDto::try_from(record.as_ref())?;
+                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                }
+                CacheItemFamily::CodeGeneration | CacheItemFamily::AssetRender => continue,
+            }
+        }
+        PackFile::publish_batch(root, Some(guard), self.publication_base, batch)?;
+        self.pending.clear();
+        let pack_file = PackFile::open(root, self.registry.clone());
+        self.publication_base = PublicationBase::PreserveEntries {
+            expected_revision: pack_file.revision(),
+        };
+        self.pack_file = Some(pack_file);
+        self.active = true;
+        Ok(())
+    }
+}
+
+impl CacheLayer for PackFileCacheLayer {
+    fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry> {
+        if let Some(entry) = self
+            .pending
+            .get(address)
+            .filter(|entry| entry.etag.as_ref() == etag)
+        {
+            return Some(entry.clone());
+        }
+        if !self.active {
+            return None;
+        }
+        let pack_file = self.pack_file.as_mut()?;
+        let pack_address = address.to_pack_file_address();
+        let pack_etag = etag.map(CacheETag::to_pack_file_etag);
+        match address.namespace {
+            RESOLVE_CACHE_NAMESPACE => {
+                let dto = pack_file.get_resolve_record(&pack_address, pack_etag.as_ref())?;
+                let record = ResolveRecord::try_from((*dto).clone()).ok()?;
+                Some(CacheEntry::new(
+                    CacheItemFamily::Resolve,
+                    etag.cloned(),
+                    record,
+                ))
+            }
+            MODULE_BUILD_CACHE_NAMESPACE => {
+                let dto = pack_file.get_module_build_record(&pack_address, pack_etag.as_ref())?;
+                let record = ModuleBuildRecord::try_from((*dto).clone()).ok()?;
+                Some(CacheEntry::new(
+                    CacheItemFamily::ModuleBuild,
+                    etag.cloned(),
+                    record,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn store(&mut self, address: CacheAddress, entry: CacheEntry) {
+        self.pending.insert(address, entry);
+    }
+
+    fn publish(&mut self, guard: &PackFileGuardDto) -> io::Result<()> {
+        PackFileCacheLayer::publish(self, guard.clone())
+    }
+
+    fn evict(&mut self, address: &CacheAddress) -> bool {
+        self.pending.remove(address).is_some()
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self, family: CacheItemFamily) -> usize {
+        self.pending
+            .values()
+            .filter(|entry| entry.family == family)
+            .count()
     }
 }
 
@@ -328,12 +509,16 @@ struct CacheLayerSlot {
 #[derive(Debug)]
 struct Cache {
     layers: Vec<CacheLayerSlot>,
-    #[cfg(test)]
     work: CacheWorkCounters,
 }
 
 impl Cache {
-    fn from_options(options: &CacheOptions) -> Self {
+    fn from_options(
+        options: &CacheOptions,
+        file_system_info: &FileSystemInfo,
+        build_dependency_snapshot_strategy: SnapshotStrategy,
+        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    ) -> Self {
         let mut layers = Vec::new();
         if options.kind != CacheKind::Disabled {
             layers.push(CacheLayerSlot {
@@ -346,19 +531,23 @@ impl Cache {
             layers.push(CacheLayerSlot {
                 kind: CacheLayerKind::Persistent,
                 writable: !options.readonly,
-                layer: Box::<MemoryCacheLayer>::default(),
+                layer: Box::new(PackFileCacheLayer::open(
+                    options,
+                    file_system_info,
+                    build_dependency_snapshot_strategy,
+                    resolve_build_dependency_snapshot_strategy,
+                )),
             });
         }
         Self {
             layers,
-            #[cfg(test)]
             work: CacheWorkCounters::default(),
         }
     }
 
     fn get<V>(
         &mut self,
-        _family: CacheItemFamily,
+        family: CacheItemFamily,
         address: &CacheAddress,
         etag: Option<&CacheETag>,
     ) -> Option<Arc<V>>
@@ -380,38 +569,27 @@ impl Cache {
                         earlier.layer.store(address.clone(), entry.clone());
                     }
                 }
-                #[cfg(test)]
-                {
-                    self.work.for_family_mut(_family).restores += 1;
-                }
+                self.work.for_family_mut(family).restores += 1;
             }
-            #[cfg(test)]
-            {
-                self.work.for_family_mut(_family).hits += 1;
-            }
+            self.work.for_family_mut(family).hits += 1;
             return Some(value);
         }
 
-        #[cfg(test)]
-        {
-            self.work.for_family_mut(_family).misses += 1;
-        }
+        self.work.for_family_mut(family).misses += 1;
         None
     }
 
-    fn store<K, V>(
+    fn store<V>(
         &mut self,
         family: CacheItemFamily,
         address: CacheAddress,
         etag: Option<CacheETag>,
-        key: K,
         value: V,
     ) -> bool
     where
-        K: Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        let entry = CacheEntry::new(family, etag, key, value);
+        let entry = CacheEntry::new(family, etag, value);
         let mut stored_persistently = false;
         for slot in &mut self.layers {
             if !slot.writable {
@@ -420,45 +598,8 @@ impl Cache {
             slot.layer.store(address.clone(), entry.clone());
             stored_persistently |= slot.kind == CacheLayerKind::Persistent;
         }
-        #[cfg(test)]
-        {
-            self.work.for_family_mut(family).stores += 1;
-        }
+        self.work.for_family_mut(family).stores += 1;
         stored_persistently
-    }
-
-    fn restore<K, V>(
-        &mut self,
-        family: CacheItemFamily,
-        namespace: CacheNamespace,
-        identifier: CacheIdentifier,
-        etag: Option<CacheETag>,
-        key: K,
-        value: V,
-    ) where
-        K: Send + Sync + 'static,
-        V: Send + Sync + 'static,
-    {
-        let address = CacheAddress {
-            namespace,
-            identifier,
-        };
-        let entry = CacheEntry::new(family, etag, key, value);
-        if let Some(persistent) = self
-            .layers
-            .iter_mut()
-            .find(|slot| slot.kind == CacheLayerKind::Persistent)
-        {
-            persistent.layer.store(address, entry);
-        }
-    }
-
-    fn persistent_entries(&self) -> Vec<(CacheAddress, CacheEntry)> {
-        self.layers
-            .iter()
-            .find(|slot| slot.kind == CacheLayerKind::Persistent)
-            .map(|slot| slot.layer.entries())
-            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -477,19 +618,28 @@ impl Cache {
     fn entry_count(&self, family: CacheItemFamily) -> usize {
         self.layers
             .iter()
-            .flat_map(|slot| slot.layer.entries())
-            .filter_map(|(address, entry)| (entry.family == family).then_some(address))
-            .collect::<std::collections::HashSet<_>>()
-            .len()
+            .find(|slot| slot.kind == CacheLayerKind::Memory)
+            .map(|slot| slot.layer.entry_count(family))
+            .unwrap_or_default()
     }
 
-    #[cfg(test)]
     fn work_counters(&self) -> CacheWorkCounters {
         self.work
     }
+
+    fn publish_persistent(&mut self, guard: PackFileGuardDto) -> io::Result<()> {
+        let Some(slot) = self
+            .layers
+            .iter_mut()
+            .find(|slot| slot.kind == CacheLayerKind::Persistent)
+        else {
+            return Ok(());
+        };
+        slot.layer.publish(&guard)
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ResolveRequest {
     context: PathBuf,
     request: String,
@@ -542,7 +692,7 @@ fn optional_identifier_part(value: Option<&str>) -> Vec<u8> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolveRecord {
     identity: ModuleIdentity,
     resource: PathBuf,
@@ -553,6 +703,7 @@ pub(crate) struct ResolveRecord {
 }
 
 impl ResolveRecord {
+    #[cfg(test)]
     pub(crate) fn to_pack_file_dto(&self) -> crate::pack_file::ResolveRecordDto {
         use crate::pack_file::{ModuleIdentityDto, ModuleTypeDto, PathBytes, ResolveRecordDto};
 
@@ -587,6 +738,7 @@ impl ResolveRecord {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_pack_file_dto(dto: crate::pack_file::ResolveRecordDto) -> Option<Self> {
         use crate::pack_file::{ModuleTypeDto, ResolveRecordDto};
 
@@ -703,6 +855,28 @@ impl ResolveRecord {
         &self.missing_dependencies
     }
 
+    pub(crate) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    pub(crate) fn from_persistent_parts(
+        identity: ModuleIdentity,
+        resource: PathBuf,
+        file_dependencies: BTreeSet<PathBuf>,
+        context_dependencies: BTreeSet<PathBuf>,
+        missing_dependencies: BTreeSet<PathBuf>,
+        snapshot: Snapshot,
+    ) -> Self {
+        Self {
+            identity,
+            resource,
+            file_dependencies,
+            context_dependencies,
+            missing_dependencies,
+            snapshot,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn is_valid(
         &self,
@@ -726,11 +900,10 @@ impl ResolveRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModuleBuildRecord {
     parsed: ParsedModule,
     source: String,
-    #[serde(default)]
     source_hash: Option<u64>,
     snapshot: Snapshot,
 }
@@ -758,6 +931,10 @@ impl ModuleBuildRecord {
         self.source_hash
     }
 
+    pub(crate) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
     pub(crate) async fn is_valid_with_cache(
         &self,
         file_system_info: &FileSystemInfo,
@@ -775,16 +952,20 @@ impl BuildCache {
         let build_dependency_snapshot_strategy = snapshot_options.build_dependencies;
         let resolve_build_dependency_snapshot_strategy =
             snapshot_options.resolve_build_dependencies;
-        let inner = BuildCacheInner::new(&options);
-        let cache = Self {
+        let file_system_info = FileSystemInfo::from_snapshot_options(&snapshot_options);
+        let inner = BuildCacheInner::new(
+            &options,
+            &file_system_info,
+            build_dependency_snapshot_strategy,
+            resolve_build_dependency_snapshot_strategy,
+        );
+        Self {
             options,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
-            file_system_info: FileSystemInfo::from_snapshot_options(&snapshot_options),
+            file_system_info,
             inner: Arc::new(Mutex::new(inner)),
-        };
-        cache.restore_from_filesystem();
-        cache
+        }
     }
 
     pub(crate) fn normal_module_factory(&self) -> NormalModuleFactoryCache {
@@ -813,23 +994,21 @@ impl BuildCache {
             return Ok(());
         }
 
-        let (resolve_records, module_builds) = {
-            let inner = self
-                .inner
-                .lock()
-                .expect("build cache mutex should not be poisoned");
-            if !inner.dirty {
-                return Ok(());
-            }
-            legacy_filesystem_records(&inner.cache)
-        };
-
-        self.write_filesystem_cache(&resolve_records, &module_builds)?;
-
-        self.inner
+        if !self
+            .inner
             .lock()
             .expect("build cache mutex should not be poisoned")
-            .dirty = false;
+            .dirty
+        {
+            return Ok(());
+        }
+        let guard = self.current_persistent_guard()?;
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        inner.cache.publish_persistent(guard)?;
+        inner.dirty = false;
         Ok(())
     }
 
@@ -852,13 +1031,44 @@ impl BuildCache {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn work_counters(&self) -> CacheWorkCounters {
         self.inner
             .lock()
             .expect("build cache mutex should not be poisoned")
             .cache
             .work_counters()
+    }
+
+    pub(crate) fn trace_work_counters(&self) {
+        let work = self.work_counters();
+        let resolve = work.for_family(CacheItemFamily::Resolve);
+        let module = work.for_family(CacheItemFamily::ModuleBuild);
+        tracing::info!(
+            target: "unpack_core::cache_work",
+            resolve_hits = resolve.hits,
+            resolve_misses = resolve.misses,
+            resolve_stores = resolve.stores,
+            resolve_restores = resolve.restores,
+            resolve_evictions = resolve.evictions,
+            module_hits = module.hits,
+            module_misses = module.misses,
+            module_stores = module.stores,
+            module_restores = module.restores,
+            module_evictions = module.evictions,
+            "cache_work"
+        );
+    }
+
+    fn current_persistent_guard(&self) -> io::Result<PackFileGuardDto> {
+        Ok(PackFileGuardDto {
+            version: self.cache_version().into_bytes(),
+            build_dependencies: SnapshotDto::try_from(
+                &self.build_dependency_snapshot(self.build_dependency_snapshot_strategy)?,
+            )?,
+            resolve_build_dependencies: SnapshotDto::try_from(
+                &self.build_dependency_snapshot(self.resolve_build_dependency_snapshot_strategy)?,
+            )?,
+        })
     }
 }
 
@@ -880,8 +1090,6 @@ where
         if !self.is_enabled() {
             return None;
         }
-
-        self.build_cache.restore_records_from_filesystem_if_needed();
 
         let mut inner = self
             .build_cache
@@ -909,7 +1117,7 @@ where
             namespace: self.namespace,
             identifier: key.cache_identifier(),
         };
-        if inner.cache.store(self.family, address, etag, key, value) {
+        if inner.cache.store(self.family, address, etag, value) {
             inner.dirty = true;
         }
     }
@@ -930,161 +1138,6 @@ where
 }
 
 impl BuildCache {
-    fn restore_from_filesystem(&self) {
-        if self.options.kind != CacheKind::Filesystem {
-            return;
-        }
-        let Some(cache_location) = &self.options.cache_location else {
-            return;
-        };
-        let Some(manifest) = read_manifest(cache_location) else {
-            return;
-        };
-        if !self.manifest_is_valid(&manifest) {
-            return;
-        }
-
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("build cache mutex should not be poisoned");
-        inner.filesystem_manifest = Some(manifest.clone());
-        drop(inner);
-
-        if !self.options.readonly {
-            self.restore_records_from_filesystem_if_needed();
-        }
-    }
-
-    fn restore_records_from_filesystem_if_needed(&self) {
-        if self.options.kind != CacheKind::Filesystem {
-            return;
-        }
-        let Some(cache_location) = &self.options.cache_location else {
-            self.mark_records_restored();
-            return;
-        };
-        let manifest = {
-            let inner = self
-                .inner
-                .lock()
-                .expect("build cache mutex should not be poisoned");
-            if inner.records_restored {
-                return;
-            }
-            inner.filesystem_manifest.clone()
-        };
-        let Some(manifest) = manifest else {
-            self.mark_records_restored();
-            return;
-        };
-
-        let Some(pack) = read_pack(cache_location, &manifest.pack_file) else {
-            self.mark_records_restored();
-            return;
-        };
-        if pack.magic != CACHE_MAGIC || pack.cache_version != self.cache_version() {
-            self.mark_records_restored();
-            return;
-        }
-
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("build cache mutex should not be poisoned");
-        for (request, record) in pack.resolve_records {
-            inner.cache.restore(
-                CacheItemFamily::Resolve,
-                RESOLVE_CACHE_NAMESPACE,
-                request.cache_identifier(),
-                None,
-                request,
-                record,
-            );
-        }
-        for (identity, record) in pack.module_builds {
-            inner.cache.restore(
-                CacheItemFamily::ModuleBuild,
-                MODULE_BUILD_CACHE_NAMESPACE,
-                identity.cache_identifier(),
-                None,
-                identity,
-                record,
-            );
-        }
-        inner.records_restored = true;
-    }
-
-    fn mark_records_restored(&self) {
-        self.inner
-            .lock()
-            .expect("build cache mutex should not be poisoned")
-            .records_restored = true;
-    }
-
-    fn write_filesystem_cache(
-        &self,
-        resolve_records: &HashMap<ResolveRequest, Arc<ResolveRecord>>,
-        module_builds: &HashMap<ModuleIdentity, Arc<ModuleBuildRecord>>,
-    ) -> io::Result<()> {
-        let Some(cache_location) = &self.options.cache_location else {
-            return Ok(());
-        };
-
-        let pack_file = PathBuf::from(DEFAULT_PACK_FILE);
-        let pack_path = cache_location.join(&pack_file);
-        if let Some(parent) = pack_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let cache_version = self.cache_version();
-        let pack = CachePackDto {
-            magic: CACHE_MAGIC.to_string(),
-            cache_version: cache_version.clone(),
-            resolve_records: resolve_records
-                .iter()
-                .map(|(request, record)| (request.clone(), (**record).clone()))
-                .collect(),
-            module_builds: module_builds
-                .iter()
-                .map(|(identity, record)| (identity.clone(), (**record).clone()))
-                .collect(),
-        };
-        let pack_payload = cbor4ii::serde::to_vec(Vec::new(), &pack)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let mut pack_bytes = PACK_MAGIC.to_vec();
-        pack_bytes.extend(pack_payload);
-        fs::write(pack_path, pack_bytes)?;
-
-        let manifest = CacheManifest {
-            magic: CACHE_MAGIC.to_string(),
-            cache_version,
-            pack_file: pack_file.to_string_lossy().replace('\\', "/"),
-            build_dependencies: self
-                .build_dependency_snapshot(self.build_dependency_snapshot_strategy)?,
-            resolve_build_dependencies: self
-                .build_dependency_snapshot(self.resolve_build_dependency_snapshot_strategy)?,
-        };
-        fs::create_dir_all(cache_location)?;
-        let manifest_json = serde_json::to_vec_pretty(&manifest)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        fs::write(cache_location.join(MANIFEST_FILE), manifest_json)?;
-        Ok(())
-    }
-
-    fn manifest_is_valid(&self, manifest: &CacheManifest) -> bool {
-        manifest.magic == CACHE_MAGIC
-            && manifest.cache_version == self.cache_version()
-            && self.build_dependency_snapshot_is_valid(
-                &manifest.build_dependencies,
-                self.build_dependency_snapshot_strategy,
-            )
-            && self.build_dependency_snapshot_is_valid(
-                &manifest.resolve_build_dependencies,
-                self.resolve_build_dependency_snapshot_strategy,
-            )
-    }
-
     fn cache_version(&self) -> String {
         self.options.version.clone().unwrap_or_default()
     }
@@ -1103,85 +1156,45 @@ impl BuildCache {
 
         Ok(self.file_system_info.merge_snapshots(snapshots.iter()))
     }
+}
 
-    fn build_dependency_snapshot_is_valid(
-        &self,
-        snapshot: &Snapshot,
-        strategy: SnapshotStrategy,
-    ) -> bool {
-        snapshot.has_exact_paths(self.build_dependency_paths())
-            && self
-                .file_system_info
-                .is_snapshot_valid_sync(snapshot, strategy)
+fn persistent_codec_registry() -> CodecRegistry {
+    CodecRegistry::new()
+        .with_resolve_record(ResolveRecordCodec::current())
+        .with_module_build_record(ModuleBuildRecordCodec::current())
+}
+
+fn persistent_guard_is_valid(
+    guard: &PackFileGuardDto,
+    options: &CacheOptions,
+    file_system_info: &FileSystemInfo,
+    build_dependency_snapshot_strategy: SnapshotStrategy,
+    resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+) -> bool {
+    if guard.version != options.version.clone().unwrap_or_default().as_bytes() {
+        return false;
     }
-
-    fn build_dependency_paths(&self) -> Vec<PathBuf> {
-        self.options
-            .build_dependencies
-            .iter()
-            .flat_map(|dependency| dependency.files.iter().cloned())
-            .collect()
-    }
-}
-
-fn legacy_filesystem_records(
-    cache: &Cache,
-) -> (
-    HashMap<ResolveRequest, Arc<ResolveRecord>>,
-    HashMap<ModuleIdentity, Arc<ModuleBuildRecord>>,
-) {
-    let mut resolve_records = HashMap::new();
-    let mut module_builds = HashMap::new();
-    for (_, entry) in cache.persistent_entries() {
-        match entry.family {
-            CacheItemFamily::Resolve => {
-                if let (Some(key), Some(value)) = (
-                    entry.key::<ResolveRequest>(),
-                    entry.value::<ResolveRecord>(),
-                ) {
-                    resolve_records.insert(key.clone(), value);
-                }
-            }
-            CacheItemFamily::ModuleBuild => {
-                if let (Some(key), Some(value)) = (
-                    entry.key::<ModuleIdentity>(),
-                    entry.value::<ModuleBuildRecord>(),
-                ) {
-                    module_builds.insert(key.clone(), value);
-                }
-            }
-            CacheItemFamily::CodeGeneration | CacheItemFamily::AssetRender => {}
-        }
-    }
-    (resolve_records, module_builds)
-}
-
-fn read_manifest(cache_location: &Path) -> Option<CacheManifest> {
-    let bytes = fs::read(cache_location.join(MANIFEST_FILE)).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-fn read_pack(cache_location: &Path, pack_file: &str) -> Option<CachePackDto> {
-    let bytes = fs::read(cache_location.join(pack_file)).ok()?;
-    let payload = bytes.strip_prefix(PACK_MAGIC)?;
-    cbor4ii::serde::from_slice(payload).ok()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CacheManifest {
-    magic: String,
-    cache_version: String,
-    pack_file: String,
-    build_dependencies: Snapshot,
-    resolve_build_dependencies: Snapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CachePackDto {
-    magic: String,
-    cache_version: String,
-    resolve_records: Vec<(ResolveRequest, ResolveRecord)>,
-    module_builds: Vec<(ModuleIdentity, ModuleBuildRecord)>,
+    let Ok(build_dependencies) = Snapshot::try_from(guard.build_dependencies.clone()) else {
+        return false;
+    };
+    let Ok(resolve_build_dependencies) =
+        Snapshot::try_from(guard.resolve_build_dependencies.clone())
+    else {
+        return false;
+    };
+    let paths = options
+        .build_dependencies
+        .iter()
+        .flat_map(|dependency| dependency.files.iter().cloned())
+        .collect::<Vec<_>>();
+    build_dependencies.has_exact_paths(paths.clone())
+        && file_system_info
+            .is_snapshot_valid_sync(&build_dependencies, build_dependency_snapshot_strategy)
+        && resolve_build_dependencies.has_exact_paths(paths)
+        && file_system_info.is_snapshot_valid_sync(
+            &resolve_build_dependencies,
+            resolve_build_dependency_snapshot_strategy,
+        )
 }
 
 #[cfg(test)]
@@ -1352,26 +1365,6 @@ mod tests {
                 evictions: 1,
             }
         );
-    }
-
-    #[test]
-    fn module_build_record_without_source_hash_deserializes_with_empty_hash()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let record: ModuleBuildRecord = serde_json::from_value(serde_json::json!({
-            "parsed": {
-                "dependencies": [],
-                "blocks": [],
-                "presentational_dependencies": []
-            },
-            "source": "export const value = 1;",
-            "snapshot": {
-                "entries": []
-            }
-        }))?;
-
-        assert_eq!(record.source_hash(), None);
-
-        Ok(())
     }
 
     #[tokio::test]

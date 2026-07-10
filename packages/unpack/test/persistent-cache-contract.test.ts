@@ -681,11 +681,13 @@ test("resolved Build Dependency requests guard PackFile entries across processes
     assert.deepEqual(cold.cacheWork, {
       resolve: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 },
       moduleBuild: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 },
+      codeGeneration: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 },
       assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.deepEqual(relabeledWarm.cacheWork, {
       resolve: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 },
       moduleBuild: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 },
+      codeGeneration: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 },
       assetRender: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 }
     });
     assert.deepEqual(changed.cacheWork, cold.cacheWork);
@@ -1100,6 +1102,7 @@ function singleModuleCacheWork(kind: "cold" | "warm") {
   return {
     resolve: { ...item },
     moduleBuild: { ...item },
+    codeGeneration: { ...item },
     assetRender: { ...item }
   };
 }

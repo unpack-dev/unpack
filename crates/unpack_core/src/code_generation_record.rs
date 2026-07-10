@@ -2,30 +2,36 @@ use rspack_sources::{
     ConcatSource, OriginalSource, RawStringSource, ReplaceSource, Replacement, ReplacementEnforce,
 };
 
+use crate::code_generation::RuntimeRequirements;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeGenerationResult {
     source: ConcatSource,
-    record_source: CodeGenerationSource,
+    runtime_requirements: RuntimeRequirements,
 }
 
 impl CodeGenerationResult {
     pub(crate) fn new(record_source: CodeGenerationSource) -> Self {
         Self {
             source: record_source.render(),
-            record_source,
+            runtime_requirements: RuntimeRequirements::default(),
         }
-    }
-
-    pub(crate) fn record_source(&self) -> &CodeGenerationSource {
-        &self.record_source
     }
 
     pub(crate) fn source(&self) -> &ConcatSource {
         &self.source
     }
 
-    pub(crate) fn from_record_source(record_source: CodeGenerationSource) -> Self {
-        Self::new(record_source)
+    pub(crate) fn runtime_requirements(&self) -> &RuntimeRequirements {
+        &self.runtime_requirements
+    }
+
+    pub(crate) fn with_runtime_requirements(
+        mut self,
+        runtime_requirements: RuntimeRequirements,
+    ) -> Self {
+        self.runtime_requirements = runtime_requirements;
+        self
     }
 }
 

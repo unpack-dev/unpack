@@ -165,6 +165,13 @@ impl Compilation {
         self.render_ids_assigned = true;
     }
 
+    pub fn seal(&mut self) {
+        self.build_chunk_graph();
+        self.assign_render_ids();
+        self.code_generation();
+        self.create_assets();
+    }
+
     fn assign_module_ids(&mut self) {
         assign_module_render_ids(&self.options, &self.module_graph, &mut self.chunk_graph);
     }
@@ -191,9 +198,6 @@ impl Compilation {
     }
 
     pub fn create_asset_render_manifest(&mut self) {
-        if self.code_generation_results.is_none() {
-            self.code_generation();
-        }
         self.asset_render_manifest = Some(code_generation::create_render_manifest(
             &self.chunk_graph,
             &self.entries,
@@ -204,9 +208,6 @@ impl Compilation {
     }
 
     pub fn render_assets(&mut self) {
-        if self.asset_render_manifest.is_none() {
-            self.create_asset_render_manifest();
-        }
         self.assets = code_generation::render_assets(
             &self.options,
             &self.build_cache,
@@ -222,12 +223,11 @@ impl Compilation {
     pub fn code_generation(&mut self) {
         let span = tracing::trace_span!("Compilation::code_generation");
         let _enter = span.enter();
-        if !self.render_ids_assigned {
-            self.assign_render_ids();
-        }
+        assert!(
+            self.render_ids_assigned,
+            "Render IDs must be assigned before code generation"
+        );
         self.code_generation_results = Some(code_generation::generate_code(
-            &self.options,
-            &self.build_cache,
             &self.module_graph,
             &self.chunk_graph,
         ));

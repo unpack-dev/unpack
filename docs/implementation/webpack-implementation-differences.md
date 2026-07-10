@@ -14,11 +14,14 @@ That means differences should be classified as staged scope decisions, deliberat
 
 ## Compiler and compilation lifecycle
 
-Unpack currently runs a direct Rust pipeline:
+Unpack currently runs a compact Rust pipeline with a webpack-shaped sealing boundary:
 
 1. `Compilation::make`
-2. `Compilation::build_chunk_graph`
-3. `Compilation::create_assets`
+2. `Compilation::seal`
+   1. build the chunk graph
+   2. assign render IDs
+   3. generate one result per module
+   4. create assets
 
 Webpack's lifecycle is much larger: `Compiler.run` guards concurrent runs, calls run hooks, reads records, compiles, emits assets, emits records, stores build dependencies, and returns `Stats`. `Compiler.compile` creates normal and context module factories, runs make hooks, finishes the compilation, seals it, and then runs after-compile hooks.
 
@@ -26,7 +29,9 @@ Necessity:
 
 - Keeping Unpack's lifecycle small is a staged implementation choice while the public API grows toward webpack.
 - Matching webpack's hook graph, records, cache idle state, and plugin lifecycle becomes necessary when the corresponding public plugin and lifecycle surfaces are supported.
-- The phase names are still useful because they provide good implementation boundaries and future cache boundaries.
+- The phase names remain useful implementation boundaries. Code generation
+  results deliberately belong to one `Compilation`; they are not a persistent
+  cache boundary.
 
 ## Normal module factory
 

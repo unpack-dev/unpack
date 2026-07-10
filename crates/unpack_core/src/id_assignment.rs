@@ -364,7 +364,7 @@ mod tests {
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-        let results = generate_code(&options, &build_cache, &module_graph, &chunk_graph);
+        let results = generate_code(&module_graph, &chunk_graph);
         let manifest = create_render_manifest(&chunk_graph, &[module], &results);
         let assets = render_assets(&options, &build_cache, &manifest, &results);
         let main = assets
@@ -405,7 +405,7 @@ mod tests {
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-        let results = generate_code(&options, &build_cache, &module_graph, &chunk_graph);
+        let results = generate_code(&module_graph, &chunk_graph);
         let manifest = create_render_manifest(&chunk_graph, &entries, &results);
         render_assets(&options, &build_cache, &manifest, &results)
     }

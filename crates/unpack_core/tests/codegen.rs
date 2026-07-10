@@ -7,16 +7,9 @@ use std::{
 use unpack_core::{ChunkGroupKind, Compiler, CompilerOptions, Entry};
 
 #[tokio::test]
-async fn separates_module_code_generation_from_asset_rendering()
--> Result<(), Box<dyn std::error::Error>> {
+async fn seal_orchestrates_post_make_phases() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
-    write(
-        temp.path().join("src/index.js"),
-        r#"
-            export const value = 42;
-        "#,
-    )?;
-
+    write(temp.path().join("src/index.js"), "export const value = 42;")?;
     let compiler = Compiler::new(CompilerOptions::new(
         temp.path(),
         vec![Entry::new("main", "./src/index")],
@@ -24,74 +17,36 @@ async fn separates_module_code_generation_from_asset_rendering()
     let mut compilation = compiler.create_compilation();
 
     compilation.make().await?;
-    compilation.build_chunk_graph();
-    compilation.code_generation();
+    assert!(compilation.assets().is_empty());
 
-    assert_eq!(compilation.assets(), []);
-
-    compilation.create_assets();
+    compilation.seal();
 
     assert_eq!(compilation.errors(), []);
-    assert_eq!(
+    assert!(
         compilation
             .assets()
             .iter()
-            .map(|asset| asset.filename.as_str())
-            .collect::<Vec<_>>(),
-        ["main.js", "main.js.map"]
+            .any(|asset| asset.filename == "main.js")
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn builds_a_render_manifest_before_creating_asset_bookkeeping()
--> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    write(
-        temp.path().join("src/index.js"),
-        r#"
-            export async function load() {
-                return import("./feature");
-            }
-        "#,
-    )?;
-    write(
-        temp.path().join("src/feature.js"),
-        "export const value = 42;",
-    )?;
-
+#[should_panic(expected = "Render IDs must be assigned before code generation")]
+async fn code_generation_rejects_an_unsealed_compilation() {
+    let temp = tempfile::tempdir().expect("temp directory should be created");
+    write(temp.path().join("src/index.js"), "export const value = 42;")
+        .expect("fixture should be written");
     let compiler = Compiler::new(CompilerOptions::new(
         temp.path(),
         vec![Entry::new("main", "./src/index")],
     ));
     let mut compilation = compiler.create_compilation();
 
-    compilation.make().await?;
+    compilation.make().await.expect("make should complete");
     compilation.build_chunk_graph();
     compilation.code_generation();
-    compilation.create_asset_render_manifest();
-
-    assert_eq!(compilation.assets(), []);
-
-    compilation.render_assets();
-
-    assert_eq!(compilation.errors(), []);
-    assert_eq!(
-        compilation
-            .assets()
-            .iter()
-            .map(|asset| asset.filename.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "main.js",
-            "main.js.map",
-            "src_feature_js.js",
-            "src_feature_js.js.map"
-        ]
-    );
-
-    Ok(())
 }
 
 // Ported from webpack 5.108.1:

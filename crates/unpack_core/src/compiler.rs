@@ -675,10 +675,7 @@ impl Compiler {
         let result = async {
             let mut compilation = self.create_compilation();
             compilation.make().await?;
-            compilation.build_chunk_graph();
-            compilation.assign_render_ids();
-            compilation.code_generation();
-            compilation.create_assets();
+            compilation.seal();
             Ok(compilation)
         }
         .instrument(tracing::trace_span!("Compiler::run"))

@@ -128,8 +128,8 @@ struct InitFragment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum InitFragmentStage {
     HarmonyCompatibility,
-    HarmonyImport,
     HarmonyExport,
+    HarmonyImport,
     HarmonyStarReexport,
 }
 

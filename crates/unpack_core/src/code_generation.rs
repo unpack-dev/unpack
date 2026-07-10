@@ -51,6 +51,29 @@ impl RuntimeRequirements {
     pub fn iter(&self) -> impl Iterator<Item = RuntimeRequirement> + '_ {
         self.requirements.iter().copied()
     }
+
+    fn for_initial_chunk(chunk_graph: &ChunkGraph, chunk: &Chunk) -> Self {
+        let mut requirements = Self::default();
+        requirements.insert(RuntimeRequirement::ModuleFactories);
+        requirements.insert(RuntimeRequirement::ModuleCache);
+        requirements.insert(RuntimeRequirement::Require);
+        requirements.insert(RuntimeRequirement::DefinePropertyGetters);
+        requirements.insert(RuntimeRequirement::HasOwnProperty);
+        requirements.insert(RuntimeRequirement::MakeNamespaceObject);
+
+        let has_async_child = chunk.groups().iter().any(|group_id| {
+            !chunk_graph.chunk_groups()[group_id.index()]
+                .children()
+                .is_empty()
+        });
+        if has_async_child {
+            requirements.insert(RuntimeRequirement::EnsureChunk);
+            requirements.insert(RuntimeRequirement::GetChunkFilename);
+            requirements.insert(RuntimeRequirement::RequireChunkLoading);
+        }
+
+        requirements
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -126,13 +149,19 @@ struct CodeGenerationInput<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RenderManifest {
-    entries: Vec<RenderManifestEntry>,
+    entries: Vec<AssetRenderManifest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RenderManifestEntry {
-    filename: String,
-    render: AssetRenderManifest,
+pub(crate) struct AssetRenderPlan {
+    filenames: Vec<String>,
+    manifest: RenderManifest,
+}
+
+impl AssetRenderPlan {
+    pub(crate) fn manifest(&self) -> &RenderManifest {
+        &self.manifest
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +171,7 @@ enum AssetRenderManifest {
         chunk_filename_map: String,
         entry_id: String,
         chunk_id: String,
+        runtime_requirements: RuntimeRequirements,
     },
     AsyncChunk {
         modules: Vec<ModuleRenderManifest>,
@@ -156,7 +186,7 @@ struct ModuleRenderManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RenderedSource {
+pub(crate) struct RenderedSource {
     source: ConcatSource,
 }
 
@@ -227,8 +257,9 @@ pub(crate) fn create_render_manifest(
     chunk_graph: &ChunkGraph,
     entries: &[ModuleId],
     code_generation_results: &CodeGenerationResults,
-) -> RenderManifest {
+) -> AssetRenderPlan {
     let mut manifest_entries = Vec::new();
+    let mut filenames = Vec::new();
 
     for (entry_index, group_id) in chunk_graph.entrypoints().iter().copied().enumerate() {
         let group = &chunk_graph.chunk_groups()[group_id.index()];
@@ -242,14 +273,13 @@ pub(crate) fn create_render_manifest(
             continue;
         };
         let modules = module_render_manifest(chunk_graph, chunk, code_generation_results);
-        manifest_entries.push(RenderManifestEntry {
-            filename: chunk.filename().to_string(),
-            render: AssetRenderManifest::InitialChunk {
-                modules,
-                chunk_filename_map: render_chunk_filename_map(chunk_graph),
-                entry_id: code_generation_results.module_render_ids[&entry_module].clone(),
-                chunk_id: chunk.render_id().to_string(),
-            },
+        filenames.push(chunk.filename().to_string());
+        manifest_entries.push(AssetRenderManifest::InitialChunk {
+            modules,
+            chunk_filename_map: render_chunk_filename_map(chunk_graph),
+            entry_id: code_generation_results.module_render_ids[&entry_module].clone(),
+            chunk_id: chunk.render_id().to_string(),
+            runtime_requirements: RuntimeRequirements::for_initial_chunk(chunk_graph, chunk),
         });
     }
 
@@ -263,35 +293,43 @@ pub(crate) fn create_render_manifest(
         if is_initial {
             continue;
         }
-        manifest_entries.push(RenderManifestEntry {
-            filename: chunk.filename().to_string(),
-            render: AssetRenderManifest::AsyncChunk {
-                modules: module_render_manifest(chunk_graph, chunk, code_generation_results),
-                chunk_id: chunk.render_id().to_string(),
-            },
+        filenames.push(chunk.filename().to_string());
+        manifest_entries.push(AssetRenderManifest::AsyncChunk {
+            modules: module_render_manifest(chunk_graph, chunk, code_generation_results),
+            chunk_id: chunk.render_id().to_string(),
         });
     }
 
-    RenderManifest {
-        entries: manifest_entries,
+    AssetRenderPlan {
+        filenames,
+        manifest: RenderManifest {
+            entries: manifest_entries,
+        },
     }
 }
 
-pub(crate) fn render_assets(
-    options: &CompilerOptions,
+pub(crate) fn render_asset_sources(
     manifest: &RenderManifest,
     code_generation_results: &CodeGenerationResults,
-) -> Vec<Asset> {
-    let mut assets = Vec::new();
+) -> Vec<RenderedSource> {
+    let mut rendered_sources = Vec::new();
     for entry in &manifest.entries {
-        let rendered_source = render_asset(&entry.render, code_generation_results);
-        assets.extend(emit_asset(
-            entry.filename.clone(),
-            &rendered_source,
-            options.sourcemap,
-        ));
+        rendered_sources.push(render_asset(entry, code_generation_results));
     }
-    assets
+    rendered_sources
+}
+
+pub(crate) fn create_assets(
+    options: &CompilerOptions,
+    plan: &AssetRenderPlan,
+    rendered_sources: &[RenderedSource],
+) -> Vec<Asset> {
+    plan.filenames
+        .iter()
+        .cloned()
+        .zip(rendered_sources)
+        .flat_map(|(filename, rendered)| emit_asset(filename, rendered, options.sourcemap))
+        .collect()
 }
 
 fn module_render_manifest(
@@ -303,16 +341,22 @@ fn module_render_manifest(
     chunk_graph
         .chunk_modules(chunk.id())
         .iter()
-        .filter_map(|module_id| {
-            let code_generation_key =
-                code_generation_results.key_for(*module_id, runtime.clone())?;
-            code_generation_results
-                .results
-                .contains_key(&code_generation_key)
-                .then(|| ModuleRenderManifest {
-                    render_id: code_generation_results.module_render_ids[module_id].clone(),
-                    code_generation_key,
-                })
+        .map(|module_id| {
+            let code_generation_key = code_generation_results
+                .key_for(*module_id, runtime.clone())
+                .unwrap_or_else(|| {
+                    panic!("module {module_id:?} must have a Code Generation identity")
+                });
+            assert!(
+                code_generation_results
+                    .results
+                    .contains_key(&code_generation_key),
+                "module {module_id:?} must have a Code Generation result"
+            );
+            ModuleRenderManifest {
+                render_id: code_generation_results.module_render_ids[module_id].clone(),
+                code_generation_key,
+            }
         })
         .collect()
 }
@@ -327,11 +371,13 @@ fn render_asset(
             chunk_filename_map,
             entry_id,
             chunk_id,
+            runtime_requirements,
         } => render_initial_asset(
             modules,
             chunk_filename_map,
             entry_id,
             chunk_id,
+            runtime_requirements,
             code_generation_results,
         ),
         AssetRenderManifest::AsyncChunk { modules, chunk_id } => {
@@ -380,8 +426,10 @@ fn render_initial_asset(
     chunk_filename_map: &str,
     entry_id: &str,
     chunk_id: &str,
+    runtime_requirements: &RuntimeRequirements,
     code_generation_results: &CodeGenerationResults,
 ) -> ConcatSource {
+    debug_assert!(runtime_requirements.contains(RuntimeRequirement::Require));
     let modules = render_module_table(modules, code_generation_results);
     let entry_id = json_string(entry_id);
     let chunk_id = json_string(chunk_id);

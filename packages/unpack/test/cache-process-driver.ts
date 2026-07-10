@@ -25,26 +25,27 @@ async function observeBuild(
     hasStats: false,
     hasErrors: null,
     assets: [],
+    assetDetails: [],
     outputPath: null,
     cacheWork: null
   } satisfies CacheProcessObservation;
 
   let compiler: ReturnType<typeof unpack> | ReturnType<typeof webpack>;
   try {
-    const { outputPath, ...options } = current.options;
+    const { outputPath, sourcemap, ...options } = current.options;
     compiler =
       current.bundler === "webpack"
         ? webpack({
             ...options,
             entry: options.entry ?? "./src/index.js",
-            devtool: false,
+            devtool: sourcemap ? "source-map" : false,
             infrastructureLogging: { level: "none" },
             output: { path: outputPath, filename: "main.js" }
           } as unknown as Parameters<typeof webpack>[0])
         : unpack({
             ...options,
             entry: options.entry ?? "./src/index.js",
-            sourcemap: false,
+            sourcemap: sourcemap ?? false,
             infrastructureLogging: { level: "none" },
             output: { path: outputPath }
           } as Parameters<typeof unpack>[0]);
@@ -64,6 +65,7 @@ async function observeBuild(
     hasStats: run.hasStats,
     hasErrors: run.hasErrors,
     assets: run.assets,
+    assetDetails: run.assetDetails,
     outputPath: run.outputPath
   };
 }
@@ -77,6 +79,7 @@ async function runCompiler(
     hasStats: boolean;
     hasErrors: boolean | null;
     assets: string[];
+    assetDetails: { name: string; size: number }[];
     outputPath: string | null;
   }>((resolve) => {
     compiler.run((error, stats) => {
@@ -86,6 +89,7 @@ async function runCompiler(
           hasStats: stats !== undefined,
           hasErrors: stats?.hasErrors() ?? null,
           assets: [],
+          assetDetails: [],
           outputPath: null
         });
         return;
@@ -105,6 +109,13 @@ async function runCompiler(
         assets: (json.assets ?? []).flatMap((asset) =>
           asset.name === undefined ? [] : [asset.name]
         ).sort(),
+        assetDetails: (json.assets ?? [])
+          .flatMap((asset) =>
+            asset.name === undefined
+              ? []
+              : [{ name: asset.name, size: asset.size }]
+          )
+          .sort((left, right) => left.name.localeCompare(right.name)),
         outputPath: json.outputPath ?? null
       });
     });

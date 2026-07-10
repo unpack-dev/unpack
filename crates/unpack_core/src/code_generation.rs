@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-
-use rspack_sources::{
-    ConcatSource, MapOptions, ObjectPool, OriginalSource, RawStringSource, ReplaceSource, Source,
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    hash::{Hash, Hasher},
 };
+
+use rspack_sources::{ConcatSource, OriginalSource, RawStringSource, ReplaceSource, SourceMap};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -13,6 +14,9 @@ use crate::{
     HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
     HarmonyImportSpecifierDependency, ImportDependency, Module, ModuleGraph, ModuleId,
     ModuleIdentity, SourceRange,
+    build_cache::{BuildCache, CacheETag, CacheIdentifier, CacheKey},
+    cache_hash::StableHasher,
+    rendered_source::RenderedSource,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,17 +160,26 @@ struct ModuleRenderManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RenderedSource {
-    source: ConcatSource,
+struct AssetRenderKey {
+    kind: AssetRenderKind,
+    chunk_id: String,
 }
 
-impl RenderedSource {
-    fn new(source: ConcatSource) -> Self {
-        Self { source }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetRenderKind {
+    Initial,
+    Async,
+}
 
-    fn source(&self) -> &ConcatSource {
-        &self.source
+impl CacheKey for AssetRenderKey {
+    fn cache_identifier(&self) -> CacheIdentifier {
+        CacheIdentifier::from_parts([
+            match self.kind {
+                AssetRenderKind::Initial => b"initial".to_vec(),
+                AssetRenderKind::Async => b"async".to_vec(),
+            },
+            self.chunk_id.as_bytes().to_vec(),
+        ])
     }
 }
 
@@ -279,12 +292,22 @@ pub(crate) fn create_render_manifest(
 
 pub(crate) fn render_assets(
     options: &CompilerOptions,
+    build_cache: &BuildCache,
     manifest: &RenderManifest,
     code_generation_results: &CodeGenerationResults,
 ) -> Vec<Asset> {
     let mut assets = Vec::new();
+    let cache = build_cache.asset_renders::<AssetRenderKey>();
     for entry in &manifest.entries {
-        let rendered_source = render_asset(&entry.render, code_generation_results);
+        let key = entry.render.cache_key();
+        let etag = entry.render.cache_etag(code_generation_results);
+        let rendered_source = if let Some(rendered_source) = cache.get(&key, Some(&etag)) {
+            rendered_source.as_ref().clone()
+        } else {
+            let rendered_source = render_asset(&entry.render, code_generation_results);
+            cache.store(key, Some(etag), rendered_source.clone());
+            rendered_source
+        };
         assets.extend(emit_asset(
             entry.filename.clone(),
             &rendered_source,
@@ -292,6 +315,68 @@ pub(crate) fn render_assets(
         ));
     }
     assets
+}
+
+impl AssetRenderManifest {
+    fn cache_key(&self) -> AssetRenderKey {
+        match self {
+            Self::InitialChunk { chunk_id, .. } => AssetRenderKey {
+                kind: AssetRenderKind::Initial,
+                chunk_id: chunk_id.clone(),
+            },
+            Self::AsyncChunk { chunk_id, .. } => AssetRenderKey {
+                kind: AssetRenderKind::Async,
+                chunk_id: chunk_id.clone(),
+            },
+        }
+    }
+
+    fn cache_etag(&self, code_generation_results: &CodeGenerationResults) -> CacheETag {
+        let mut hasher = StableHasher::default();
+        hasher.write(b"unpack/asset-render/hash/1");
+        match self {
+            Self::InitialChunk {
+                modules,
+                chunk_filename_map,
+                entry_id,
+                chunk_id,
+            } => {
+                hasher.write_u8(0);
+                hash_module_render_inputs(modules, code_generation_results, &mut hasher);
+                chunk_filename_map.hash(&mut hasher);
+                entry_id.hash(&mut hasher);
+                chunk_id.hash(&mut hasher);
+            }
+            Self::AsyncChunk { modules, chunk_id } => {
+                hasher.write_u8(1);
+                hash_module_render_inputs(modules, code_generation_results, &mut hasher);
+                chunk_id.hash(&mut hasher);
+            }
+        }
+        CacheETag::new(hasher.finish().to_le_bytes())
+    }
+}
+
+fn hash_module_render_inputs(
+    modules: &[ModuleRenderManifest],
+    code_generation_results: &CodeGenerationResults,
+    hasher: &mut StableHasher,
+) {
+    modules.len().hash(hasher);
+    for module in modules {
+        module.render_id.hash(hasher);
+        module.code_generation_key.hash(hasher);
+        match code_generation_results
+            .results
+            .get(&module.code_generation_key)
+        {
+            Some(result) => {
+                true.hash(hasher);
+                result.source.hash(hasher);
+            }
+            None => false.hash(hasher),
+        }
+    }
 }
 
 fn module_render_manifest(
@@ -342,17 +427,17 @@ fn render_asset(
 }
 
 fn emit_asset(filename: String, rendered: &RenderedSource, sourcemap: bool) -> Vec<Asset> {
-    let mut source = rendered.source().clone();
     let map_filename = format!("{filename}.map");
+    let mut source = rendered.source().to_string();
     if sourcemap {
-        source.add(RawStringSource::from(format!(
-            "\n//# sourceMappingURL={map_filename}\n"
-        )));
+        source.push_str(&format!("\n//# sourceMappingURL={map_filename}\n"));
     }
 
     let mut assets = Vec::new();
     let mut source_map = if sourcemap {
-        source.map(&ObjectPool::default(), &MapOptions::default())
+        rendered
+            .source_map()
+            .and_then(|source_map| SourceMap::from_json(source_map.to_string()).ok())
     } else {
         None
     };
@@ -360,10 +445,7 @@ fn emit_asset(filename: String, rendered: &RenderedSource, sourcemap: bool) -> V
         map.set_file(Some(filename.clone().into()));
     }
 
-    assets.push(Asset {
-        filename,
-        source: source.source().into_string_lossy().into_owned(),
-    });
+    assets.push(Asset { filename, source });
 
     if let Some(map) = source_map {
         assets.push(Asset {
@@ -1029,13 +1111,96 @@ fn json_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::BTreeSet, fs};
 
-    use rspack_sources::{ConcatSource, OriginalSource, Source};
+    use rspack_sources::{ConcatSource, OriginalSource, RawStringSource};
 
-    use crate::{ChunkGroupKind, Compiler, CompilerOptions, Entry};
+    use crate::{
+        CacheOptions, ChunkGroupKind, Compiler, CompilerOptions, Entry, ModuleIdentity,
+        SnapshotOptions,
+        build_cache::{BuildCache, CacheIdentifier, CacheKey, CacheNamespace},
+    };
 
-    use super::{RenderedSource, RuntimeSpec, emit_asset};
+    use super::{
+        AssetRenderKey, AssetRenderKind, AssetRenderManifest, CodeGenerationKey,
+        CodeGenerationResult, CodeGenerationResults, ModuleRenderManifest, RenderedSource,
+        RuntimeSpec, emit_asset,
+    };
+
+    #[test]
+    fn asset_render_facade_uses_stable_namespace_and_manifest_identity() {
+        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let facade = build_cache.asset_renders::<AssetRenderKey>();
+        assert_eq!(
+            facade.namespace(),
+            CacheNamespace::new("unpack/asset-render")
+        );
+
+        let initial = AssetRenderKey {
+            kind: AssetRenderKind::Initial,
+            chunk_id: "main".to_string(),
+        };
+        let asynchronous = AssetRenderKey {
+            kind: AssetRenderKind::Async,
+            chunk_id: "main".to_string(),
+        };
+        assert_eq!(
+            initial.cache_identifier(),
+            CacheIdentifier::from_parts([b"initial".to_vec(), b"main".to_vec()])
+        );
+        assert_ne!(initial.cache_identifier(), asynchronous.cache_identifier());
+    }
+
+    #[test]
+    fn exact_render_hash_covers_generated_source_and_manifest_inputs() {
+        let code_generation_key = CodeGenerationKey::new(
+            ModuleIdentity::new("/project/src/feature.js"),
+            RuntimeSpec(BTreeSet::from(["main".to_string()])),
+        );
+        let module = ModuleRenderManifest {
+            render_id: "./src/feature.js".to_string(),
+            code_generation_key: code_generation_key.clone(),
+        };
+        let render = AssetRenderManifest::AsyncChunk {
+            modules: vec![module],
+            chunk_id: "src_feature_js".to_string(),
+        };
+        let mut results = CodeGenerationResults::default();
+        results.results.insert(
+            code_generation_key.clone(),
+            code_generation_result("export const value = 'before';"),
+        );
+        let before = render.cache_etag(&results);
+
+        results.results.insert(
+            code_generation_key,
+            code_generation_result("export const value = 'after';"),
+        );
+        assert_ne!(before, render.cache_etag(&results));
+
+        let initial = AssetRenderManifest::InitialChunk {
+            modules: Vec::new(),
+            chunk_filename_map: "{\"feature\":\"feature.js\"}".to_string(),
+            entry_id: "./src/index.js".to_string(),
+            chunk_id: "main".to_string(),
+        };
+        let changed_filename_map = AssetRenderManifest::InitialChunk {
+            modules: Vec::new(),
+            chunk_filename_map: "{\"feature\":\"renamed.js\"}".to_string(),
+            entry_id: "./src/index.js".to_string(),
+            chunk_id: "main".to_string(),
+        };
+        assert_ne!(
+            initial.cache_etag(&results),
+            changed_filename_map.cache_etag(&results)
+        );
+    }
+
+    fn code_generation_result(source: &str) -> CodeGenerationResult {
+        let mut generated = ConcatSource::default();
+        generated.add(RawStringSource::from(source.to_string()));
+        CodeGenerationResult { source: generated }
+    }
 
     #[tokio::test]
     async fn shared_async_chunk_runtime_spec_contains_each_parent_entrypoint()
@@ -1089,10 +1254,7 @@ mod tests {
         let first = emit_asset("first.js".to_string(), &rendered, true);
         let second = emit_asset("second.js".to_string(), &rendered, true);
 
-        assert_eq!(
-            rendered.source().source().into_string_lossy(),
-            "export const value = 42;\n"
-        );
+        assert_eq!(rendered.source(), "export const value = 42;\n");
         assert_eq!(first[0].filename, "first.js");
         assert!(
             first[0]

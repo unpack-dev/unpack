@@ -11,16 +11,18 @@ use crate::{
     ModuleIdentity, SnapshotOptions, SnapshotStrategy,
     cache_hash::stable_hash,
     pack_file::{
-        CodecRegistry, ModuleBuildRecordCodec, ModuleBuildRecordDto, PackFile, PackFileAddress,
-        PackFileETag, PackFileGuardDto, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
-        ResolveRecordDto, SnapshotDto,
+        AssetRenderRecordCodec, AssetRenderRecordDto, CodecRegistry, ModuleBuildRecordCodec,
+        ModuleBuildRecordDto, PackFile, PackFileAddress, PackFileETag, PackFileGuardDto,
+        PackFileWriteBatch, PublicationBase, ResolveRecordCodec, ResolveRecordDto, SnapshotDto,
     },
     parser::ParsedModule,
+    rendered_source::RenderedSource,
     snapshot::{FileSystemInfo, Snapshot, SnapshotCache},
 };
 
 const RESOLVE_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/resolve");
 const MODULE_BUILD_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/module-build");
+const ASSET_RENDER_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/asset-render");
 
 #[derive(Debug, Clone)]
 pub(crate) struct BuildCache {
@@ -64,7 +66,7 @@ impl CacheIdentifier {
         Self(value.as_ref().to_vec())
     }
 
-    fn from_parts(parts: impl IntoIterator<Item = Vec<u8>>) -> Self {
+    pub(crate) fn from_parts(parts: impl IntoIterator<Item = Vec<u8>>) -> Self {
         let mut bytes = Vec::new();
         for part in parts {
             bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
@@ -102,7 +104,6 @@ pub(crate) enum CacheItemFamily {
     ModuleBuild,
     #[allow(dead_code)]
     CodeGeneration,
-    #[allow(dead_code)]
     AssetRender,
 }
 
@@ -451,7 +452,17 @@ impl PackFileCacheLayer {
                     let dto = ModuleBuildRecordDto::try_from(record.as_ref())?;
                     batch.insert(&self.registry, pack_address, pack_etag, dto)?;
                 }
-                CacheItemFamily::CodeGeneration | CacheItemFamily::AssetRender => continue,
+                CacheItemFamily::AssetRender => {
+                    let record = entry.value::<RenderedSource>().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Asset Render Cache Item contains an unexpected value",
+                        )
+                    })?;
+                    let dto = AssetRenderRecordDto::from(record.as_ref());
+                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                }
+                CacheItemFamily::CodeGeneration => continue,
             }
         }
         PackFile::publish_batch(root, Some(guard), self.publication_base, batch)?;
@@ -496,6 +507,16 @@ impl CacheLayer for PackFileCacheLayer {
                 let record = ModuleBuildRecord::try_from((*dto).clone()).ok()?;
                 Some(CacheEntry::new(
                     CacheItemFamily::ModuleBuild,
+                    etag.cloned(),
+                    record,
+                ))
+            }
+            ASSET_RENDER_CACHE_NAMESPACE => {
+                let dto =
+                    pack_file.get::<AssetRenderRecordDto>(&pack_address, pack_etag.as_ref())?;
+                let record = RenderedSource::try_from((*dto).clone()).ok()?;
+                Some(CacheEntry::new(
+                    CacheItemFamily::AssetRender,
                     etag.cloned(),
                     record,
                 ))
@@ -944,6 +965,10 @@ impl BuildCache {
         self.facade(MODULE_BUILD_CACHE_NAMESPACE, CacheItemFamily::ModuleBuild)
     }
 
+    pub(crate) fn asset_renders<K>(&self) -> CacheFacade<K, RenderedSource> {
+        self.facade(ASSET_RENDER_CACHE_NAMESPACE, CacheItemFamily::AssetRender)
+    }
+
     fn facade<K, V>(
         &self,
         namespace: CacheNamespace,
@@ -1077,6 +1102,7 @@ impl BuildCache {
         let work = self.work_counters();
         let resolve = work.for_family(CacheItemFamily::Resolve);
         let module = work.for_family(CacheItemFamily::ModuleBuild);
+        let asset_render = work.for_family(CacheItemFamily::AssetRender);
         tracing::info!(
             target: "unpack_core::cache_work",
             resolve_hits = resolve.hits,
@@ -1089,6 +1115,11 @@ impl BuildCache {
             module_stores = module.stores,
             module_restores = module.restores,
             module_evictions = module.evictions,
+            asset_render_hits = asset_render.hits,
+            asset_render_misses = asset_render.misses,
+            asset_render_stores = asset_render.stores,
+            asset_render_restores = asset_render.restores,
+            asset_render_evictions = asset_render.evictions,
             "cache_work"
         );
     }
@@ -1196,6 +1227,7 @@ fn persistent_codec_registry() -> CodecRegistry {
     CodecRegistry::new()
         .with_resolve_record(ResolveRecordCodec::current())
         .with_module_build_record(ModuleBuildRecordCodec::current())
+        .with_asset_render_record(AssetRenderRecordCodec::current())
 }
 
 fn persistent_guard_is_valid(

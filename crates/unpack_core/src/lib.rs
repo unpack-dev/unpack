@@ -14,6 +14,7 @@ mod module_graph;
 mod normal_module_factory;
 mod pack_file;
 mod parser;
+mod rendered_source;
 mod resolver;
 mod snapshot;
 

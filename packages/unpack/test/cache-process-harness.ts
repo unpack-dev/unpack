@@ -12,6 +12,7 @@ export interface CacheProcessOptions {
   mode?: "development" | "production" | "none";
   name?: string;
   outputPath: string;
+  sourcemap?: boolean;
   cache?: boolean | Record<string, unknown>;
   snapshot?: Record<string, unknown>;
 }
@@ -29,6 +30,7 @@ export interface CacheProcessObservation {
   hasStats: boolean;
   hasErrors: boolean | null;
   assets: string[];
+  assetDetails: { name: string; size: number }[];
   outputPath: string | null;
   cacheWork: CacheWorkObservation | null;
 }
@@ -44,6 +46,7 @@ export interface CacheItemWorkObservation {
 export interface CacheWorkObservation {
   resolve: CacheItemWorkObservation;
   moduleBuild: CacheItemWorkObservation;
+  assetRender: CacheItemWorkObservation;
 }
 
 export async function runColdWarmBuilds(
@@ -97,7 +100,7 @@ function parseCacheWork(stderr: string): CacheWorkObservation | null {
     }
     return Number(value);
   };
-  const item = (prefix: "resolve" | "module") => ({
+  const item = (prefix: "resolve" | "module" | "asset_render") => ({
     hits: field(`${prefix}_hits`),
     misses: field(`${prefix}_misses`),
     stores: field(`${prefix}_stores`),
@@ -106,6 +109,7 @@ function parseCacheWork(stderr: string): CacheWorkObservation | null {
   });
   return {
     resolve: item("resolve"),
-    moduleBuild: item("module")
+    moduleBuild: item("module"),
+    assetRender: item("asset_render")
   };
 }

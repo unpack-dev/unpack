@@ -272,12 +272,109 @@ test("unchanged Resolve and Module Build work restores in an independent process
     assertColdWarmPublicOutcome({ cold, warm });
     assert.deepEqual(cold.cacheWork, {
       resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
-      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 }
+      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.deepEqual(warm.cacheWork, {
       resolve: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
-      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 }
+      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      assetRender: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 }
     });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Asset Render records restore source while each process finalizes and emits fresh Assets", async () => {
+  const fixture = await createFixture({
+    "src/index.js": [
+      "export async function load() {",
+      "  return import('./feature.js');",
+      "}"
+    ].join("\n"),
+    "src/feature.js": "export const value = 'before';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/asset-render");
+  const request = (outputPath: string, sourcemap: boolean) => ({
+    bundler: "unpack" as const,
+    options: {
+      context: fixture,
+      mode: "none" as const,
+      outputPath,
+      sourcemap,
+      cache: { type: "filesystem", cacheLocation },
+      snapshot: {
+        module: { timestamp: false, hash: true },
+        resolve: { timestamp: false, hash: false }
+      }
+    }
+  });
+  const coldOutput = join(fixture, "dist-cold");
+  const warmOutput = join(fixture, "dist-warm");
+  const noMapOutput = join(fixture, "dist-no-map");
+  const changedOutput = join(fixture, "dist-changed");
+
+  try {
+    const cold = await runCacheProcess(request(coldOutput, true));
+    assert.equal(cold.error, null);
+    assert.deepEqual(cold.cacheWork?.assetRender, {
+      hits: 0,
+      misses: 2,
+      stores: 2,
+      restores: 0,
+      evictions: 0
+    });
+    const coldFiles = await readAssetRenderFixture(coldOutput);
+
+    const warm = await runCacheProcess(request(warmOutput, true));
+    assert.equal(warm.error, null);
+    assert.notEqual(cold.pid, warm.pid);
+    assert.notEqual(cold.instanceId, warm.instanceId);
+    assert.deepEqual(warm.cacheWork?.assetRender, {
+      hits: 2,
+      misses: 0,
+      stores: 0,
+      restores: 2,
+      evictions: 0
+    });
+    assert.deepEqual(await readAssetRenderFixture(warmOutput), coldFiles);
+    assert.deepEqual(warm.assetDetails, cold.assetDetails);
+    assert.match(coldFiles.mainMap, /"file":"main\.js"/);
+    assert.match(coldFiles.asyncMap, /"file":"src_feature_js\.js"/);
+    assert.match(coldFiles.mainMap, /src\/index\.js/);
+    assert.match(coldFiles.asyncMap, /src\/feature\.js/);
+
+    const noMap = await runCacheProcess(request(noMapOutput, false));
+    assert.equal(noMap.error, null);
+    assert.deepEqual(noMap.cacheWork?.assetRender, {
+      hits: 2,
+      misses: 0,
+      stores: 0,
+      restores: 2,
+      evictions: 0
+    });
+    assert.deepEqual(noMap.assets, ["main.js", "src_feature_js.js"]);
+    await assert.rejects(stat(join(noMapOutput, "main.js.map")));
+    assert.doesNotMatch(await readFile(join(noMapOutput, "main.js"), "utf8"), /sourceMappingURL/);
+
+    await writeFile(
+      join(fixture, "src/feature.js"),
+      "export const value = 'after';",
+      "utf8"
+    );
+    const changed = await runCacheProcess(request(changedOutput, true));
+    assert.equal(changed.error, null);
+    assert.deepEqual(changed.cacheWork?.assetRender, {
+      hits: 1,
+      misses: 1,
+      stores: 1,
+      restores: 1,
+      evictions: 0
+    });
+    assert.match(
+      await readFile(join(changedOutput, "src_feature_js.js"), "utf8"),
+      /after/
+    );
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -313,7 +410,8 @@ test("a source mutation rebuilds only the affected Module Build record", async (
     assert.equal(cold.error, null);
     assert.deepEqual(cold.cacheWork, {
       resolve: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 },
-      moduleBuild: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 }
+      moduleBuild: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
 
     await writeFile(
@@ -326,7 +424,8 @@ test("a source mutation rebuilds only the affected Module Build record", async (
     assert.equal(changed.error, null);
     assert.deepEqual(changed.cacheWork, {
       resolve: { hits: 3, misses: 0, stores: 0, restores: 3, evictions: 0 },
-      moduleBuild: { hits: 3, misses: 0, stores: 1, restores: 3, evictions: 0 }
+      moduleBuild: { hits: 3, misses: 0, stores: 1, restores: 3, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /stable/);
@@ -361,12 +460,14 @@ test("cache version is an exact container guard at the same location", async () 
       assert.equal(cold.error, null);
       assert.deepEqual(cold.cacheWork, {
         resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
-        moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 }
+        moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+        assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
       });
     }
     assert.deepEqual(warmV2.cacheWork, {
       resolve: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
-      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 }
+      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      assetRender: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 }
     });
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -424,7 +525,8 @@ test("legacy JSON and CBOR cache files remain untouched and are treated as cold"
     assert.equal(observation.error, null);
     assert.deepEqual(observation.cacheWork, {
       resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
-      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 }
+      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.deepEqual(await readFile(manifestPath), manifest);
     assert.deepEqual(await readFile(packPath), pack);
@@ -567,6 +669,16 @@ function publicBuildOutcome(observation: CacheProcessObservation) {
     hasErrors: observation.hasErrors,
     assets: observation.assets
   };
+}
+
+async function readAssetRenderFixture(outputPath: string) {
+  const [main, mainMap, asyncChunk, asyncMap] = await Promise.all([
+    readFile(join(outputPath, "main.js"), "utf8"),
+    readFile(join(outputPath, "main.js.map"), "utf8"),
+    readFile(join(outputPath, "src_feature_js.js"), "utf8"),
+    readFile(join(outputPath, "src_feature_js.js.map"), "utf8")
+  ]);
+  return { main, mainMap, asyncChunk, asyncMap };
 }
 
 async function assertOmittedCacheBehavior(mode: Mode, expected: "before" | "after") {

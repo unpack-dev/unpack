@@ -167,6 +167,75 @@ mod tests {
     }
 
     #[test]
+    fn asset_render_records_round_trip_through_the_registered_private_codec()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let address = PackFileAddress::new("unpack/asset-render", b"initial:main");
+        let etag = PackFileETag::new(b"exact-render-hash");
+        let record = AssetRenderRecordDto {
+            source: "console.log('cached render');\n".to_string(),
+            source_map: Some(
+                r#"{"version":3,"sources":["src/index.js"],"names":[],"mappings":"AAAA","sourcesContent":["console.log('cached render');\\n"]}"#
+                    .to_string(),
+            ),
+        };
+        let registry =
+            CodecRegistry::new().with_asset_render_record(AssetRenderRecordCodec::current());
+
+        PackFile::publish_items(
+            temp.path(),
+            &registry,
+            [(address.clone(), Some(etag.clone()), record.clone())],
+        )?;
+
+        assert_eq!(ASSET_RENDER_RECORD_TYPE_ID.as_bytes(), b"unpack.asset-r.1");
+        let mut pack_file = PackFile::open(temp.path(), registry);
+        assert_eq!(
+            pack_file
+                .get::<AssetRenderRecordDto>(&address, Some(&etag))
+                .as_deref(),
+            Some(&record)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn asset_render_codec_rejects_trailing_bytes_and_invalid_source_maps_on_restore()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let codec = AssetRenderRecordCodec::current();
+        let record = AssetRenderRecordDto {
+            source: "rendered".to_string(),
+            source_map: None,
+        };
+        let mut trailing = codec.encode(&record)?;
+        trailing.push(0xff);
+        assert!(codec.decode(&trailing).is_none());
+
+        assert!(
+            RenderedSource::try_from(AssetRenderRecordDto {
+                source: "rendered".to_string(),
+                source_map: Some("not source map json".to_string()),
+            })
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn asset_render_codec_accepts_sources_larger_than_the_generic_field_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let codec = AssetRenderRecordCodec::current();
+        let record = AssetRenderRecordDto {
+            source: "x".repeat(MAX_FIELD_BYTES + 1),
+            source_map: None,
+        };
+
+        let encoded = codec.encode(&record)?;
+        assert_eq!(codec.decode(&encoded), Some(record));
+        Ok(())
+    }
+
+    #[test]
     fn module_build_codec_rejects_unknown_tags_hash_mismatches_and_invalid_numeric_values()
     -> Result<(), Box<dyn std::error::Error>> {
         let codec = ModuleBuildRecordCodec::current();
@@ -847,6 +916,7 @@ use crate::{
     build_cache::{ModuleBuildRecord, ResolveRecord},
     cache_hash::stable_hash,
     parser::ParsedModule,
+    rendered_source::RenderedSource,
     snapshot::{PersistentManagedItemState, PersistentSnapshotEntry, Snapshot},
 };
 
@@ -864,9 +934,12 @@ const MAX_FIELD_BYTES: usize = 1024 * 1024;
 const MAX_COLLECTION_ENTRIES: usize = 100_000;
 const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
 const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c001");
+const ASSET_RENDER_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.astr.c001");
 pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.resolve.1");
 pub(crate) const MODULE_BUILD_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.moduleb.1");
+pub(crate) const ASSET_RENDER_RECORD_TYPE_ID: StableTypeId =
+    StableTypeId::new(*b"unpack.asset-r.1");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct StableTypeId([u8; 16]);
@@ -1015,6 +1088,12 @@ pub(crate) struct ModuleBuildRecordDto {
     pub(crate) source: String,
     pub(crate) source_hash: u64,
     pub(crate) snapshot: SnapshotDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AssetRenderRecordDto {
+    pub(crate) source: String,
+    pub(crate) source_map: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1382,6 +1461,26 @@ impl TryFrom<ModuleBuildRecordDto> for ModuleBuildRecord {
             record.source,
             Snapshot::try_from(record.snapshot)?,
         ))
+    }
+}
+
+impl From<&RenderedSource> for AssetRenderRecordDto {
+    fn from(record: &RenderedSource) -> Self {
+        let (source, source_map) = record.persistent_parts();
+        Self { source, source_map }
+    }
+}
+
+impl TryFrom<AssetRenderRecordDto> for RenderedSource {
+    type Error = io::Error;
+
+    fn try_from(record: AssetRenderRecordDto) -> io::Result<Self> {
+        RenderedSource::from_persistent_parts(record.source, record.source_map).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Asset Render Record contains an invalid source map",
+            )
+        })
     }
 }
 
@@ -1754,6 +1853,10 @@ impl PackFileItem for ModuleBuildRecordDto {
     const TYPE_ID: StableTypeId = MODULE_BUILD_RECORD_TYPE_ID;
 }
 
+impl PackFileItem for AssetRenderRecordDto {
+    const TYPE_ID: StableTypeId = ASSET_RENDER_RECORD_TYPE_ID;
+}
+
 pub(crate) trait ItemCodec<T: PackFileItem>: fmt::Debug + Send + Sync + 'static {
     fn codec_id(&self) -> StableCodecId;
     fn encode(&self, value: &T) -> io::Result<Vec<u8>>;
@@ -1820,6 +1923,11 @@ impl CodecRegistry {
 
     pub(crate) fn with_module_build_record(mut self, codec: ModuleBuildRecordCodec) -> Self {
         self.register::<ModuleBuildRecordDto, _>(codec);
+        self
+    }
+
+    pub(crate) fn with_asset_render_record(mut self, codec: AssetRenderRecordCodec) -> Self {
+        self.register::<AssetRenderRecordDto, _>(codec);
         self
     }
 
@@ -1937,6 +2045,42 @@ impl ItemCodec<ModuleBuildRecordDto> for ModuleBuildRecordCodec {
 
     fn decode(&self, bytes: &[u8]) -> Option<ModuleBuildRecordDto> {
         decode_module_build_record(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AssetRenderRecordCodec {
+    codec_id: StableCodecId,
+}
+
+impl AssetRenderRecordCodec {
+    pub(crate) const fn current() -> Self {
+        Self {
+            codec_id: ASSET_RENDER_RECORD_CODEC_ID,
+        }
+    }
+}
+
+impl ItemCodec<AssetRenderRecordDto> for AssetRenderRecordCodec {
+    fn codec_id(&self) -> StableCodecId {
+        self.codec_id
+    }
+
+    fn encode(&self, value: &AssetRenderRecordDto) -> io::Result<Vec<u8>> {
+        let mut encoder = Encoder::default();
+        encoder.write_record_string(&value.source)?;
+        encoder.write_optional_record_string(value.source_map.as_deref())?;
+        Ok(encoder.finish())
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Option<AssetRenderRecordDto> {
+        let mut decoder = Decoder::new(bytes);
+        let record = AssetRenderRecordDto {
+            source: decoder.read_record_string()?,
+            source_map: decoder.read_optional_record_string()?,
+        };
+        decoder.finish()?;
+        Some(record)
     }
 }
 
@@ -2451,7 +2595,11 @@ impl Encoder {
     }
 
     fn write_bytes(&mut self, value: &[u8]) -> io::Result<()> {
-        if value.len() > MAX_FIELD_BYTES {
+        self.write_bytes_with_limit(value, MAX_FIELD_BYTES)
+    }
+
+    fn write_bytes_with_limit(&mut self, value: &[u8], limit: usize) -> io::Result<()> {
+        if value.len() > limit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "PackFile field exceeds the configured bound",
@@ -2486,6 +2634,10 @@ impl Encoder {
         self.write_bytes(value.as_bytes())
     }
 
+    fn write_record_string(&mut self, value: &str) -> io::Result<()> {
+        self.write_bytes_with_limit(value.as_bytes(), MAX_RECORD_BYTES)
+    }
+
     fn write_path(&mut self, value: &PathBytes) -> io::Result<()> {
         self.write_bytes(&value.0)
     }
@@ -2495,6 +2647,19 @@ impl Encoder {
             Some(value) => {
                 self.write_u8(1);
                 self.write_string(value)
+            }
+            None => {
+                self.write_u8(0);
+                Ok(())
+            }
+        }
+    }
+
+    fn write_optional_record_string(&mut self, value: Option<&str>) -> io::Result<()> {
+        match value {
+            Some(value) => {
+                self.write_u8(1);
+                self.write_record_string(value)
             }
             None => {
                 self.write_u8(0);
@@ -2601,8 +2766,12 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_bytes(&mut self) -> Option<Vec<u8>> {
+        self.read_bytes_with_limit(MAX_FIELD_BYTES)
+    }
+
+    fn read_bytes_with_limit(&mut self, limit: usize) -> Option<Vec<u8>> {
         let length = usize::try_from(self.read_u32()?).ok()?;
-        if length > MAX_FIELD_BYTES {
+        if length > limit {
             return None;
         }
         let end = self.position.checked_add(length)?;
@@ -2623,6 +2792,10 @@ impl<'a> Decoder<'a> {
         String::from_utf8(self.read_bytes()?).ok()
     }
 
+    fn read_record_string(&mut self) -> Option<String> {
+        String::from_utf8(self.read_bytes_with_limit(MAX_RECORD_BYTES)?).ok()
+    }
+
     fn read_path(&mut self) -> Option<PathBytes> {
         Some(PathBytes(self.read_bytes()?))
     }
@@ -2631,6 +2804,14 @@ impl<'a> Decoder<'a> {
         match self.read_u8()? {
             0 => Some(None),
             1 => Some(Some(self.read_string()?)),
+            _ => None,
+        }
+    }
+
+    fn read_optional_record_string(&mut self) -> Option<Option<String>> {
+        match self.read_u8()? {
+            0 => Some(None),
+            1 => Some(Some(self.read_record_string()?)),
             _ => None,
         }
     }

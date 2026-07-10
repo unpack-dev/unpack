@@ -273,13 +273,129 @@ test("unchanged Resolve and Module Build work restores in an independent process
     assert.deepEqual(cold.cacheWork, {
       resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
       moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      codeGeneration: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
       assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.deepEqual(warm.cacheWork, {
       resolve: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
       moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      codeGeneration: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
       assetRender: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 }
     });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Code Generation records restore module-runtime work without restoring Compilation graphs", async () => {
+  const fixture = await createFixture({
+    "src/index.js": [
+      "export async function load() {",
+      "  return import('./feature.js');",
+      "}"
+    ].join("\n"),
+    "src/feature.js": "export const value = 'before';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/code-generation");
+  const request = (outputPath: string) => ({
+    bundler: "unpack" as const,
+    options: {
+      context: fixture,
+      mode: "none" as const,
+      outputPath,
+      sourcemap: true,
+      cache: { type: "filesystem", cacheLocation },
+      snapshot: {
+        module: { timestamp: false, hash: true },
+        resolve: { timestamp: false, hash: false }
+      }
+    }
+  });
+  const coldOutput = join(fixture, "dist-codegen-cold");
+  const warmOutput = join(fixture, "dist-codegen-warm");
+  const changedOutput = join(fixture, "dist-codegen-changed");
+  const graphOutput = join(fixture, "dist-codegen-graph");
+
+  try {
+    const cold = await runCacheProcess(request(coldOutput));
+    assert.equal(cold.error, null);
+    assert.deepEqual(cold.cacheWork?.codeGeneration, {
+      hits: 0,
+      misses: 2,
+      stores: 2,
+      restores: 0,
+      evictions: 0
+    });
+    const coldFiles = await readAssetRenderFixture(coldOutput);
+
+    const warm = await runCacheProcess(request(warmOutput));
+    assert.equal(warm.error, null);
+    assert.notEqual(cold.pid, warm.pid);
+    assert.notEqual(cold.instanceId, warm.instanceId);
+    assert.deepEqual(warm.cacheWork?.codeGeneration, {
+      hits: 2,
+      misses: 0,
+      stores: 0,
+      restores: 2,
+      evictions: 0
+    });
+    assert.deepEqual(await readAssetRenderFixture(warmOutput), coldFiles);
+    assert.deepEqual(warm.assetDetails, cold.assetDetails);
+
+    await writeFile(
+      join(fixture, "src/feature.js"),
+      "export const value = 'after';",
+      "utf8"
+    );
+    const changed = await runCacheProcess(request(changedOutput));
+    assert.equal(changed.error, null);
+    assert.deepEqual(changed.cacheWork?.codeGeneration, {
+      hits: 1,
+      misses: 1,
+      stores: 1,
+      restores: 1,
+      evictions: 0
+    });
+    assert.match(
+      await readFile(join(changedOutput, "src_feature_js.js"), "utf8"),
+      /after/
+    );
+
+    await writeFile(
+      join(fixture, "src/index.js"),
+      [
+        "import { value } from './feature.js';",
+        "export async function load() {",
+        "  return [value, await import('./extra.js')];",
+        "}"
+      ].join("\n"),
+      "utf8"
+    );
+    await writeFile(
+      join(fixture, "src/extra.js"),
+      "export const extra = 'new async chunk';",
+      "utf8"
+    );
+    const graphChanged = await runCacheProcess(request(graphOutput));
+    assert.equal(graphChanged.error, null);
+    assert.deepEqual(graphChanged.cacheWork?.codeGeneration, {
+      hits: 1,
+      misses: 2,
+      stores: 2,
+      restores: 1,
+      evictions: 0
+    });
+    assert.deepEqual(graphChanged.assets, [
+      "main.js",
+      "main.js.map",
+      "src_extra_js.js",
+      "src_extra_js.js.map"
+    ]);
+    assert.match(await readFile(join(graphOutput, "main.js"), "utf8"), /after/);
+    assert.match(
+      await readFile(join(graphOutput, "src_extra_js.js"), "utf8"),
+      /new async chunk/
+    );
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -411,6 +527,7 @@ test("a source mutation rebuilds only the affected Module Build record", async (
     assert.deepEqual(cold.cacheWork, {
       resolve: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 },
       moduleBuild: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 },
+      codeGeneration: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 },
       assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
 
@@ -425,6 +542,7 @@ test("a source mutation rebuilds only the affected Module Build record", async (
     assert.deepEqual(changed.cacheWork, {
       resolve: { hits: 3, misses: 0, stores: 0, restores: 3, evictions: 0 },
       moduleBuild: { hits: 3, misses: 0, stores: 1, restores: 3, evictions: 0 },
+      codeGeneration: { hits: 2, misses: 1, stores: 1, restores: 2, evictions: 0 },
       assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
@@ -461,12 +579,14 @@ test("cache version is an exact container guard at the same location", async () 
       assert.deepEqual(cold.cacheWork, {
         resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
         moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+        codeGeneration: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
         assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
       });
     }
     assert.deepEqual(warmV2.cacheWork, {
       resolve: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
       moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      codeGeneration: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
       assetRender: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 }
     });
   } finally {
@@ -526,6 +646,7 @@ test("legacy JSON and CBOR cache files remain untouched and are treated as cold"
     assert.deepEqual(observation.cacheWork, {
       resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
       moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      codeGeneration: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
       assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.deepEqual(await readFile(manifestPath), manifest);

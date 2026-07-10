@@ -236,6 +236,91 @@ mod tests {
     }
 
     #[test]
+    fn code_generation_records_round_trip_through_the_registered_private_codec()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let address = PackFileAddress::new(
+            "unpack/code-generation",
+            b"module:/project/src/index.js|runtime:main",
+        );
+        let etag = PackFileETag::new(b"module-and-dependency-template-inputs");
+        let record = CodeGenerationRecordDto {
+            source: CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix: "(() => {\n".to_string(),
+                original_source: "export const value = before;".to_string(),
+                original_name: "./src/index.js".to_string(),
+                replacements: vec![CodeGenerationReplacementDto {
+                    start: 21,
+                    end: 27,
+                    content: "after".to_string(),
+                    name: None,
+                    enforce: ReplacementEnforceDto::Normal,
+                }],
+                suffix: "\n})".to_string(),
+            },
+        };
+        let registry =
+            CodecRegistry::new().with_code_generation_record(CodeGenerationRecordCodec::current());
+
+        PackFile::publish_items(
+            temp.path(),
+            &registry,
+            [(address.clone(), Some(etag.clone()), record.clone())],
+        )?;
+
+        assert_eq!(
+            CODE_GENERATION_RECORD_TYPE_ID.as_bytes(),
+            b"unpack.codegen.1"
+        );
+        let mut pack_file = PackFile::open(temp.path(), registry);
+        assert_eq!(
+            pack_file
+                .get::<CodeGenerationRecordDto>(&address, Some(&etag))
+                .as_deref(),
+            Some(&record)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn code_generation_codec_covers_raw_sources_and_rejects_invalid_recipes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let codec = CodeGenerationRecordCodec::current();
+        let raw = CodeGenerationRecordDto {
+            source: CodeGenerationSourceDto::Raw {
+                source: "throw new Error('failed module');".to_string(),
+            },
+        };
+        assert_eq!(codec.decode(&codec.encode(&raw)?), Some(raw));
+
+        let invalid_range = CodeGenerationRecordDto {
+            source: CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix: String::new(),
+                original_source: "short".to_string(),
+                original_name: "./short.js".to_string(),
+                replacements: vec![CodeGenerationReplacementDto {
+                    start: 0,
+                    end: 6,
+                    content: String::new(),
+                    name: None,
+                    enforce: ReplacementEnforceDto::Normal,
+                }],
+                suffix: String::new(),
+            },
+        };
+        assert!(codec.encode(&invalid_range).is_err());
+
+        let mut unknown_tag = codec.encode(&CodeGenerationRecordDto {
+            source: CodeGenerationSourceDto::Raw {
+                source: "valid".to_string(),
+            },
+        })?;
+        unknown_tag[0] = 0xff;
+        assert!(codec.decode(&unknown_tag).is_none());
+        Ok(())
+    }
+
+    #[test]
     fn module_build_codec_rejects_unknown_tags_hash_mismatches_and_invalid_numeric_values()
     -> Result<(), Box<dyn std::error::Error>> {
         let codec = ModuleBuildRecordCodec::current();
@@ -431,6 +516,27 @@ mod tests {
         let module_dto = module_build_record();
         let module_record = ModuleBuildRecord::try_from(module_dto.clone())?;
         assert_eq!(ModuleBuildRecordDto::try_from(&module_record)?, module_dto);
+
+        let code_generation_record = CodeGenerationResult::from_record_source(
+            CodeGenerationSource::OriginalWithReplacements {
+                prefix: "prefix".to_string(),
+                original_source: "before".to_string(),
+                original_name: "./fixture.js".to_string(),
+                replacements: vec![CodeGenerationReplacement {
+                    start: 0,
+                    end: 6,
+                    content: "after".to_string(),
+                    name: None,
+                    enforce: ReplacementEnforce::Normal,
+                }],
+                suffix: "suffix".to_string(),
+            },
+        );
+        let code_generation_dto = CodeGenerationRecordDto::from(&code_generation_record);
+        assert_eq!(
+            CodeGenerationResult::try_from(code_generation_dto)?,
+            code_generation_record
+        );
         Ok(())
     }
 
@@ -907,6 +1013,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use rspack_sources::ReplacementEnforce;
+
 use crate::{
     AsyncDependenciesBlock, ConstDependency, Dependency, EntryDependency,
     HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
@@ -915,6 +1023,9 @@ use crate::{
     ModuleDependency, ModuleIdentity, ModuleType, NullDependency, SourceRange,
     build_cache::{ModuleBuildRecord, ResolveRecord},
     cache_hash::stable_hash,
+    code_generation_record::{
+        CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
+    },
     parser::ParsedModule,
     rendered_source::RenderedSource,
     snapshot::{PersistentManagedItemState, PersistentSnapshotEntry, Snapshot},
@@ -934,10 +1045,13 @@ const MAX_FIELD_BYTES: usize = 1024 * 1024;
 const MAX_COLLECTION_ENTRIES: usize = 100_000;
 const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
 const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c001");
+const CODE_GENERATION_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.cgen.c001");
 const ASSET_RENDER_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.astr.c001");
 pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.resolve.1");
 pub(crate) const MODULE_BUILD_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.moduleb.1");
+pub(crate) const CODE_GENERATION_RECORD_TYPE_ID: StableTypeId =
+    StableTypeId::new(*b"unpack.codegen.1");
 pub(crate) const ASSET_RENDER_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.asset-r.1");
 
@@ -1094,6 +1208,41 @@ pub(crate) struct ModuleBuildRecordDto {
 pub(crate) struct AssetRenderRecordDto {
     pub(crate) source: String,
     pub(crate) source_map: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodeGenerationRecordDto {
+    pub(crate) source: CodeGenerationSourceDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CodeGenerationSourceDto {
+    Raw {
+        source: String,
+    },
+    OriginalWithReplacements {
+        prefix: String,
+        original_source: String,
+        original_name: String,
+        replacements: Vec<CodeGenerationReplacementDto>,
+        suffix: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodeGenerationReplacementDto {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    pub(crate) content: String,
+    pub(crate) name: Option<String>,
+    pub(crate) enforce: ReplacementEnforceDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplacementEnforceDto {
+    Pre,
+    Normal,
+    Post,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1461,6 +1610,81 @@ impl TryFrom<ModuleBuildRecordDto> for ModuleBuildRecord {
             record.source,
             Snapshot::try_from(record.snapshot)?,
         ))
+    }
+}
+
+impl From<&CodeGenerationResult> for CodeGenerationRecordDto {
+    fn from(record: &CodeGenerationResult) -> Self {
+        let source = match record.record_source() {
+            CodeGenerationSource::Raw { source } => CodeGenerationSourceDto::Raw {
+                source: source.clone(),
+            },
+            CodeGenerationSource::OriginalWithReplacements {
+                prefix,
+                original_source,
+                original_name,
+                replacements,
+                suffix,
+            } => CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix: prefix.clone(),
+                original_source: original_source.clone(),
+                original_name: original_name.clone(),
+                replacements: replacements
+                    .iter()
+                    .map(|replacement| CodeGenerationReplacementDto {
+                        start: replacement.start,
+                        end: replacement.end,
+                        content: replacement.content.clone(),
+                        name: replacement.name.clone(),
+                        enforce: match replacement.enforce {
+                            ReplacementEnforce::Pre => ReplacementEnforceDto::Pre,
+                            ReplacementEnforce::Normal => ReplacementEnforceDto::Normal,
+                            ReplacementEnforce::Post => ReplacementEnforceDto::Post,
+                        },
+                    })
+                    .collect(),
+                suffix: suffix.clone(),
+            },
+        };
+        Self { source }
+    }
+}
+
+impl TryFrom<CodeGenerationRecordDto> for CodeGenerationResult {
+    type Error = io::Error;
+
+    fn try_from(record: CodeGenerationRecordDto) -> io::Result<Self> {
+        validate_code_generation_record(&record)?;
+        let source = match record.source {
+            CodeGenerationSourceDto::Raw { source } => CodeGenerationSource::Raw { source },
+            CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix,
+                original_source,
+                original_name,
+                replacements,
+                suffix,
+            } => CodeGenerationSource::OriginalWithReplacements {
+                prefix,
+                original_source,
+                original_name,
+                replacements: replacements
+                    .into_iter()
+                    .map(|replacement| CodeGenerationReplacement {
+                        start: replacement.start,
+                        end: replacement.end,
+                        content: replacement.content,
+                        name: replacement.name,
+                        enforce: match replacement.enforce {
+                            ReplacementEnforceDto::Pre => ReplacementEnforce::Pre,
+                            ReplacementEnforceDto::Normal => ReplacementEnforce::Normal,
+                            ReplacementEnforceDto::Post => ReplacementEnforce::Post,
+                        },
+                    })
+                    .collect(),
+                suffix,
+            },
+        };
+        Ok(CodeGenerationResult::from_record_source(source))
     }
 }
 
@@ -1853,6 +2077,10 @@ impl PackFileItem for ModuleBuildRecordDto {
     const TYPE_ID: StableTypeId = MODULE_BUILD_RECORD_TYPE_ID;
 }
 
+impl PackFileItem for CodeGenerationRecordDto {
+    const TYPE_ID: StableTypeId = CODE_GENERATION_RECORD_TYPE_ID;
+}
+
 impl PackFileItem for AssetRenderRecordDto {
     const TYPE_ID: StableTypeId = ASSET_RENDER_RECORD_TYPE_ID;
 }
@@ -1923,6 +2151,11 @@ impl CodecRegistry {
 
     pub(crate) fn with_module_build_record(mut self, codec: ModuleBuildRecordCodec) -> Self {
         self.register::<ModuleBuildRecordDto, _>(codec);
+        self
+    }
+
+    pub(crate) fn with_code_generation_record(mut self, codec: CodeGenerationRecordCodec) -> Self {
+        self.register::<CodeGenerationRecordDto, _>(codec);
         self
     }
 
@@ -2046,6 +2279,140 @@ impl ItemCodec<ModuleBuildRecordDto> for ModuleBuildRecordCodec {
     fn decode(&self, bytes: &[u8]) -> Option<ModuleBuildRecordDto> {
         decode_module_build_record(bytes)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CodeGenerationRecordCodec {
+    codec_id: StableCodecId,
+}
+
+impl CodeGenerationRecordCodec {
+    pub(crate) const fn current() -> Self {
+        Self {
+            codec_id: CODE_GENERATION_RECORD_CODEC_ID,
+        }
+    }
+}
+
+impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
+    fn codec_id(&self) -> StableCodecId {
+        self.codec_id
+    }
+
+    fn encode(&self, value: &CodeGenerationRecordDto) -> io::Result<Vec<u8>> {
+        validate_code_generation_record(value)?;
+        let mut encoder = Encoder::default();
+        match &value.source {
+            CodeGenerationSourceDto::Raw { source } => {
+                encoder.write_u8(0);
+                encoder.write_record_string(source)?;
+            }
+            CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix,
+                original_source,
+                original_name,
+                replacements,
+                suffix,
+            } => {
+                encoder.write_u8(1);
+                encoder.write_record_string(prefix)?;
+                encoder.write_record_string(original_source)?;
+                encoder.write_record_string(original_name)?;
+                encoder.write_count(replacements.len())?;
+                for replacement in replacements {
+                    encoder.write_u32(replacement.start);
+                    encoder.write_u32(replacement.end);
+                    encoder.write_record_string(&replacement.content)?;
+                    encoder.write_optional_record_string(replacement.name.as_deref())?;
+                    encoder.write_u8(match replacement.enforce {
+                        ReplacementEnforceDto::Pre => 0,
+                        ReplacementEnforceDto::Normal => 1,
+                        ReplacementEnforceDto::Post => 2,
+                    });
+                }
+                encoder.write_record_string(suffix)?;
+            }
+        }
+        Ok(encoder.finish())
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Option<CodeGenerationRecordDto> {
+        let mut decoder = Decoder::new(bytes);
+        let source = match decoder.read_u8()? {
+            0 => CodeGenerationSourceDto::Raw {
+                source: decoder.read_record_string()?,
+            },
+            1 => {
+                let prefix = decoder.read_record_string()?;
+                let original_source = decoder.read_record_string()?;
+                let original_name = decoder.read_record_string()?;
+                let replacement_count = decoder.read_count()?;
+                let mut replacements = Vec::with_capacity(replacement_count);
+                for _ in 0..replacement_count {
+                    replacements.push(CodeGenerationReplacementDto {
+                        start: decoder.read_u32()?,
+                        end: decoder.read_u32()?,
+                        content: decoder.read_record_string()?,
+                        name: decoder.read_optional_record_string()?,
+                        enforce: match decoder.read_u8()? {
+                            0 => ReplacementEnforceDto::Pre,
+                            1 => ReplacementEnforceDto::Normal,
+                            2 => ReplacementEnforceDto::Post,
+                            _ => return None,
+                        },
+                    });
+                }
+                CodeGenerationSourceDto::OriginalWithReplacements {
+                    prefix,
+                    original_source,
+                    original_name,
+                    replacements,
+                    suffix: decoder.read_record_string()?,
+                }
+            }
+            _ => return None,
+        };
+        decoder.finish()?;
+        let record = CodeGenerationRecordDto { source };
+        validate_code_generation_record(&record).ok()?;
+        Some(record)
+    }
+}
+
+fn validate_code_generation_record(record: &CodeGenerationRecordDto) -> io::Result<()> {
+    let CodeGenerationSourceDto::OriginalWithReplacements {
+        original_source,
+        replacements,
+        ..
+    } = &record.source
+    else {
+        return Ok(());
+    };
+    for replacement in replacements {
+        let start = usize::try_from(replacement.start).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Code Generation Record replacement start is invalid",
+            )
+        })?;
+        let end = usize::try_from(replacement.end).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Code Generation Record replacement end is invalid",
+            )
+        })?;
+        if start > end
+            || end > original_source.len()
+            || !original_source.is_char_boundary(start)
+            || !original_source.is_char_boundary(end)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Code Generation Record contains an invalid replacement range",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

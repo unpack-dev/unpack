@@ -46,6 +46,7 @@ export interface CacheItemWorkObservation {
 export interface CacheWorkObservation {
   resolve: CacheItemWorkObservation;
   moduleBuild: CacheItemWorkObservation;
+  codeGeneration: CacheItemWorkObservation;
   assetRender: CacheItemWorkObservation;
 }
 
@@ -100,7 +101,9 @@ function parseCacheWork(stderr: string): CacheWorkObservation | null {
     }
     return Number(value);
   };
-  const item = (prefix: "resolve" | "module" | "asset_render") => ({
+  const item = (
+    prefix: "resolve" | "module" | "code_generation" | "asset_render"
+  ) => ({
     hits: field(`${prefix}_hits`),
     misses: field(`${prefix}_misses`),
     stores: field(`${prefix}_stores`),
@@ -110,6 +113,7 @@ function parseCacheWork(stderr: string): CacheWorkObservation | null {
   return {
     resolve: item("resolve"),
     moduleBuild: item("module"),
+    codeGeneration: item("code_generation"),
     assetRender: item("asset_render")
   };
 }

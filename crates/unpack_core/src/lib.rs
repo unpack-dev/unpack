@@ -2,6 +2,7 @@ mod build_cache;
 mod cache_hash;
 mod chunk_graph;
 mod code_generation;
+mod code_generation_record;
 mod compilation;
 mod compiler;
 mod dependency;

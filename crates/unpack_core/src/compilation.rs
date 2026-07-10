@@ -199,6 +199,7 @@ impl Compilation {
         let _enter = span.enter();
         self.code_generation_results = Some(code_generation::generate_code(
             &self.options,
+            &self.build_cache,
             &self.module_graph,
             &self.chunk_graph,
         ));

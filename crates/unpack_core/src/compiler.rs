@@ -1144,7 +1144,7 @@ mod tests {
         options.cache.idle_timeout_for_initial_store = Some(60_000);
         options.cache.build_dependencies = vec![BuildDependency {
             name: "config".to_string(),
-            files: vec![config.clone()],
+            requests: vec![config.display().to_string()],
         }];
 
         let compiler = Compiler::new(options.clone());
@@ -1396,7 +1396,7 @@ mod tests {
         options.cache.cache_location = Some(cache_location);
         options.cache.build_dependencies = vec![crate::BuildDependency {
             name: "config".to_string(),
-            files: vec![config.clone()],
+            requests: vec![config.display().to_string()],
         }];
 
         let first_compiler = Compiler::new(options.clone());

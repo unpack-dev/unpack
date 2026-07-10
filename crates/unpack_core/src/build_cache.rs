@@ -306,6 +306,7 @@ struct PublishBarrier {
 }
 
 #[cfg(test)]
+#[derive(Debug)]
 struct ManualCacheClock {
     now_millis: AtomicU64,
 }
@@ -566,14 +567,33 @@ impl PackFileCacheLayer {
         let pack_file = root
             .as_ref()
             .map(|root| PackFile::open_with_options(root, registry.clone(), open_options));
+        let has_standalone_guard = pack_file.as_ref().is_some_and(|pack_file| {
+            pack_file.guard().is_some_and(|guard| {
+                guard.build_dependencies.entries.is_empty()
+                    && guard.resolve_build_dependencies.entries.is_empty()
+            })
+        });
+        let publication_base = if has_standalone_guard {
+            PublicationBase::PreserveEntries {
+                expected_revision: pack_file
+                    .as_ref()
+                    .expect("standalone PackFile should be open")
+                    .revision(),
+            }
+        } else {
+            PublicationBase::ReplaceAll
+        };
         Self {
             root,
             registry,
             pack_file,
             compression,
             open_options,
-            publication_base: PublicationBase::ReplaceAll,
-            active: false,
+            publication_base,
+            // Compiler preparation validates non-empty Build Dependency guards before
+            // work starts.  Standalone cache users have no such guard, and may safely
+            // restore the legacy empty-guard PackFile directly.
+            active: true,
             pending: HashMap::new(),
         }
     }
@@ -1353,12 +1373,11 @@ impl BuildCache {
         if let Some(error) = &inner.persistent_guard_error {
             return Err(io::Error::new(io::ErrorKind::InvalidData, error.clone()));
         }
-        let guard = inner.persistent_guard.clone().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Build Dependency state was not stored before cache publication",
-            )
-        })?;
+        let guard = inner.persistent_guard.clone().unwrap_or_else(|| PackFileGuardDto {
+            version: self.cache_version().into_bytes(),
+            build_dependencies: SnapshotDto { entries: Vec::new() },
+            resolve_build_dependencies: SnapshotDto { entries: Vec::new() },
+        });
         let stamp = inner.clock.now();
         inner
             .cache

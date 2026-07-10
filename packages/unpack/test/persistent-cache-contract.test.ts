@@ -9,6 +9,7 @@ import type { CacheOptions, Compiler, Mode, Stats } from "@unpack-js/core";
 
 import {
   runCacheProcess,
+  runCacheProcessExpectTermination,
   runColdWarmBuilds
 } from "./cache-process-harness.js";
 import type { CacheProcessObservation } from "./cache-process-harness.js";
@@ -22,6 +23,46 @@ test("omitted cache follows mode while both-disabled module Snapshots remain val
 test("cache booleans override mode-dependent defaults", async () => {
   await assertCacheOverrideBehavior("production", true, "before");
   await assertCacheOverrideBehavior("development", false, "after");
+});
+
+test("Linux process termination during PackFile publication never exposes a partial revision", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("Persistent Cache crash recovery is a Linux-only contract");
+    return;
+  }
+
+  for (const point of ["after-content-commit", "before-index-replace"] as const) {
+    const fixture = await createFixture({
+      "src/index.js": "import { value } from './dep.js'; export { value };",
+      "src/dep.js": "export const value = 'before';"
+    });
+    const cacheLocation = join(fixture, `.cache/unpack/crash-${point}`);
+    const request = {
+      bundler: "unpack" as const,
+      options: {
+        context: fixture,
+        mode: "none" as const,
+        outputPath: join(fixture, "dist"),
+        cache: { type: "filesystem" as const, cacheLocation }
+      }
+    };
+    try {
+      const initial = await runCacheProcess(request);
+      assert.equal(initial.error, null);
+      await writeFile(join(fixture, "src/dep.js"), "export const value = 'after';", "utf8");
+      const termination = await runCacheProcessExpectTermination(request, {
+        env: { UNPACK_TEST_PERSISTENT_CACHE_CRASH_AT: point }
+      });
+      assert.ok(termination.signal === "SIGABRT" || termination.code !== 0);
+      const recovered = await runCacheProcess(request);
+      assert.equal(recovered.error, null);
+      assert.deepEqual(recovered.assets, ["main.js"]);
+      assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+      assert.ok((recovered.cacheWork?.moduleBuild.stores ?? 0) >= 1);
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  }
 });
 
 test("cache objects require a type and reject fields outside the selected cache type synchronously", () => {

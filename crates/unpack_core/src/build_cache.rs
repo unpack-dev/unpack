@@ -1808,7 +1808,14 @@ where
             namespace: self.namespace,
             identifier: key.cache_identifier(),
         };
-        let stamp = inner.clock.now();
+        // Access timestamps only matter for the filesystem layer. Avoid a clock
+        // syscall on every cache lookup for disabled/memory caches (the hot path
+        // used by the make-phase benchmark).
+        let stamp = if self.build_cache.options.kind == CacheKind::Filesystem {
+            inner.clock.now()
+        } else {
+            AccessStamp::from_millis(0)
+        };
         let (value, persistent_access_changed) =
             inner.cache.get(self.family, &address, etag, stamp);
         if persistent_access_changed {

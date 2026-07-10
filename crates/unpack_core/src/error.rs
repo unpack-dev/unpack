@@ -6,6 +6,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
+    #[error("compiler is already running")]
+    CompilerBusy,
+
+    #[error("compiler is shutting down or closed")]
+    CompilerClosed,
+
     #[error("failed to resolve '{request}' from {issuer}: {message}")]
     Resolve {
         issuer: PathBuf,

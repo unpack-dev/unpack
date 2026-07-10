@@ -23,7 +23,10 @@ pub use chunk_graph::{
 };
 pub use code_generation::{Asset, RuntimeRequirement, RuntimeRequirements};
 pub use compilation::{Compilation, WatchDependencies};
-pub use compiler::{Compiler, CompilerOptions, DEFAULT_EXTENSIONS, Entry};
+pub use compiler::{
+    CacheIdleReason, CacheLifecycleOutcome, Compiler, CompilerOptions, DEFAULT_EXTENSIONS, Entry,
+    PendingCompilation,
+};
 pub use dependency::{
     AsyncDependenciesBlock, ConstDependency, Dependency, DependencyKind, EntryDependency,
     HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,

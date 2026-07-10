@@ -1,0 +1,1 @@
+globalThis.loadDirectB = () => import("./b");

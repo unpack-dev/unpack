@@ -1,0 +1,10 @@
+{
+  "entry": {
+    "entry-a": "./src/entry-a.js",
+    "entry-b": "./src/entry-b.js"
+  },
+  "entryAsset": "entry-a.js",
+  "runtimeExpression": "require('../runner.cjs')()",
+  "expected": ["a", "b", "a", "b", "a", true, true],
+  "expectedAssets": ["entry-a.js", "entry-b.js", "src_a_js.js", "src_b_js.js"]
+}

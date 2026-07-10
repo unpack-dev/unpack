@@ -14,7 +14,7 @@ use crate::{
     CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, ModuleGraph, ModuleId,
     ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
-    cache_hash::stable_hash,
+    module::BuiltModuleContent,
     parser::{ParsedModule, parse_module_dependencies},
     snapshot::{FileSystemInfo, SnapshotCache},
 };
@@ -379,11 +379,10 @@ impl BuildTask {
             if valid {
                 let process_dependencies =
                     process_dependencies_task(self.module_id, &issuer_context, record.parsed());
-                let (parsed, source, source_hash) = record.cloned_parts();
                 state
                     .lock()
                     .await
-                    .finish_build(self.module_id, parsed, source, source_hash)?;
+                    .finish_build(self.module_id, Arc::clone(record.built_content()))?;
                 return Ok(process_dependencies.into_iter().collect());
             }
         }
@@ -414,10 +413,11 @@ impl BuildTask {
             process_dependencies_task(self.module_id, &issuer_context, &parsed);
 
         if !services.module_build_cache.is_enabled() {
+            let built_content = Arc::new(BuiltModuleContent::new(parsed, source));
             state
                 .lock()
                 .await
-                .finish_build(self.module_id, parsed, source, None)?;
+                .finish_build(self.module_id, built_content)?;
             return Ok(process_dependencies.into_iter().collect());
         }
 
@@ -425,13 +425,13 @@ impl BuildTask {
             .file_system_info
             .create_file_snapshot(&self.resource, &source, services.module_snapshot_strategy)
             .await?;
-        let record = ModuleBuildRecord::new(parsed.clone(), source.clone(), snapshot);
-        let source_hash = record.source_hash();
+        let built_content = Arc::new(BuiltModuleContent::new(parsed, source));
+        let record = ModuleBuildRecord::new(Arc::clone(&built_content), snapshot);
 
         state
             .lock()
             .await
-            .finish_build(self.module_id, parsed, source, source_hash)?;
+            .finish_build(self.module_id, built_content)?;
         services
             .module_build_cache
             .store(self.identity, None, record);
@@ -621,22 +621,13 @@ impl MakeState {
     fn finish_build(
         &mut self,
         module_id: ModuleId,
-        parsed: ParsedModule,
-        source: String,
-        source_hash: Option<u64>,
+        built_content: Arc<BuiltModuleContent>,
     ) -> Result<()> {
         let module = self
             .module_graph
             .module_mut(module_id)
             .ok_or(Error::MissingModule(module_id))?;
-        let source_hash = source_hash.unwrap_or_else(|| stable_hash(&source));
-        module.finish_build(
-            parsed.dependencies,
-            parsed.blocks,
-            parsed.presentational_dependencies,
-            source,
-            source_hash,
-        );
+        module.finish_build_content(built_content);
         Ok(())
     }
 

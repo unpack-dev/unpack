@@ -923,6 +923,11 @@ mod tests {
         assert_eq!(second_cache.resolve_hits, 2);
         assert_eq!(second_cache.module_hits, 2);
         assert_eq!(asset_sources(&first), asset_sources(&second));
+        assert_ne!(
+            first.module_graph().modules().as_ptr(),
+            second.module_graph().modules().as_ptr(),
+            "a later Compiler must assemble a fresh ModuleGraph"
+        );
         let restored_work = second_compiler.build_cache.work_counters();
         assert_eq!(
             restored_work.for_family(CacheItemFamily::Resolve),
@@ -936,6 +941,16 @@ mod tests {
         );
         assert_eq!(
             restored_work.for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 2,
+                misses: 0,
+                stores: 0,
+                restores: 2,
+                evictions: 0,
+            }
+        );
+        assert_eq!(
+            restored_work.for_family(CacheItemFamily::CodeGeneration),
             CacheItemWork {
                 hits: 2,
                 misses: 0,
@@ -967,6 +982,16 @@ mod tests {
                 evictions: 0,
             }
         );
+        assert_eq!(
+            repopulated_work.for_family(CacheItemFamily::CodeGeneration),
+            CacheItemWork {
+                hits: 4,
+                misses: 0,
+                stores: 0,
+                restores: 2,
+                evictions: 0,
+            }
+        );
         assert_eq!(asset_sources(&second), asset_sources(&third));
         assert_ne!(
             second.module_graph().modules().as_ptr(),
@@ -976,6 +1001,32 @@ mod tests {
             second.chunk_graph().chunks().as_ptr(),
             third.chunk_graph().chunks().as_ptr()
         );
+        for restored_module in second.module_graph().modules() {
+            let cached_record = second_compiler
+                .build_cache
+                .module_builds()
+                .get(restored_module.identity(), None)
+                .expect("restored Module Build Record should remain in Memory Cache");
+            let rebuilt_module = third
+                .module_graph()
+                .modules()
+                .iter()
+                .find(|module| module.identity() == restored_module.identity())
+                .expect("later ModuleGraph should contain the same Module Identity");
+
+            assert!(
+                !std::ptr::eq(restored_module, rebuilt_module),
+                "each Compilation must create a distinct Module object"
+            );
+            assert!(Arc::ptr_eq(
+                restored_module.built_content(),
+                cached_record.built_content()
+            ));
+            assert!(Arc::ptr_eq(
+                restored_module.built_content(),
+                rebuilt_module.built_content()
+            ));
+        }
 
         Ok(())
     }

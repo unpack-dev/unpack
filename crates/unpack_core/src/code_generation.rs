@@ -15,7 +15,7 @@ use crate::{
     build_cache::{BuildCache, CacheETag, CacheIdentifier, CacheKey},
     cache_hash::StableHasher,
     code_generation_record::{
-        CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
+        CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
     },
     id_assignment::RenderId,
     rendered_source::RenderedSource,
@@ -54,6 +54,98 @@ struct CodeGenerationInput<'a> {
     module_graph: &'a ModuleGraph,
     chunk_graph: &'a ChunkGraph,
     module_render_ids: &'a HashMap<ModuleId, RenderId>,
+}
+
+fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
+    let CodeGenerationInput {
+        module,
+        module_graph,
+        chunk_graph,
+        module_render_ids,
+    } = input;
+    let mut hasher = StableHasher::default();
+    hasher.write(b"unpack/code-generation/etag/2");
+    // Parsed dependency/template inputs may be changed independently of source
+    // text by future module transforms, so they remain part of the item ETag.
+    module.source_hash().hash(&mut hasher);
+    module
+        .build_error()
+        .map(ToString::to_string)
+        .hash(&mut hasher);
+    module.is_harmony().hash(&mut hasher);
+    module
+        .code_generation_local_input_digest()
+        .hash(&mut hasher);
+    hash_used_export_names(module, &mut hasher);
+    module_render_ids.get(&module.id()).hash(&mut hasher);
+
+    for dependency_id in 0..module.dependencies().len() {
+        module_graph
+            .module_for_dependency(module.id(), None, dependency_id)
+            .and_then(|target| module_render_ids.get(&target))
+            .hash(&mut hasher);
+    }
+
+    for (block_index, block) in module.blocks().iter().enumerate() {
+        for dependency_id in 0..block.dependencies().len() {
+            module_graph
+                .module_for_dependency(module.id(), Some(block_index), dependency_id)
+                .and_then(|target| module_render_ids.get(&target))
+                .hash(&mut hasher);
+        }
+        chunk_graph
+            .block_chunk_group(AsyncBlockOrigin {
+                module: module.id(),
+                block_index,
+            })
+            .and_then(|group_id| {
+                chunk_graph.chunk_groups()[group_id.index()]
+                    .chunks()
+                    .first()
+            })
+            .and_then(|chunk_id| chunk_graph.chunk(*chunk_id))
+            .map(Chunk::render_id)
+            .hash(&mut hasher);
+    }
+
+    CacheETag::new(hasher.finish().to_le_bytes())
+}
+
+fn hash_used_export_names(module: &Module, hasher: &mut StableHasher) {
+    for dependency in module
+        .presentational_dependencies()
+        .iter()
+        .chain(module.dependencies())
+        .chain(
+            module
+                .blocks()
+                .iter()
+                .flat_map(|block| block.dependencies()),
+        )
+    {
+        match dependency {
+            Dependency::HarmonyExportSpecifier(dependency) => {
+                hasher.write_u8(0);
+                module
+                    .exports_info()
+                    .get_used_name(&dependency.name)
+                    .hash(hasher);
+            }
+            Dependency::HarmonyExportExpression(_) => {
+                hasher.write_u8(1);
+                module.exports_info().get_used_name("default").hash(hasher);
+            }
+            Dependency::HarmonyExportImportedSpecifier(dependency) => {
+                hasher.write_u8(2);
+                dependency
+                    .name
+                    .as_deref()
+                    .and_then(|name| module.exports_info().get_used_name(name))
+                    .hash(hasher);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +226,7 @@ enum InitFragmentStage {
     HarmonyStarReexport,
 }
 
+#[cfg(test)]
 pub(crate) fn generate_code(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
@@ -141,12 +234,33 @@ pub(crate) fn generate_code(
     generate_code_with(module_graph, chunk_graph, generate_module_code)
 }
 
+pub(crate) fn generate_code_cached(
+    module_graph: &ModuleGraph,
+    chunk_graph: &ChunkGraph,
+    build_cache: &BuildCache,
+) -> CodeGenerationOutcome {
+    let cache = build_cache.code_generations();
+    generate_code_with(module_graph, chunk_graph, |input| {
+        let key = input.module.identity().clone();
+        let etag = code_generation_etag(&input);
+        if let Some(record) = cache.get(&key, Some(&etag)) {
+            if record.is_compatible_with(input.module.source()) {
+                return Ok(record.as_ref().clone());
+            }
+        }
+
+        let record = generate_module_code(input)?;
+        cache.store(key, Some(etag), record.clone());
+        Ok(record)
+    })
+}
+
 fn generate_code_with(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     mut generate_module: impl FnMut(
         CodeGenerationInput<'_>,
-    ) -> std::result::Result<CodeGenerationResult, Error>,
+    ) -> std::result::Result<CodeGenerationRecord, Error>,
 ) -> CodeGenerationOutcome {
     let module_render_ids = module_graph
         .modules()
@@ -178,12 +292,15 @@ fn generate_code_with(
             chunk_graph,
             module_render_ids: &module_render_ids,
         };
-        let result = generate_module(input).unwrap_or_else(|error| {
+        let record = generate_module(input).unwrap_or_else(|error| {
             errors.push(error.clone());
-            CodeGenerationResult::new(CodeGenerationSource::Raw {
+            CodeGenerationRecord::new(CodeGenerationSource::Raw {
                 source: render_failed_module_content(&error),
             })
         });
+        let result = record
+            .into_result(module.source())
+            .expect("generated Code Generation Record must match its Module source");
         let previous = results.insert(module.id(), result);
         assert!(
             previous.is_none(),
@@ -625,7 +742,7 @@ fn render_module_table(
 
 fn generate_module_code(
     input: CodeGenerationInput<'_>,
-) -> std::result::Result<CodeGenerationResult, Error> {
+) -> std::result::Result<CodeGenerationRecord, Error> {
     let CodeGenerationInput {
         module,
         module_graph,
@@ -633,7 +750,7 @@ fn generate_module_code(
         module_render_ids,
     } = input;
     if let Some(error) = module.build_error() {
-        return Ok(CodeGenerationResult::new(CodeGenerationSource::Raw {
+        return Ok(CodeGenerationRecord::new(CodeGenerationSource::Raw {
             source: render_failed_module_content(error),
         }));
     }
@@ -701,9 +818,10 @@ fn generate_module_code(
 
     let init = render_init_fragments(init_fragments);
     Ok(
-        CodeGenerationResult::new(CodeGenerationSource::OriginalWithReplacements {
+        CodeGenerationRecord::new(CodeGenerationSource::OriginalWithReplacements {
             prefix: init,
-            original_source: module.source().to_string(),
+            original_source_len: u32::try_from(module.source_len())
+                .expect("Module source length must fit the Code Generation cache format"),
             original_name: module_render_name,
             replacements: source
                 .replacements()
@@ -1143,14 +1261,16 @@ fn json_render_id(render_id: &RenderId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashMap, fs};
 
-    use rspack_sources::{ConcatSource, OriginalSource, Source};
+    use rspack_sources::{ConcatSource, OriginalSource, ReplacementEnforce, Source};
 
     use crate::{
         CacheOptions, Compiler, CompilerOptions, ConstDependency, Dependency, Entry, Error,
         ModuleGraph, ModuleId, ModuleIdentity, SnapshotOptions, SourceRange,
-        build_cache::{BuildCache, CacheIdentifier, CacheKey, CacheNamespace},
+        build_cache::{
+            BuildCache, CacheIdentifier, CacheItemFamily, CacheItemWork, CacheKey, CacheNamespace,
+        },
         id_assignment::{RenderId, assign_chunk_render_ids, assign_module_render_ids},
         runtime::RuntimeModule,
     };
@@ -1160,6 +1280,7 @@ mod tests {
         CodeGenerationResults, CodeGenerationSource, ModuleRenderManifest, RenderedSource,
         RuntimeRequirement, emit_asset,
     };
+    use crate::code_generation_record::{CodeGenerationRecord, CodeGenerationReplacement};
 
     #[test]
     fn asset_render_facade_uses_stable_namespace_and_manifest_identity() {
@@ -1248,6 +1369,130 @@ mod tests {
     }
 
     #[test]
+    fn code_generation_cache_invalidates_template_inputs_when_source_is_unchanged() {
+        let options = CompilerOptions::new("/project", vec![Entry::new("main", "./index")]);
+        let build = |expression: &str| {
+            let mut module_graph = ModuleGraph::default();
+            let module = module_graph.add_module(ModuleIdentity::new("/project/index.js"));
+            module_graph
+                .module_mut(module)
+                .expect("fixture Module should exist")
+                .finish_build(
+                    Vec::new(),
+                    Vec::new(),
+                    vec![Dependency::Const(ConstDependency::new(
+                        expression,
+                        SourceRange::new(0, 5),
+                    ))],
+                    "value".to_string(),
+                    1,
+                );
+            let mut chunk_graph = crate::ChunkGraph::build(&options, &module_graph, &[module]);
+            assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
+            assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
+            (module_graph, chunk_graph, module)
+        };
+        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+
+        let (first_graph, first_chunks, first_module) = build("first");
+        let first = super::generate_code_cached(&first_graph, &first_chunks, &build_cache);
+        assert_eq!(
+            first.results.results[&first_module]
+                .source()
+                .source()
+                .into_string_lossy(),
+            "first"
+        );
+
+        let (second_graph, second_chunks, second_module) = build("second");
+        let second = super::generate_code_cached(&second_graph, &second_chunks, &build_cache);
+        assert_eq!(
+            second.results.results[&second_module]
+                .source()
+                .source()
+                .into_string_lossy(),
+            "second"
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration),
+            CacheItemWork {
+                hits: 0,
+                misses: 2,
+                stores: 2,
+                restores: 0,
+                evictions: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn incompatible_cached_replacement_recipe_is_regenerated() {
+        let options = CompilerOptions::new("/project", vec![Entry::new("main", "./index")]);
+        let mut module_graph = ModuleGraph::default();
+        let module = module_graph.add_module(ModuleIdentity::new("/project/index.js"));
+        module_graph
+            .module_mut(module)
+            .expect("fixture Module should exist")
+            .finish_build(Vec::new(), Vec::new(), Vec::new(), "éx".to_string(), 1);
+        let mut chunk_graph = crate::ChunkGraph::build(&options, &module_graph, &[module]);
+        assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
+        assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
+        let module_render_ids = HashMap::from([(
+            module,
+            chunk_graph
+                .module_render_id(module)
+                .expect("fixture Module should have a Render ID")
+                .clone(),
+        )]);
+        let module_ref = module_graph
+            .module(module)
+            .expect("fixture Module should exist");
+        let input = super::CodeGenerationInput {
+            module: module_ref,
+            module_graph: &module_graph,
+            chunk_graph: &chunk_graph,
+            module_render_ids: &module_render_ids,
+        };
+        let etag = super::code_generation_etag(&input);
+        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let cache = build_cache.code_generations();
+        cache.store(
+            module_ref.identity().clone(),
+            Some(etag.clone()),
+            CodeGenerationRecord::new(CodeGenerationSource::OriginalWithReplacements {
+                prefix: String::new(),
+                original_source_len: 3,
+                original_name: "fixture.js".to_string(),
+                replacements: vec![CodeGenerationReplacement {
+                    start: 1,
+                    end: 1,
+                    content: "invalid-boundary".to_string(),
+                    name: None,
+                    enforce: ReplacementEnforce::Normal,
+                }],
+                suffix: String::new(),
+            }),
+        );
+
+        let outcome = super::generate_code_cached(&module_graph, &chunk_graph, &build_cache);
+        assert_eq!(
+            outcome.results.results[&module]
+                .source()
+                .source()
+                .into_string_lossy(),
+            "éx"
+        );
+        assert!(
+            cache
+                .get(module_ref.identity(), Some(&etag))
+                .expect("regenerated Code Generation Record should be stored")
+                .is_compatible_with(module_ref.source())
+        );
+    }
+
+    #[test]
     fn module_attributable_generation_errors_become_throwing_results() {
         let options = CompilerOptions::new("/project", vec![Entry::new("main", "./index")]);
         let mut module_graph = ModuleGraph::default();
@@ -1269,23 +1514,40 @@ mod tests {
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
-        let outcome = super::generate_code(&module_graph, &chunk_graph);
-
+        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        for outcome in [
+            super::generate_code_cached(&module_graph, &chunk_graph, &build_cache),
+            super::generate_code_cached(&module_graph, &chunk_graph, &build_cache),
+        ] {
+            assert_eq!(
+                outcome.errors,
+                [Error::CodeGeneration {
+                    module,
+                    path: "/project/index.js".into(),
+                    message: "dependency source range 0..99 exceeds module source length 5"
+                        .to_string(),
+                }]
+            );
+            assert!(outcome.errors[0].is_compilation_error());
+            assert!(
+                outcome.results.results[&module]
+                    .source()
+                    .source()
+                    .into_string_lossy()
+                    .contains("throw new Error")
+            );
+        }
         assert_eq!(
-            outcome.errors,
-            [Error::CodeGeneration {
-                module,
-                path: "/project/index.js".into(),
-                message: "dependency source range 0..99 exceeds module source length 5".to_string(),
-            }]
-        );
-        assert!(outcome.errors[0].is_compilation_error());
-        assert!(
-            outcome.results.results[&module]
-                .source()
-                .source()
-                .into_string_lossy()
-                .contains("throw new Error")
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration),
+            CacheItemWork {
+                hits: 0,
+                misses: 2,
+                stores: 0,
+                restores: 0,
+                evictions: 0,
+            }
         );
     }
 

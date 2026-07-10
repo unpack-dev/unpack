@@ -1,8 +1,16 @@
-use std::path::PathBuf;
+use std::{
+    hash::{Hash, Hasher},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AsyncDependenciesBlock, Dependency, Error, ExportsInfo, cache_hash::stable_hash};
+use crate::{
+    AsyncDependenciesBlock, Dependency, Error, ExportsInfo,
+    cache_hash::{StableHasher, stable_hash},
+    parser::ParsedModule,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(usize);
@@ -21,15 +29,60 @@ impl ModuleId {
 pub struct Module {
     id: ModuleId,
     identity: ModuleIdentity,
-    dependencies: Vec<Dependency>,
-    blocks: Vec<AsyncDependenciesBlock>,
-    presentational_dependencies: Vec<Dependency>,
+    built_content: Arc<BuiltModuleContent>,
     exports_info: ExportsInfo,
-    source: String,
-    source_len: usize,
-    source_hash: u64,
     build_error: Option<Error>,
     harmony: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BuiltModuleContent {
+    parsed: ParsedModule,
+    source: String,
+    source_hash: u64,
+    code_generation_local_input_digest: u64,
+}
+
+impl BuiltModuleContent {
+    pub(crate) fn new(parsed: ParsedModule, source: String) -> Self {
+        let source_hash = stable_hash(&source);
+        Self::from_persistent_parts(parsed, source, source_hash)
+    }
+
+    pub(crate) fn from_persistent_parts(
+        parsed: ParsedModule,
+        source: String,
+        source_hash: u64,
+    ) -> Self {
+        let mut hasher = StableHasher::default();
+        hasher.write(b"unpack/code-generation/local-inputs/1");
+        parsed.dependencies.hash(&mut hasher);
+        parsed.blocks.hash(&mut hasher);
+        parsed.presentational_dependencies.hash(&mut hasher);
+        let code_generation_local_input_digest = hasher.finish();
+        Self {
+            parsed,
+            source,
+            source_hash,
+            code_generation_local_input_digest,
+        }
+    }
+
+    pub(crate) fn parsed(&self) -> &ParsedModule {
+        &self.parsed
+    }
+
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub(crate) fn source_hash(&self) -> u64 {
+        self.source_hash
+    }
+
+    pub(crate) fn code_generation_local_input_digest(&self) -> u64 {
+        self.code_generation_local_input_digest
+    }
 }
 
 impl Module {
@@ -37,13 +90,11 @@ impl Module {
         Self {
             id,
             identity,
-            dependencies: Vec::new(),
-            blocks: Vec::new(),
-            presentational_dependencies: Vec::new(),
+            built_content: Arc::new(BuiltModuleContent::new(
+                ParsedModule::default(),
+                String::new(),
+            )),
             exports_info: ExportsInfo::default(),
-            source: String::new(),
-            source_len: 0,
-            source_hash: stable_hash(""),
             build_error: None,
             harmony: false,
         }
@@ -58,15 +109,15 @@ impl Module {
     }
 
     pub fn dependencies(&self) -> &[Dependency] {
-        &self.dependencies
+        &self.built_content.parsed.dependencies
     }
 
     pub fn blocks(&self) -> &[AsyncDependenciesBlock] {
-        &self.blocks
+        &self.built_content.parsed.blocks
     }
 
     pub fn presentational_dependencies(&self) -> &[Dependency] {
-        &self.presentational_dependencies
+        &self.built_content.parsed.presentational_dependencies
     }
 
     pub fn exports_info(&self) -> &ExportsInfo {
@@ -74,15 +125,24 @@ impl Module {
     }
 
     pub fn source(&self) -> &str {
-        &self.source
+        self.built_content.source()
     }
 
     pub fn source_len(&self) -> usize {
-        self.source_len
+        self.built_content.source.len()
     }
 
     pub fn source_hash(&self) -> u64 {
-        self.source_hash
+        self.built_content.source_hash()
+    }
+
+    pub(crate) fn code_generation_local_input_digest(&self) -> u64 {
+        self.built_content.code_generation_local_input_digest()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn built_content(&self) -> &Arc<BuiltModuleContent> {
+        &self.built_content
     }
 
     pub fn build_error(&self) -> Option<&Error> {
@@ -93,6 +153,7 @@ impl Module {
         self.harmony
     }
 
+    #[cfg(test)]
     pub(crate) fn finish_build(
         &mut self,
         dependencies: Vec<Dependency>,
@@ -101,28 +162,32 @@ impl Module {
         source: String,
         source_hash: u64,
     ) {
-        self.exports_info = ExportsInfo::from_dependencies(&dependencies);
-        self.harmony = dependencies
+        self.finish_build_content(Arc::new(BuiltModuleContent::from_persistent_parts(
+            ParsedModule {
+                dependencies,
+                blocks,
+                presentational_dependencies,
+            },
+            source,
+            source_hash,
+        )));
+    }
+
+    pub(crate) fn finish_build_content(&mut self, content: Arc<BuiltModuleContent>) {
+        self.exports_info = ExportsInfo::from_dependencies(&content.parsed.dependencies);
+        self.harmony = content
+            .parsed
+            .dependencies
             .iter()
-            .chain(&presentational_dependencies)
+            .chain(&content.parsed.presentational_dependencies)
             .any(Dependency::is_harmony_dependency);
-        self.source_len = source.len();
-        self.source_hash = source_hash;
-        self.source = source;
-        self.dependencies = dependencies;
-        self.blocks = blocks;
-        self.presentational_dependencies = presentational_dependencies;
+        self.built_content = content;
         self.build_error = None;
     }
 
     pub(crate) fn fail_build(&mut self, error: Error, source: String) {
         self.exports_info = ExportsInfo::default();
-        self.source_len = source.len();
-        self.source_hash = stable_hash(&source);
-        self.source = source;
-        self.dependencies.clear();
-        self.blocks.clear();
-        self.presentational_dependencies.clear();
+        self.built_content = Arc::new(BuiltModuleContent::new(ParsedModule::default(), source));
         self.build_error = Some(error);
         self.harmony = false;
     }

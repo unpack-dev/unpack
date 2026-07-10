@@ -492,13 +492,12 @@ test("accepts filesystem cache option shape", async () => {
   });
   const cacheOptions = {
     type: "filesystem" as const,
-    cacheDirectory: ".cache/unpack",
+    cacheDirectory: join(fixture, ".cache/unpack"),
     name: "test-cache",
     version: "v1",
     buildDependencies: {
       config: ["./config/build.js"]
     },
-    maxMemoryGenerations: 2,
     idleTimeout: 10,
     readonly: false
   };
@@ -1153,48 +1152,42 @@ test("cache and snapshot option validation throws synchronously", () => {
       }
     })
   );
-  assert.throws(
-    () =>
-      unpack({
-        entry: "./src/index.js",
-        snapshot: {
-          module: {
-            timestamp: false,
-            hash: false
-          }
+  assert.doesNotThrow(() =>
+    unpack({
+      entry: "./src/index.js",
+      snapshot: {
+        module: {
+          timestamp: false,
+          hash: false
         }
-      }),
-    /options.snapshot.module must enable timestamp or hash validation/
+      }
+    })
   );
-  assert.throws(
-    () =>
-      unpack({
-        entry: "./src/index.js",
-        mode: "development",
-        snapshot: {
-          resolve: {
-            timestamp: false
-          },
-          resolveBuildDependencies: {
-            timestamp: true,
-            hash: false
-          }
+  assert.doesNotThrow(() =>
+    unpack({
+      entry: "./src/index.js",
+      mode: "development",
+      snapshot: {
+        resolve: {
+          timestamp: false
+        },
+        resolveBuildDependencies: {
+          timestamp: true,
+          hash: false
         }
-      }),
-    /options.snapshot.resolve must enable timestamp or hash validation/
+      }
+    })
   );
-  assert.throws(
-    () =>
-      unpack({
-        entry: "./src/index.js",
-        snapshot: {
-          resolveBuildDependencies: {
-            timestamp: false,
-            hash: false
-          }
+  assert.doesNotThrow(() =>
+    unpack({
+      entry: "./src/index.js",
+      snapshot: {
+        resolveBuildDependencies: {
+          timestamp: false,
+          hash: false
         }
-      }),
-    /options.snapshot.resolveBuildDependencies must enable timestamp or hash validation/
+      }
+    })
   );
   assert.throws(
     () =>

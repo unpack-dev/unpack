@@ -148,6 +148,18 @@ _Avoid_: Browser loader, script loader
 A generated-code dependency on a runtime helper that asset creation must provide for a module or chunk.
 _Avoid_: Runtime flag, helper import
 
+**Runtime Module**:
+A named, stage-ordered generator for one runtime helper selected by the closed set of Runtime Requirements. Runtime Modules are deduplicated per Entrypoint runtime tree and rendered only when required.
+_Avoid_: Monolithic runtime block, arbitrary helper snippet
+
+**Code Generation Result**:
+The per-module result of the Code Generation Phase: source-preserving rewritten module content plus its direct Runtime Requirements and any attributable generation error.
+_Avoid_: Asset, rendered bundle, compilation result
+
+**ID Assignment**:
+The deterministic phase that assigns readable named Render IDs to modules and chunks, using stable identities and collision handling before code generation.
+_Avoid_: Filename generation, incidental map index
+
 **Export Binding**:
 A generated runtime binding that exposes an ECMAScript module export through a getter so importers observe the current exported value.
 _Avoid_: Export snapshot, CommonJS export assignment

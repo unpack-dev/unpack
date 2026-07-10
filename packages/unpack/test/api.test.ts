@@ -34,6 +34,114 @@ test("emits assets through the ESM default API", async () => {
   }
 });
 
+// Ported from webpack 5.108.1's DefinePropertyGettersRuntimeModule,
+// HasOwnPropertyRuntimeModule, and MakeNamespaceObjectRuntimeModule behavior.
+test("static ESM emits only the runtime capabilities used by generated code", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { value } from './dep'; export const result = value;",
+    "src/dep.js": "export const value = 42;"
+  });
+  const outputPath = join(fixture, "dist");
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      output: { path: outputPath },
+      sourcemap: false
+    });
+
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+    const source = await readFile(join(outputPath, "main.js"), "utf8");
+    assert.match(source, /__webpack_require__\.d =/);
+    assert.match(source, /__webpack_require__\.o =/);
+    assert.match(source, /__webpack_require__\.r =/);
+    assert.doesNotMatch(source, /__webpack_require__\.e =/);
+    assert.doesNotMatch(source, /__webpack_require__\.f =/);
+    assert.doesNotMatch(source, /__webpack_require__\.u =/);
+    assert.doesNotMatch(source, /installedChunks/);
+    assert.doesNotMatch(source, /installChunk/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+// Ported from webpack 5.108.1's HarmonyCompatibilityDependency behavior.
+test("namespace compatibility marks static ESM but not scripts or dynamic-import-only modules", async () => {
+  const scriptFixture = await createFixture({
+    "src/index.js": "globalThis.__unpack_script__ = 1;"
+  });
+  const dynamicFixture = await createFixture({
+    "src/index.js": "globalThis.__unpack_load__ = () => import('./feature');",
+    "src/feature.js": "export const value = 42;"
+  });
+
+  try {
+    const script = await runCompiler({
+      context: scriptFixture,
+      entry: "./src/index.js",
+      sourcemap: false
+    });
+    assert.equal(script.err, null);
+    assert.equal(script.stats?.hasErrors(), false);
+    const scriptSource = await readFile(join(scriptFixture, "dist/main.js"), "utf8");
+    assert.doesNotMatch(scriptSource, /__webpack_require__\.r\(__webpack_exports__\)/);
+    assert.doesNotMatch(scriptSource, /__webpack_require__\.r =/);
+
+    const dynamic = await runCompiler({
+      context: dynamicFixture,
+      entry: "./src/index.js",
+      sourcemap: false
+    });
+    assert.equal(dynamic.err, null);
+    assert.equal(dynamic.stats?.hasErrors(), false);
+    const dynamicAssets = dynamic.stats?.toJson().assets.map((asset) => asset.name) ?? [];
+    const asyncAsset = dynamicAssets.find((asset) => asset !== "main.js");
+    assert.ok(asyncAsset);
+    const mainSource = await readFile(join(dynamicFixture, "dist/main.js"), "utf8");
+    const asyncSource = await readFile(join(dynamicFixture, "dist", asyncAsset), "utf8");
+    assert.doesNotMatch(mainSource, /__webpack_require__\.r\(__webpack_exports__\)/);
+    assert.match(asyncSource, /__webpack_require__\.r\(__webpack_exports__\)/);
+  } finally {
+    await rm(scriptFixture, { recursive: true, force: true });
+    await rm(dynamicFixture, { recursive: true, force: true });
+  }
+});
+
+// Ported from webpack 5.108.1's collapsed import() behavior when a target is
+// already available in the initial chunk.
+test("collapsed dynamic imports do not provision asynchronous runtime capabilities", async () => {
+  const fixture = await createFixture({
+    "src/index.js": [
+      "import { value } from './dep';",
+      "export const initial = value;",
+      "export const load = () => import('./dep');"
+    ].join("\n"),
+    "src/dep.js": "export const value = 42;"
+  });
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      sourcemap: false
+    });
+
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+    assert.deepEqual(stats?.toJson().assets.map((asset) => asset.name), ["main.js"]);
+    const source = await readFile(join(fixture, "dist/main.js"), "utf8");
+    assert.match(source, /Promise\.resolve\(\)\.then/);
+    assert.doesNotMatch(source, /__webpack_require__\.e =/);
+    assert.doesNotMatch(source, /__webpack_require__\.f =/);
+    assert.doesNotMatch(source, /__webpack_require__\.u =/);
+    assert.doesNotMatch(source, /installedChunks/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("supports object entries", async () => {
   const fixture = await createFixture({
     "src/a.js": "export const a = 'a';",

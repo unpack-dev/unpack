@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
 };
 
@@ -19,6 +19,7 @@ use crate::{
     },
     id_assignment::RenderId,
     rendered_source::RenderedSource,
+    runtime::{RuntimeModule, RuntimeModuleContext, RuntimeRequirement, RuntimeRequirements},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,42 +28,20 @@ pub struct Asset {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum RuntimeRequirement {
-    ModuleFactories,
-    ModuleCache,
-    Require,
-    DefinePropertyGetters,
-    HasOwnProperty,
-    MakeNamespaceObject,
-    EnsureChunk,
-    GetChunkFilename,
-    RequireChunkLoading,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct RuntimeRequirements {
-    requirements: BTreeSet<RuntimeRequirement>,
-}
-
-impl RuntimeRequirements {
-    pub fn insert(&mut self, requirement: RuntimeRequirement) {
-        self.requirements.insert(requirement);
-    }
-
-    pub fn contains(&self, requirement: RuntimeRequirement) -> bool {
-        self.requirements.contains(&requirement)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = RuntimeRequirement> + '_ {
-        self.requirements.iter().copied()
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CodeGenerationResults {
     module_render_ids: HashMap<ModuleId, RenderId>,
     results: HashMap<ModuleId, CodeGenerationResult>,
+}
+
+impl CodeGenerationResults {
+    pub(crate) fn runtime_requirements(
+        &self,
+    ) -> impl Iterator<Item = (ModuleId, &RuntimeRequirements)> {
+        self.results
+            .iter()
+            .map(|(module, result)| (*module, result.runtime_requirements()))
+    }
 }
 
 struct CodeGenerationInput<'a> {
@@ -87,6 +66,8 @@ struct RenderManifestEntry {
 enum AssetRenderManifest {
     InitialChunk {
         modules: Vec<ModuleRenderManifest>,
+        runtime_modules: Vec<RenderedRuntimeModule>,
+        use_legacy_async_runtime: bool,
         chunk_filename_map: String,
         entry_id: RenderId,
         chunk_id: RenderId,
@@ -101,6 +82,12 @@ enum AssetRenderManifest {
 struct ModuleRenderManifest {
     module: ModuleId,
     render_id: RenderId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RenderedRuntimeModule {
+    module: RuntimeModule,
+    source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +123,7 @@ struct InitFragment {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum InitFragmentStage {
+    HarmonyCompatibility,
     HarmonyImport,
     HarmonyExport,
     HarmonyStarReexport,
@@ -218,10 +206,28 @@ pub(crate) fn create_render_manifest(
             .copied()
             .expect("Entrypoint must have an Entry Module before manifest creation");
         let modules = module_render_manifest(chunk_graph, chunk, code_generation_results);
+        let runtime_tree_requirements = chunk_graph
+            .runtime_tree_requirements(group_id)
+            .expect("Runtime Requirements must be processed before manifest creation");
+        let runtime_context = RuntimeModuleContext {
+            chunk_graph,
+            runtime_chunk: chunk_id,
+        };
+        let runtime_modules = chunk_graph
+            .runtime_modules(chunk_id)
+            .iter()
+            .map(|module| RenderedRuntimeModule {
+                module: *module,
+                source: module.generate(&runtime_context),
+            })
+            .collect();
         manifest_entries.push(RenderManifestEntry {
             filename: resolve_chunk_filename(chunk),
             render: AssetRenderManifest::InitialChunk {
                 modules,
+                runtime_modules,
+                use_legacy_async_runtime: runtime_tree_requirements
+                    .contains(RuntimeRequirement::EnsureChunk),
                 chunk_filename_map: render_chunk_filename_map(chunk_graph),
                 entry_id: code_generation_results
                     .module_render_ids
@@ -310,12 +316,16 @@ impl AssetRenderManifest {
         match self {
             Self::InitialChunk {
                 modules,
+                runtime_modules,
+                use_legacy_async_runtime,
                 chunk_filename_map,
                 entry_id,
                 chunk_id,
             } => {
                 hasher.write_u8(0);
                 hash_module_render_inputs(modules, code_generation_results, &mut hasher);
+                runtime_modules.hash(&mut hasher);
+                use_legacy_async_runtime.hash(&mut hasher);
                 chunk_filename_map.hash(&mut hasher);
                 entry_id.hash(&mut hasher);
                 chunk_id.hash(&mut hasher);
@@ -389,11 +399,15 @@ fn render_asset(
     let source = match manifest {
         AssetRenderManifest::InitialChunk {
             modules,
+            runtime_modules,
+            use_legacy_async_runtime,
             chunk_filename_map,
             entry_id,
             chunk_id,
         } => render_initial_asset(
             modules,
+            runtime_modules,
+            *use_legacy_async_runtime,
             chunk_filename_map,
             entry_id,
             chunk_id,
@@ -439,6 +453,8 @@ fn emit_asset(filename: String, rendered: &RenderedSource, sourcemap: bool) -> V
 
 fn render_initial_asset(
     modules: &[ModuleRenderManifest],
+    runtime_modules: &[RenderedRuntimeModule],
+    use_legacy_async_runtime: bool,
     chunk_filename_map: &str,
     entry_id: &RenderId,
     chunk_id: &RenderId,
@@ -446,7 +462,6 @@ fn render_initial_asset(
 ) -> ConcatSource {
     let modules = render_module_table(modules, code_generation_results);
     let entry_id = json_render_id(entry_id);
-    let chunk_id = json_render_id(chunk_id);
 
     let mut source = ConcatSource::default();
     source.add(RawStringSource::from(
@@ -456,23 +471,29 @@ var __webpack_modules__ = ({
         .to_string(),
     ));
     source.add(modules);
-    source.add(RawStringSource::from(format!(
+    source.add(RawStringSource::from(
         r#"
-}});
+});
 
-var __webpack_module_cache__ = {{}};
-function __webpack_require__(moduleId) {{
+var __webpack_module_cache__ = {};
+function __webpack_require__(moduleId) {
   var cachedModule = __webpack_module_cache__[moduleId];
-  if (cachedModule !== undefined) {{
+  if (cachedModule !== undefined) {
     return cachedModule.exports;
-  }}
-  var module = __webpack_module_cache__[moduleId] = {{
-    exports: {{}}
-  }};
+  }
+  var module = __webpack_module_cache__[moduleId] = {
+    exports: {}
+  };
   __webpack_modules__[moduleId](module, module.exports, __webpack_require__);
   return module.exports;
-}}
-__webpack_require__.m = __webpack_modules__;
+}
+"#
+        .to_string(),
+    ));
+    if use_legacy_async_runtime {
+        let chunk_id = json_render_id(chunk_id);
+        source.add(RawStringSource::from(format!(
+            r#"__webpack_require__.m = __webpack_modules__;
 __webpack_require__.d = function(exports, definition) {{
   for(var key in definition) {{
     if(__webpack_require__.o(definition, key) && !__webpack_require__.o(exports, key)) {{
@@ -522,7 +543,15 @@ __webpack_require__.f.require = function(chunkId, promises) {{
 }};
 module.exports = __webpack_require__({entry_id});
 "#,
-    )));
+        )));
+    } else {
+        for runtime_module in runtime_modules {
+            source.add(RawStringSource::from(runtime_module.source.clone()));
+        }
+        source.add(RawStringSource::from(format!(
+            "module.exports = __webpack_require__({entry_id});\n"
+        )));
+    }
     source
 }
 
@@ -568,16 +597,8 @@ fn render_module_table(
             source.add(RawStringSource::from(",\n".to_string()));
         }
         source.add(RawStringSource::from(format!(
-            "{}: ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {{\n\"use strict\";\n{}",
+            "{}: ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {{\n\"use strict\";\n",
             json_render_id(&module.render_id),
-            if result
-                .runtime_requirements()
-                .contains(RuntimeRequirement::MakeNamespaceObject)
-            {
-                "__webpack_require__.r(__webpack_exports__);\n"
-            } else {
-                ""
-            }
         )));
         source.add(result.source().clone());
         source.add(RawStringSource::from("\n})".to_string()));
@@ -607,7 +628,9 @@ fn generate_module_code(input: CodeGenerationInput<'_>) -> CodeGenerationResult 
     ));
     let mut init_fragments = Vec::new();
     let mut runtime_requirements = RuntimeRequirements::default();
-    runtime_requirements.insert(RuntimeRequirement::MakeNamespaceObject);
+    if module.is_harmony() {
+        apply_harmony_compatibility_template(&mut runtime_requirements, &mut init_fragments);
+    }
 
     for dependency in module.presentational_dependencies() {
         apply_dependency_template(
@@ -674,6 +697,18 @@ fn generate_module_code(input: CodeGenerationInput<'_>) -> CodeGenerationResult 
 
 fn render_failed_module_content(error: &Error) -> String {
     format!("throw new Error({});", json_string(&error.to_string()))
+}
+
+fn apply_harmony_compatibility_template(
+    runtime_requirements: &mut RuntimeRequirements,
+    init_fragments: &mut Vec<InitFragment>,
+) {
+    runtime_requirements.insert(RuntimeRequirement::MakeNamespaceObject);
+    push_init_fragment(
+        init_fragments,
+        InitFragmentStage::HarmonyCompatibility,
+        "__webpack_require__.r(__webpack_exports__);\n".to_string(),
+    );
 }
 
 fn render_init_fragments(mut fragments: Vec<InitFragment>) -> String {
@@ -754,7 +789,6 @@ fn apply_dependency_template(
             )
         }
         Dependency::Import(dep) => {
-            runtime_requirements.insert(RuntimeRequirement::EnsureChunk);
             runtime_requirements.insert(RuntimeRequirement::Require);
             apply_import_dependency(
                 dep,
@@ -764,6 +798,7 @@ fn apply_dependency_template(
                 module_graph,
                 chunk_graph,
                 module_render_ids,
+                runtime_requirements,
                 source,
             )
         }
@@ -930,6 +965,7 @@ fn apply_import_dependency(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     module_render_ids: &HashMap<ModuleId, RenderId>,
+    runtime_requirements: &mut RuntimeRequirements,
     source: &mut ReplaceSource,
 ) {
     let block_index = origin_block.expect("Dynamic import must belong to an Async Block");
@@ -943,6 +979,10 @@ fn apply_import_dependency(
         block_index,
     };
     let expression = if let Some(group_id) = chunk_graph.block_chunk_group(origin) {
+        runtime_requirements.insert(RuntimeRequirement::EnsureChunk);
+        runtime_requirements.insert(RuntimeRequirement::GetChunkFilename);
+        runtime_requirements.insert(RuntimeRequirement::ModuleFactories);
+        runtime_requirements.insert(RuntimeRequirement::HasOwnProperty);
         let group = &chunk_graph.chunk_groups()[group_id.index()];
         let chunk_id = group
             .chunks()
@@ -1077,6 +1117,7 @@ mod tests {
         CacheOptions, Compiler, CompilerOptions, Entry, ModuleId, SnapshotOptions,
         build_cache::{BuildCache, CacheIdentifier, CacheKey, CacheNamespace},
         id_assignment::RenderId,
+        runtime::RuntimeModule,
     };
 
     use super::{
@@ -1134,26 +1175,27 @@ mod tests {
         assert_ne!(before, render.cache_etag(&results));
 
         let without_requirement = render.cache_etag(&results);
+        let mut requirements = super::RuntimeRequirements::default();
+        requirements.insert(RuntimeRequirement::MakeNamespaceObject);
         results.results.insert(
             module_id,
-            code_generation_result("export const value = 'after';").with_runtime_requirements(
-                super::RuntimeRequirements {
-                    requirements: std::collections::BTreeSet::from([
-                        RuntimeRequirement::MakeNamespaceObject,
-                    ]),
-                },
-            ),
+            code_generation_result("export const value = 'after';")
+                .with_runtime_requirements(requirements),
         );
         assert_ne!(without_requirement, render.cache_etag(&results));
 
         let initial = AssetRenderManifest::InitialChunk {
             modules: Vec::new(),
+            runtime_modules: Vec::new(),
+            use_legacy_async_runtime: false,
             chunk_filename_map: "{\"feature\":\"feature.js\"}".to_string(),
             entry_id: RenderId::String("./src/index.js".to_string()),
             chunk_id: RenderId::String("main".to_string()),
         };
         let changed_filename_map = AssetRenderManifest::InitialChunk {
             modules: Vec::new(),
+            runtime_modules: Vec::new(),
+            use_legacy_async_runtime: false,
             chunk_filename_map: "{\"feature\":\"renamed.js\"}".to_string(),
             entry_id: RenderId::String("./src/index.js".to_string()),
             chunk_id: RenderId::String("main".to_string()),
@@ -1189,6 +1231,42 @@ mod tests {
         ))
         .run()
         .await?;
+        for module in compilation.module_graph().modules() {
+            let requirements = compilation
+                .chunk_graph()
+                .module_runtime_requirements(module.id())
+                .expect("renderable Module must have processed Runtime Requirements");
+            assert!(requirements.contains(RuntimeRequirement::MakeNamespaceObject));
+            assert!(requirements.contains(RuntimeRequirement::DefinePropertyGetters));
+            assert!(requirements.contains(RuntimeRequirement::HasOwnProperty));
+        }
+        for chunk in compilation.chunk_graph().chunks() {
+            let requirements = compilation
+                .chunk_graph()
+                .chunk_runtime_requirements(chunk.id())
+                .expect("Chunk must have processed Runtime Requirements");
+            assert!(requirements.contains(RuntimeRequirement::MakeNamespaceObject));
+            assert!(requirements.contains(RuntimeRequirement::DefinePropertyGetters));
+            assert!(requirements.contains(RuntimeRequirement::HasOwnProperty));
+            assert_eq!(
+                compilation.chunk_graph().runtime_modules(chunk.id()),
+                [
+                    RuntimeModule::DefinePropertyGetters,
+                    RuntimeModule::HasOwnProperty,
+                    RuntimeModule::MakeNamespaceObject,
+                ]
+            );
+        }
+        for entrypoint in compilation.chunk_graph().entrypoints() {
+            let requirements = compilation
+                .chunk_graph()
+                .runtime_tree_requirements(*entrypoint)
+                .expect("Entrypoint must have processed runtime-tree requirements");
+            assert!(requirements.contains(RuntimeRequirement::ModuleFactories));
+            assert!(requirements.contains(RuntimeRequirement::ModuleCache));
+            assert!(requirements.contains(RuntimeRequirement::Require));
+            assert!(requirements.contains(RuntimeRequirement::ReturnExportsFromRuntime));
+        }
         let mut generation_count = 0;
         let results = super::generate_code_with(
             compilation.module_graph(),

@@ -2,7 +2,7 @@ use rspack_sources::{
     ConcatSource, OriginalSource, RawStringSource, ReplaceSource, Replacement, ReplacementEnforce,
 };
 
-use crate::code_generation::RuntimeRequirements;
+use crate::runtime::RuntimeRequirements;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeGenerationResult {

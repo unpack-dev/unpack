@@ -29,6 +29,7 @@ pub struct Module {
     source_len: usize,
     source_hash: u64,
     build_error: Option<Error>,
+    harmony: bool,
 }
 
 impl Module {
@@ -44,6 +45,7 @@ impl Module {
             source_len: 0,
             source_hash: stable_hash(""),
             build_error: None,
+            harmony: false,
         }
     }
 
@@ -87,6 +89,10 @@ impl Module {
         self.build_error.as_ref()
     }
 
+    pub(crate) fn is_harmony(&self) -> bool {
+        self.harmony
+    }
+
     pub(crate) fn finish_build(
         &mut self,
         dependencies: Vec<Dependency>,
@@ -96,6 +102,10 @@ impl Module {
         source_hash: u64,
     ) {
         self.exports_info = ExportsInfo::from_dependencies(&dependencies);
+        self.harmony = dependencies
+            .iter()
+            .chain(&presentational_dependencies)
+            .any(Dependency::is_harmony_dependency);
         self.source_len = source.len();
         self.source_hash = source_hash;
         self.source = source;
@@ -114,6 +124,7 @@ impl Module {
         self.blocks.clear();
         self.presentational_dependencies.clear();
         self.build_error = Some(error);
+        self.harmony = false;
     }
 }
 

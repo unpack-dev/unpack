@@ -161,6 +161,18 @@ impl Dependency {
     pub fn is_import_dependency(&self) -> bool {
         matches!(self, Self::Import(_))
     }
+
+    pub(crate) fn is_harmony_dependency(&self) -> bool {
+        matches!(
+            self,
+            Self::HarmonyImportSideEffect(_)
+                | Self::HarmonyImportSpecifier(_)
+                | Self::HarmonyExportHeader(_)
+                | Self::HarmonyExportSpecifier(_)
+                | Self::HarmonyExportExpression(_)
+                | Self::HarmonyExportImportedSpecifier(_)
+        )
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

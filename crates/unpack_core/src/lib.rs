@@ -18,13 +18,14 @@ mod pack_file;
 mod parser;
 mod rendered_source;
 mod resolver;
+mod runtime;
 mod snapshot;
 
 pub use build_cache::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
 pub use chunk_graph::{
     AsyncBlockOrigin, Chunk, ChunkGraph, ChunkGroup, ChunkGroupId, ChunkGroupKind, ChunkId,
 };
-pub use code_generation::{Asset, RuntimeRequirement, RuntimeRequirements};
+pub use code_generation::Asset;
 pub use compilation::{Compilation, WatchDependencies};
 pub use compiler::{
     CacheIdleReason, CacheLifecycleOutcome, Compiler, CompilerOptions, DEFAULT_EXTENSIONS, Entry,

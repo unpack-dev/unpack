@@ -38,6 +38,8 @@ export interface FilesystemCacheOptions {
   buildDependencies?: Record<string, string[]>;
   maxMemoryGenerations?: number;
   maxAge?: number;
+  compression?: false | "gzip" | "brotli";
+  allowCollectingMemory?: boolean;
   idleTimeout?: number;
   idleTimeoutForInitialStore?: number;
   idleTimeoutAfterLargeChanges?: number;

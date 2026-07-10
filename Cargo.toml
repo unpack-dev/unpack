@@ -8,7 +8,9 @@ license = "MIT"
 repository = "https://github.com/unpack-dev/unpack"
 
 [workspace.dependencies]
+brotli = "7.0.0"
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
+flate2 = "1.1.9"
 futures = "0.3.31"
 filetime = "0.2.26"
 mimalloc = { version = "0.1.48", default-features = false }

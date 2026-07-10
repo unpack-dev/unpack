@@ -21,6 +21,11 @@ use crate::{
         ModuleBuildRecordDto, PackFile, PackFileAddress, PackFileETag, PackFileGuardDto,
         PackFileRetention, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
         ResolveRecordDto, SnapshotDto,
+        PackFileCompression, PackFileOpenOptions, PackFilePublicationOptions,
+/*
+        PackFileOpenOptions, PackFilePublicationOptions, PackFileRetention, PackFileWriteBatch,
+        PublicationBase, ResolveRecordCodec, ResolveRecordDto, SnapshotDto,
+*/
     },
     parser::ParsedModule,
     rendered_source::RenderedSource,
@@ -161,6 +166,8 @@ pub struct CacheOptions {
     pub automatic_build_dependencies: Vec<PathBuf>,
     pub max_age: Duration,
     pub max_memory_generations: Option<u64>,
+    pub compression: CacheCompression,
+    pub allow_collecting_memory: bool,
     pub idle_timeout: Option<u32>,
     pub idle_timeout_for_initial_store: Option<u32>,
     pub idle_timeout_after_large_changes: Option<u32>,
@@ -184,6 +191,8 @@ impl CacheOptions {
             build_dependencies: Vec::new(),
             automatic_build_dependencies: Vec::new(),
             max_age: DEFAULT_MAX_AGE,
+            compression: CacheCompression::None,
+            allow_collecting_memory: false,
             max_memory_generations: None,
             idle_timeout: None,
             idle_timeout_for_initial_store: None,
@@ -202,6 +211,8 @@ impl CacheOptions {
             build_dependencies: Vec::new(),
             automatic_build_dependencies: Vec::new(),
             max_age: DEFAULT_MAX_AGE,
+            compression: CacheCompression::None,
+            allow_collecting_memory: false,
             max_memory_generations: None,
             idle_timeout: None,
             idle_timeout_for_initial_store: None,
@@ -220,6 +231,8 @@ impl CacheOptions {
             build_dependencies: Vec::new(),
             automatic_build_dependencies: Vec::new(),
             max_age: DEFAULT_MAX_AGE,
+            compression: CacheCompression::None,
+            allow_collecting_memory: false,
             max_memory_generations: None,
             idle_timeout: Some(60_000),
             idle_timeout_for_initial_store: Some(5_000),
@@ -234,6 +247,23 @@ pub enum CacheKind {
     Disabled,
     Memory,
     Filesystem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheCompression {
+    None,
+    Gzip,
+    Brotli,
+}
+
+impl From<CacheCompression> for PackFileCompression {
+    fn from(compression: CacheCompression) -> Self {
+        match compression {
+            CacheCompression::None => Self::None,
+            CacheCompression::Gzip => Self::Gzip,
+            CacheCompression::Brotli => Self::Brotli,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -520,6 +550,8 @@ struct PackFileCacheLayer {
     root: Option<PathBuf>,
     registry: CodecRegistry,
     pack_file: Option<PackFile>,
+    compression: PackFileCompression,
+    open_options: PackFileOpenOptions,
     publication_base: PublicationBase,
     active: bool,
     pending: HashMap<CacheAddress, CacheEntry>,
@@ -529,13 +561,17 @@ impl PackFileCacheLayer {
     fn open(options: &CacheOptions) -> Self {
         let registry = persistent_codec_registry();
         let root = options.cache_location.clone();
+        let compression = options.compression.into();
+        let open_options = PackFileOpenOptions::new(options.allow_collecting_memory);
         let pack_file = root
             .as_ref()
-            .map(|root| PackFile::open(root, registry.clone()));
+            .map(|root| PackFile::open_with_options(root, registry.clone(), open_options));
         Self {
             root,
             registry,
             pack_file,
+            compression,
+            open_options,
             publication_base: PublicationBase::ReplaceAll,
             active: false,
             pending: HashMap::new(),
@@ -602,15 +638,18 @@ impl PackFileCacheLayer {
                 }
             }
         }
-        PackFile::publish_batch_with_retention(
+        PackFile::publish_batch_with_options(
             root,
             Some(guard),
             self.publication_base,
             batch,
-            PackFileRetention::new(stamp, max_age),
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(stamp, max_age),
+                self.compression,
+            ),
         )?;
         self.pending.clear();
-        let pack_file = PackFile::open(root, self.registry.clone());
+        let pack_file = PackFile::open_with_options(root, self.registry.clone(), self.open_options);
         self.publication_base = PublicationBase::PreserveEntries {
             expected_revision: pack_file.revision(),
         };

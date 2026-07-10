@@ -11,7 +11,7 @@ use napi::Result;
 use napi_derive::napi;
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use unpack_core::{
-    Asset, BuildDependency, CacheIdleReason, CacheOptions, Compiler, CompilerOptions, Entry,
+    Asset, BuildDependency, CacheCompression, CacheIdleReason, CacheOptions, Compiler, CompilerOptions, Entry,
     Error as CoreError, InfrastructureLogEvent, InfrastructureLogLevel,
     InfrastructureLoggingOptions, SnapshotOptions, SnapshotPathPattern, SnapshotStrategy,
 };
@@ -77,6 +77,9 @@ pub struct NativeCacheOptions {
     pub automatic_build_dependencies: Vec<String>,
     #[napi(js_name = "maxAge")]
     pub max_age: Option<f64>,
+    pub compression: Option<String>,
+    #[napi(js_name = "allowCollectingMemory")]
+    pub allow_collecting_memory: Option<bool>,
     #[napi(js_name = "maxMemoryGenerations")]
     pub max_memory_generations: Option<f64>,
     #[napi(js_name = "idleTimeout")]
@@ -330,6 +333,17 @@ fn cache_options_from_native(options: NativeCacheOptions) -> Result<CacheOptions
                 .unwrap_or(std::time::Duration::MAX)
         };
     }
+    cache.compression = match options.compression.as_deref() {
+        None => CacheCompression::None,
+        Some("gzip") => CacheCompression::Gzip,
+        Some("brotli") => CacheCompression::Brotli,
+        Some(_) => {
+            return Err(napi::Error::from_reason(
+                "options.cache.compression must be false, 'gzip', or 'brotli'",
+            ));
+        }
+    };
+    cache.allow_collecting_memory = options.allow_collecting_memory.unwrap_or(false);
     cache.idle_timeout = options.idle_timeout;
     cache.idle_timeout_for_initial_store = options.idle_timeout_for_initial_store;
     cache.idle_timeout_after_large_changes = options.idle_timeout_after_large_changes;

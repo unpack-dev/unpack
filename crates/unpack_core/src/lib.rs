@@ -19,7 +19,7 @@ mod rendered_source;
 mod resolver;
 mod snapshot;
 
-pub use build_cache::{BuildDependency, CacheKind, CacheOptions};
+pub use build_cache::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
 pub use chunk_graph::{
     AsyncBlockOrigin, Chunk, ChunkGraph, ChunkGroup, ChunkGroupId, ChunkGroupKind, ChunkId,
 };

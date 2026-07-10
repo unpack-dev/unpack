@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
@@ -189,7 +189,7 @@ test("explicit filesystem cache paths must be absolute and cacheLocation takes p
   }
 });
 
-test("validates inert filesystem fields and active maxAge", async () => {
+test("validates inert fields and active persistent cache controls", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 'inert-options';"
   });
@@ -222,6 +222,14 @@ test("validates inert filesystem fields and active maxAge", async () => {
       createCompiler({ type: "filesystem", maxAge: Number.NaN }),
       /options\.cache\.maxAge must be a non-negative number/
     );
+    assert.throws(
+      createCompiler({ type: "filesystem", compression: true }),
+      /options\.cache\.compression must be false, 'gzip', or 'brotli'/
+    );
+    assert.throws(
+      createCompiler({ type: "filesystem", allowCollectingMemory: "yes" }),
+      /options\.cache\.allowCollectingMemory must be a boolean/
+    );
     for (const [label, maxAge] of [
       ["fractional", 1.5],
       ["beyond-safe-integer", Number.MAX_SAFE_INTEGER + 1]
@@ -233,6 +241,32 @@ test("validates inert filesystem fields and active maxAge", async () => {
       })();
       await closeCompiler(accepted);
     }
+    for (const [label, compression] of [
+      ["uncompressed", false],
+      ["gzip", "gzip"],
+      ["brotli", "brotli"]
+    ] as const) {
+      const compressedLocation = join(cacheLocation, label);
+      const accepted = createCompiler({
+        type: "filesystem",
+        cacheLocation: compressedLocation,
+        compression,
+        allowCollectingMemory: false
+      })();
+      assert.equal((await runCompiler(accepted)).err, null);
+      await closeCompiler(accepted);
+      const suffix =
+        compression === "gzip"
+          ? ".bin.gz"
+          : compression === "brotli"
+            ? ".bin.br"
+            : ".bin";
+      assert.ok(
+        (await readdir(join(compressedLocation, "content"))).every((file) =>
+          file.endsWith(suffix)
+        )
+      );
+    }
 
     const compiler = unpack({
       context: fixture,
@@ -242,6 +276,8 @@ test("validates inert filesystem fields and active maxAge", async () => {
         type: "filesystem",
         cacheLocation,
         maxAge: Number.POSITIVE_INFINITY,
+        compression: "gzip",
+        allowCollectingMemory: true,
         hashAlgorithm: "not-a-runtime-hash",
         managedPaths: [fixture, /node_modules/g],
         immutablePaths: [/immutable/y]
@@ -252,6 +288,11 @@ test("validates inert filesystem fields and active maxAge", async () => {
 
     assert.equal(result.err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /inert-options/);
+    assert.ok(
+      (await readdir(join(cacheLocation, "content"))).every((file) =>
+        file.endsWith(".bin.gz")
+      )
+    );
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

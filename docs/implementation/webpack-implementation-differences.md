@@ -105,20 +105,22 @@ Necessity:
 Unpack emits webpack-shaped Node/CommonJS output with a fixed module table,
 module cache, core `__webpack_require__`, and CommonJS entry startup. Generated
 code declares Runtime Requirements; a fixed-point resolver selects ordered
-Runtime Modules for export getters, own-property checks, and namespace marking.
-Static-only Bundles therefore omit chunk ensure, filename lookup, handler, and
-Node loading code. Entrypoints with dynamic imports temporarily retain the
-legacy `__webpack_require__.e`, `__webpack_require__.f.require`,
-`__webpack_require__.u`, and require-based async chunk installation path. Source
-maps remain available for generated assets.
+Runtime Modules for export getters, own-property checks, namespace marking,
+chunk ensuring, filename lookup, add-only module-factory exposure, and cohesive
+Node require chunk loading. Static-only Bundles omit all asynchronous helpers.
+For runtime trees with loadable Async Chunks, the Node loader registers payload
+factories, executes optional payload runtime, then marks every payload chunk ID
+loaded; load and runtime failures leave installation retryable. Asset emission
+and filename lookup share one fixed id-based JavaScript filename resolver.
+Source maps remain available for generated assets.
 
 Webpack renders runtime behavior through runtime modules and runtime requirements. Its Node require chunk loading module computes output paths, conditions loading on chunk type, handles installed chunk state, supports optional on-chunk-load hooks, external install hooks, HMR, base URI, and generated filename templates.
 
 Necessity:
 
 - Starting with fixed Node require chunk loading is intentional and covered by ADR `0032`.
-- Runtime Requirements now drive the implemented static Runtime Modules. The
-  legacy asynchronous runtime remains a staged migration gap.
+- Runtime Requirements drive both static helpers and the implemented Node
+  require Chunk Loading Runtime; the legacy monolithic async path is removed.
 - Browser JSONP, ESM chunk loading, HMR, public path, chunk filename templates, and external chunk installation are future target features, not current requirements.
 
 ## ESM code generation

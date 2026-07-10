@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{ChunkGraph, ChunkId};
+use crate::{
+    ChunkGraph, ChunkId, id_assignment::RenderId, output_filename::resolve_chunk_filename,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum RuntimeRequirement {
@@ -11,7 +13,9 @@ pub(crate) enum RuntimeRequirement {
     HasOwnProperty,
     MakeNamespaceObject,
     EnsureChunk,
+    EnsureChunkHandlers,
     GetChunkFilename,
+    ModuleFactoriesAddOnly,
     ReturnExportsFromRuntime,
 }
 
@@ -25,6 +29,7 @@ impl RuntimeRequirements {
         self.requirements.insert(requirement)
     }
 
+    #[cfg(test)]
     pub(crate) fn contains(&self, requirement: RuntimeRequirement) -> bool {
         self.requirements.contains(&requirement)
     }
@@ -56,8 +61,12 @@ const RUNTIME_MODULE_STAGE_ORDER: [RuntimeModuleStage; 4] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimeModule {
     DefinePropertyGetters,
+    EnsureChunk,
+    GetChunkFilename,
     HasOwnProperty,
     MakeNamespaceObject,
+    ModuleFactoriesAddOnly,
+    RequireChunkLoading,
 }
 
 pub(crate) struct RuntimeModuleContext<'a> {
@@ -69,23 +78,40 @@ impl RuntimeModule {
     pub(crate) fn identifier(self) -> &'static str {
         match self {
             Self::DefinePropertyGetters => "webpack/runtime/define property getters",
+            Self::EnsureChunk => "webpack/runtime/ensure chunk",
+            Self::GetChunkFilename => "webpack/runtime/get javascript chunk filename",
             Self::HasOwnProperty => "webpack/runtime/hasOwnProperty shorthand",
             Self::MakeNamespaceObject => "webpack/runtime/make namespace object",
+            Self::ModuleFactoriesAddOnly => "webpack/runtime/module factories add only",
+            Self::RequireChunkLoading => "webpack/runtime/require chunk loading",
         }
     }
 
     pub(crate) fn stage(self) -> RuntimeModuleStage {
         match self {
-            Self::HasOwnProperty | Self::DefinePropertyGetters | Self::MakeNamespaceObject => {
-                RuntimeModuleStage::Normal
-            }
+            Self::DefinePropertyGetters
+            | Self::GetChunkFilename
+            | Self::HasOwnProperty
+            | Self::MakeNamespaceObject
+            | Self::ModuleFactoriesAddOnly => RuntimeModuleStage::Normal,
+            Self::EnsureChunk => RuntimeModuleStage::Basic,
+            Self::RequireChunkLoading => RuntimeModuleStage::Attach,
         }
     }
 
     fn prerequisites(self) -> &'static [RuntimeRequirement] {
         match self {
             Self::DefinePropertyGetters => &[RuntimeRequirement::HasOwnProperty],
-            Self::HasOwnProperty | Self::MakeNamespaceObject => &[],
+            Self::EnsureChunk => &[RuntimeRequirement::EnsureChunkHandlers],
+            Self::RequireChunkLoading => &[
+                RuntimeRequirement::GetChunkFilename,
+                RuntimeRequirement::ModuleFactoriesAddOnly,
+                RuntimeRequirement::HasOwnProperty,
+            ],
+            Self::GetChunkFilename
+            | Self::HasOwnProperty
+            | Self::MakeNamespaceObject
+            | Self::ModuleFactoriesAddOnly => &[],
         }
     }
 
@@ -115,6 +141,57 @@ impl RuntimeModule {
 };
 "#
             .to_string(),
+            Self::EnsureChunk => r#"__webpack_require__.f = {};
+__webpack_require__.e = function(chunkId) {
+  return Promise.all(Object.keys(__webpack_require__.f).reduce(function(promises, key) {
+    __webpack_require__.f[key](chunkId, promises);
+    return promises;
+  }, []));
+};
+"#
+            .to_string(),
+            Self::GetChunkFilename => {
+                let filename_map = render_chunk_filename_map(context.chunk_graph);
+                format!(
+                    "__webpack_require__.u = function(chunkId) {{\n  return ({{{filename_map}}})[chunkId];\n}};\n"
+                )
+            }
+            Self::ModuleFactoriesAddOnly => {
+                "__webpack_require__.m = __webpack_modules__;\n".to_string()
+            }
+            Self::RequireChunkLoading => {
+                let runtime_chunk = context
+                    .chunk_graph
+                    .chunk(context.runtime_chunk)
+                    .expect("Require Chunk Loading must reference an existing runtime Chunk");
+                let chunk_id = json_render_id(runtime_chunk.render_id());
+                format!(
+                    r#"var installedChunks = {{
+  {chunk_id}: 1
+}};
+var installChunk = function(chunk) {{
+  var moreModules = chunk.modules, chunkIds = chunk.ids, runtime = chunk.runtime;
+  for(var moduleId in moreModules) {{
+    if(__webpack_require__.o(moreModules, moduleId)) {{
+      __webpack_require__.m[moduleId] = moreModules[moduleId];
+    }}
+  }}
+  if(runtime) runtime(__webpack_require__);
+  for(var i = 0; i < chunkIds.length; i++) {{
+    installedChunks[chunkIds[i]] = 1;
+  }}
+}};
+__webpack_require__.f.require = function(chunkId, promises) {{
+  if(!installedChunks[chunkId]) {{
+    var installedChunk = require("./" + __webpack_require__.u(chunkId));
+    if(!installedChunks[chunkId]) {{
+      installChunk(installedChunk);
+    }}
+  }}
+}};
+"#
+                )
+            }
         }
     }
 }
@@ -131,11 +208,15 @@ pub(crate) fn resolve_runtime_modules(
             RuntimeRequirement::DefinePropertyGetters => Some(RuntimeModule::DefinePropertyGetters),
             RuntimeRequirement::HasOwnProperty => Some(RuntimeModule::HasOwnProperty),
             RuntimeRequirement::MakeNamespaceObject => Some(RuntimeModule::MakeNamespaceObject),
+            RuntimeRequirement::EnsureChunk => Some(RuntimeModule::EnsureChunk),
+            RuntimeRequirement::EnsureChunkHandlers => Some(RuntimeModule::RequireChunkLoading),
+            RuntimeRequirement::GetChunkFilename => Some(RuntimeModule::GetChunkFilename),
+            RuntimeRequirement::ModuleFactoriesAddOnly => {
+                Some(RuntimeModule::ModuleFactoriesAddOnly)
+            }
             RuntimeRequirement::ModuleFactories
             | RuntimeRequirement::ModuleCache
             | RuntimeRequirement::Require
-            | RuntimeRequirement::EnsureChunk
-            | RuntimeRequirement::GetChunkFilename
             | RuntimeRequirement::ReturnExportsFromRuntime => None,
         };
         let Some(module) = module else {
@@ -158,6 +239,33 @@ pub(crate) fn resolve_runtime_modules(
         (stage, module.identifier())
     });
     (requirements, modules)
+}
+
+fn render_chunk_filename_map(chunk_graph: &ChunkGraph) -> String {
+    let mut entries = BTreeMap::new();
+    for chunk in chunk_graph.chunks() {
+        entries.insert(chunk.render_id().clone(), resolve_chunk_filename(chunk));
+    }
+    entries
+        .into_iter()
+        .map(|(chunk_id, filename)| {
+            format!(
+                "{}: {}",
+                json_render_id(&chunk_id),
+                simd_json::to_string(&filename)
+                    .expect("Chunk filename must serialize as a JavaScript string")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn json_render_id(render_id: &RenderId) -> String {
+    match render_id {
+        RenderId::String(value) => simd_json::to_string(value)
+            .expect("Chunk Render ID must serialize as a JavaScript string"),
+        RenderId::Number(value) => value.to_string(),
+    }
 }
 
 fn insert_runtime_module(
@@ -207,6 +315,31 @@ mod tests {
                 .iter()
                 .all(|module| module.stage() == RuntimeModuleStage::Normal)
         );
+    }
+
+    #[test]
+    fn chunk_ensure_selects_the_complete_node_require_runtime_in_stage_order() {
+        let mut direct = RuntimeRequirements::default();
+        direct.insert(RuntimeRequirement::EnsureChunk);
+
+        let (closed, modules) = resolve_runtime_modules(&direct);
+
+        assert!(closed.contains(RuntimeRequirement::EnsureChunkHandlers));
+        assert!(closed.contains(RuntimeRequirement::GetChunkFilename));
+        assert!(closed.contains(RuntimeRequirement::ModuleFactoriesAddOnly));
+        assert!(closed.contains(RuntimeRequirement::HasOwnProperty));
+        assert_eq!(
+            modules,
+            [
+                RuntimeModule::GetChunkFilename,
+                RuntimeModule::HasOwnProperty,
+                RuntimeModule::ModuleFactoriesAddOnly,
+                RuntimeModule::EnsureChunk,
+                RuntimeModule::RequireChunkLoading,
+            ]
+        );
+        assert_eq!(modules[3].stage(), RuntimeModuleStage::Basic);
+        assert_eq!(modules[4].stage(), RuntimeModuleStage::Attach);
     }
 
     #[test]

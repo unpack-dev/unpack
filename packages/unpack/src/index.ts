@@ -158,6 +158,8 @@ interface NormalizedCacheOptions {
   maxMemoryGenerations?: number;
   automaticBuildDependencies: string[];
   maxAge?: number;
+  compression?: "gzip" | "brotli";
+  allowCollectingMemory?: boolean;
   idleTimeout?: number;
   idleTimeoutForInitialStore?: number;
   idleTimeoutAfterLargeChanges?: number;
@@ -984,6 +986,8 @@ function normalizeCacheOptions(
       "buildDependencies",
       "maxMemoryGenerations",
       "maxAge",
+      "compression",
+      "allowCollectingMemory",
       "idleTimeout",
       "idleTimeoutForInitialStore",
       "idleTimeoutAfterLargeChanges",
@@ -1068,6 +1072,12 @@ function normalizeCacheOptions(
     automaticBuildDependencies: [...unpackToolchainBuildDependencies],
     ...(maxMemoryGenerations === undefined ? {} : { maxMemoryGenerations }),
     ...(filesystemCache.maxAge === undefined ? {} : { maxAge: assertNonNegativeNumber(filesystemCache.maxAge, "options.cache.maxAge") }),
+    ...(filesystemCache.compression === undefined || filesystemCache.compression === false
+      ? {}
+      : { compression: assertCacheCompression(filesystemCache.compression) }),
+    ...(filesystemCache.allowCollectingMemory === undefined
+      ? {}
+      : { allowCollectingMemory: assertBoolean(filesystemCache.allowCollectingMemory, "options.cache.allowCollectingMemory") }),
     ...(filesystemCache.idleTimeout === undefined
       ? {}
       : {
@@ -1682,6 +1692,11 @@ function assertNonNegativeNumber(value: unknown, name: string): number {
     throw new TypeError(`${name} must be a non-negative number`);
   }
   return value;
+}
+
+function assertCacheCompression(value: unknown): "gzip" | "brotli" {
+  if (value === "gzip" || value === "brotli") return value;
+  throw new TypeError("options.cache.compression must be false, 'gzip', or 'brotli'");
 }
 function normalizeGenerationLimit(
   value: unknown,

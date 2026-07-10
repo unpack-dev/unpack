@@ -4744,6 +4744,7 @@ fn publish_batch(
     if fault == PublishFault::AfterContentCommit {
         return Err(injected_publish_error("after content commit"));
     }
+    force_test_process_termination(PublishFault::AfterContentCommit);
 
     let index = PackFileIndex {
         revision,
@@ -4757,6 +4758,7 @@ fn publish_batch(
         let _ = fs::remove_file(&temporary_index);
         return Err(injected_publish_error("before index replacement"));
     }
+    force_test_process_termination(PublishFault::BeforeIndexReplace);
     if let Err(error) = fs::rename(&temporary_index, root.join(INDEX_FILE)) {
         let _ = fs::remove_file(&temporary_index);
         return Err(error);
@@ -4851,6 +4853,35 @@ fn encode_content_pack(content: Vec<u8>, compression: PackFileCompression) -> io
         ));
     }
     Ok(encoded)
+}
+
+/// Stops a test process at a point where a real process interruption must not
+/// expose an incomplete revision. This deliberately lives below the compiler
+/// lifecycle: the public acceptance suite needs to exercise an abrupt process
+/// death, rather than a handled flush error.
+///
+/// It is dormant unless the test-only environment variable is set. Normal
+/// users have no configuration surface for this hook.
+fn force_test_process_termination(point: PublishFault) {
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = point;
+        return;
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let requested_point = match point {
+            PublishFault::None => return,
+            PublishFault::AfterContentCommit => "after-content-commit",
+            PublishFault::BeforeIndexReplace => "before-index-replace",
+        };
+        if std::env::var_os("UNPACK_TEST_PERSISTENT_CACHE_CRASH_AT").as_deref()
+            == Some(std::ffi::OsStr::new(requested_point))
+        {
+            std::process::abort();
+        }
+    }
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {

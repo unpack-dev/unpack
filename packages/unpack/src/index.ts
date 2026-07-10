@@ -1,8 +1,9 @@
 import { createRequire } from "node:module";
 import { statSync, watch as watchFileSystem } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 export interface UnpackOptions {
+  name?: string;
   context?: string;
   mode?: Mode;
   entry: string | Record<string, string>;
@@ -19,17 +20,26 @@ export type Mode = "development" | "production" | "none";
 
 export type CacheOptions =
   | boolean
-  | {
-      type?: "memory" | "filesystem";
-      cacheDirectory?: string;
-      cacheLocation?: string;
-      name?: string;
-      version?: string;
-      buildDependencies?: Record<string, string[]>;
-      maxMemoryGenerations?: number;
-      idleTimeout?: number;
-      readonly?: boolean;
-    };
+  | MemoryCacheOptions
+  | FilesystemCacheOptions;
+
+export interface MemoryCacheOptions {
+  type: "memory";
+}
+
+export interface FilesystemCacheOptions {
+  type: "filesystem";
+  cacheDirectory?: string;
+  cacheLocation?: string;
+  name?: string;
+  version?: string;
+  buildDependencies?: Record<string, string[]>;
+  idleTimeout?: number;
+  readonly?: boolean;
+  hashAlgorithm?: string;
+  managedPaths?: SnapshotPathPattern[];
+  immutablePaths?: SnapshotPathPattern[];
+}
 
 export interface SnapshotOptions {
   module?: SnapshotStrategyOptions;
@@ -137,7 +147,6 @@ interface NormalizedCacheOptions {
   name?: string;
   version?: string;
   buildDependencies: NormalizedBuildDependency[];
-  maxMemoryGenerations?: number;
   idleTimeout?: number;
   readonly: boolean;
 }
@@ -814,6 +823,7 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     options,
     [
       "context",
+      "name",
       "mode",
       "entry",
       "output",
@@ -830,6 +840,8 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       ? process.cwd()
       : assertString(options.context, "options.context");
   const mode = options.mode === undefined ? "production" : assertMode(options.mode);
+  const name =
+    options.name === undefined ? undefined : assertString(options.name, "options.name");
   const normalizedContext = resolve(process.cwd(), context);
   const output = options.output ?? {};
   assertPlainObject(output, "options.output");
@@ -851,7 +863,7 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       options.sourcemap === undefined
         ? true
         : assertBoolean(options.sourcemap, "options.sourcemap"),
-    cache: normalizeCacheOptions(options.cache, normalizedContext),
+    cache: normalizeCacheOptions(options.cache, normalizedContext, mode, name),
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging)
   };
@@ -879,9 +891,19 @@ function normalizeEntry(entry: UnpackOptions["entry"]): NormalizedEntry[] {
 
 function normalizeCacheOptions(
   cache: CacheOptions | undefined,
-  context: string
+  context: string,
+  mode: Mode,
+  compilerName: string | undefined
 ): NormalizedCacheOptions {
-  if (cache === undefined || cache === true) {
+  if (cache === undefined) {
+    return {
+      type: mode === "development" ? "memory" : "disabled",
+      buildDependencies: [],
+      readonly: false
+    };
+  }
+
+  if (cache === true) {
     return {
       type: "memory",
       buildDependencies: [],
@@ -901,8 +923,28 @@ function normalizeCacheOptions(
     throw new TypeError("options.cache must be a boolean or an object");
   }
 
-  assertKnownKeys(
-    cache,
+  if (cache.type === undefined) {
+    throw new TypeError("options.cache.type is required");
+  }
+  const type = assertCacheType(cache.type);
+  const cacheRecord = cache as unknown as Record<string, unknown>;
+
+  if (type === "memory") {
+    assertCacheKeysForType(cacheRecord, ["type"], "memory");
+    return {
+      type: "memory",
+      buildDependencies: [],
+      readonly: false
+    };
+  }
+
+  if ((process.versions as NodeJS.ProcessVersions & { pnp?: string }).pnp !== undefined) {
+    throw new TypeError("Yarn Plug'n'Play is not supported by filesystem cache");
+  }
+
+  const filesystemCache = cache as FilesystemCacheOptions;
+  assertCacheKeysForType(
+    cacheRecord,
     [
       "type",
       "cacheDirectory",
@@ -910,60 +952,166 @@ function normalizeCacheOptions(
       "name",
       "version",
       "buildDependencies",
-      "maxMemoryGenerations",
       "idleTimeout",
-      "readonly"
+      "readonly",
+      "hashAlgorithm",
+      "managedPaths",
+      "immutablePaths"
     ],
-    "options.cache"
+    "filesystem"
   );
 
-  const type = cache.type === undefined ? "memory" : assertCacheType(cache.type);
+  if (filesystemCache.hashAlgorithm !== undefined) {
+    assertString(
+      filesystemCache.hashAlgorithm,
+      "options.cache.hashAlgorithm"
+    );
+  }
+  validateInertCachePathPatterns(
+    filesystemCache.managedPaths,
+    "options.cache.managedPaths"
+  );
+  validateInertCachePathPatterns(
+    filesystemCache.immutablePaths,
+    "options.cache.immutablePaths"
+  );
+
   const name =
-    cache.name === undefined ? undefined : assertNonEmptyString(cache.name, "options.cache.name");
+    filesystemCache.name === undefined
+      ? `${compilerName || "default"}-${mode}`
+      : assertString(filesystemCache.name, "options.cache.name");
   const cacheDirectory =
-    cache.cacheDirectory === undefined
-      ? type === "filesystem"
-        ? resolve(context, "node_modules/.cache/unpack")
-        : undefined
-      : normalizePath(cache.cacheDirectory, "options.cache.cacheDirectory", context);
+    filesystemCache.cacheDirectory === undefined
+      ? defaultFilesystemCacheDirectory()
+      : normalizePath(
+          filesystemCache.cacheDirectory,
+          "options.cache.cacheDirectory",
+          context,
+          true
+        );
   const cacheLocation =
-    cache.cacheLocation === undefined
+    filesystemCache.cacheLocation === undefined
       ? type === "filesystem" && cacheDirectory
-        ? resolve(cacheDirectory, name ?? "default")
+        ? resolve(cacheDirectory, name)
         : undefined
-      : normalizePath(cache.cacheLocation, "options.cache.cacheLocation", context);
+      : normalizePath(
+          filesystemCache.cacheLocation,
+          "options.cache.cacheLocation",
+          context,
+          true
+        );
   const readonly =
-    cache.readonly === undefined
+    filesystemCache.readonly === undefined
       ? false
-      : assertBoolean(cache.readonly, "options.cache.readonly");
+      : assertBoolean(filesystemCache.readonly, "options.cache.readonly");
 
   return {
     type,
     ...(cacheDirectory === undefined ? {} : { cacheDirectory }),
     ...(cacheLocation === undefined ? {} : { cacheLocation }),
     ...(name === undefined ? {} : { name }),
-    ...(cache.version === undefined
-      ? {}
-      : { version: assertString(cache.version, "options.cache.version") }),
-    buildDependencies: normalizeBuildDependencies(cache.buildDependencies, context),
-    ...(cache.maxMemoryGenerations === undefined
+    ...(filesystemCache.version === undefined
       ? {}
       : {
-          maxMemoryGenerations: assertNonNegativeInteger(
-            cache.maxMemoryGenerations,
-            "options.cache.maxMemoryGenerations"
+          version: assertString(
+            filesystemCache.version,
+            "options.cache.version"
           )
         }),
-    ...(cache.idleTimeout === undefined
+    buildDependencies: normalizeBuildDependencies(
+      filesystemCache.buildDependencies,
+      context
+    ),
+    ...(filesystemCache.idleTimeout === undefined
       ? {}
       : {
           idleTimeout: assertNonNegativeInteger(
-            cache.idleTimeout,
+            filesystemCache.idleTimeout,
             "options.cache.idleTimeout"
           )
         }),
     readonly
   };
+}
+
+function defaultFilesystemCacheDirectory(): string {
+  const cwd = process.cwd();
+  let directory = cwd;
+
+  for (;;) {
+    try {
+      if (statSync(resolve(directory, "package.json")).isFile()) {
+        return resolve(directory, "node_modules/.cache/unpack");
+      }
+    } catch {
+      // Continue toward the filesystem root.
+    }
+
+    const parent = dirname(directory);
+    if (parent === directory) {
+      return resolve(cwd, ".cache/unpack");
+    }
+    directory = parent;
+  }
+}
+
+function validateInertCachePathPatterns(
+  patterns: unknown,
+  name: string
+): void {
+  if (patterns === undefined) {
+    return;
+  }
+  if (!Array.isArray(patterns)) {
+    throw new TypeError(`${name} must be an array`);
+  }
+
+  for (const [index, pattern] of patterns.entries()) {
+    const patternName = `${name}[${index}]`;
+    if (typeof pattern === "string") {
+      if (!isAbsolute(pattern)) {
+        throw new TypeError(`${patternName} must be an absolute path`);
+      }
+      continue;
+    }
+    if (!(pattern instanceof RegExp)) {
+      throw new TypeError(`${patternName} must be a string or RegExp`);
+    }
+  }
+}
+
+function assertCacheKeysForType(
+  cache: Record<string, unknown>,
+  allowedKeys: string[],
+  type: "memory" | "filesystem"
+): void {
+  const allowed = new Set(allowedKeys);
+  const key = Object.keys(cache).find((candidate) => !allowed.has(candidate));
+  if (key === undefined) {
+    return;
+  }
+
+  if (key === "cacheUnaffected" || key === "memoryCacheUnaffected" || key === "maxMemoryGenerations") {
+    throw new TypeError(`options.cache contains unsupported option '${key}'`);
+  }
+
+  const filesystemKeys = new Set([
+    "cacheDirectory",
+    "cacheLocation",
+    "name",
+    "version",
+    "buildDependencies",
+    "idleTimeout",
+    "readonly",
+    "hashAlgorithm",
+    "managedPaths",
+    "immutablePaths"
+  ]);
+  if (type === "memory" && filesystemKeys.has(key)) {
+    throw new TypeError(`options.cache.${key} is only valid for filesystem cache`);
+  }
+
+  throw new TypeError(`options.cache contains unknown option '${key}'`);
 }
 
 function normalizeBuildDependencies(
@@ -1094,9 +1242,6 @@ function normalizeSnapshotStrategy(
         : assertBoolean(strategy.timestamp, `${name}.timestamp`),
     hash: strategy.hash === undefined ? defaults.hash : assertBoolean(strategy.hash, `${name}.hash`)
   };
-  if (!normalized.timestamp && !normalized.hash) {
-    throw new TypeError(`${name} must enable timestamp or hash validation`);
-  }
   return normalized;
 }
 
@@ -1436,8 +1581,16 @@ function assertString(value: unknown, name: string): string {
   return value;
 }
 
-function normalizePath(value: unknown, name: string, context: string): string {
+function normalizePath(
+  value: unknown,
+  name: string,
+  context: string,
+  requireAbsolute = false
+): string {
   const path = assertString(value, name);
+  if (requireAbsolute && !isAbsolute(path)) {
+    throw new TypeError(`${name} must be an absolute path`);
+  }
   return isAbsolute(path) ? path : resolve(context, path);
 }
 

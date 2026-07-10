@@ -1,0 +1,3 @@
+# Use private webpack-shaped PackFile storage
+
+Unpack will replace JSON manifests and CBOR packs with an Unpack-private binary index and referenced content packs that support explicit codecs, lazy restoration, published Pack revisions, garbage collection, compaction, compression, and content-first index-last publication. This supersedes ADR 0082, ADR 0109's explicit-migration expectation, and ADR 0127's Serde-specific compatibility mechanism while retaining their private, non-webpack-interoperable schema boundary and ADR 0127's decision not to carry a separate global schema version. The replacement provides no legacy-format migration and will land atomically without an experimental flag, legacy reader, dual backend, or dual-write period.

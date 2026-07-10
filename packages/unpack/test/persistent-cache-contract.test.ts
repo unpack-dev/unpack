@@ -141,7 +141,7 @@ test("explicit filesystem cache paths must be absolute and cacheLocation takes p
   }
 });
 
-test("only the approved webpack cache fields are accepted as inert", async () => {
+test("validates inert filesystem fields and active maxAge", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 'inert-options';"
   });
@@ -167,9 +167,24 @@ test("only the approved webpack cache fields are accepted as inert", async () =>
       /options\.cache\.immutablePaths\[0\] must be an absolute path/
     );
     assert.throws(
-      createCompiler({ type: "filesystem", maxAge: 1 }),
-      /options\.cache contains unknown option 'maxAge'/
+      createCompiler({ type: "filesystem", maxAge: -1 }),
+      /options\.cache\.maxAge must be a non-negative number/
     );
+    assert.throws(
+      createCompiler({ type: "filesystem", maxAge: Number.NaN }),
+      /options\.cache\.maxAge must be a non-negative number/
+    );
+    for (const [label, maxAge] of [
+      ["fractional", 1.5],
+      ["beyond-safe-integer", Number.MAX_SAFE_INTEGER + 1]
+    ] as const) {
+      const accepted = createCompiler({
+        type: "filesystem",
+        cacheLocation: join(cacheLocation, label),
+        maxAge
+      })();
+      await closeCompiler(accepted);
+    }
 
     const compiler = unpack({
       context: fixture,
@@ -178,6 +193,7 @@ test("only the approved webpack cache fields are accepted as inert", async () =>
       cache: {
         type: "filesystem",
         cacheLocation,
+        maxAge: Number.POSITIVE_INFINITY,
         hashAlgorithm: "not-a-runtime-hash",
         managedPaths: [fixture, /node_modules/g],
         immutablePaths: [/immutable/y]

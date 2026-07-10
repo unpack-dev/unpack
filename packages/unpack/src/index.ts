@@ -34,6 +34,7 @@ export interface FilesystemCacheOptions {
   name?: string;
   version?: string;
   buildDependencies?: Record<string, string[]>;
+  maxAge?: number;
   idleTimeout?: number;
   idleTimeoutForInitialStore?: number;
   idleTimeoutAfterLargeChanges?: number;
@@ -149,6 +150,7 @@ interface NormalizedCacheOptions {
   name?: string;
   version?: string;
   buildDependencies: NormalizedBuildDependency[];
+  maxAge?: number;
   idleTimeout?: number;
   idleTimeoutForInitialStore?: number;
   idleTimeoutAfterLargeChanges?: number;
@@ -920,6 +922,7 @@ function normalizeCacheOptions(
       "name",
       "version",
       "buildDependencies",
+      "maxAge",
       "idleTimeout",
       "idleTimeoutForInitialStore",
       "idleTimeoutAfterLargeChanges",
@@ -992,13 +995,22 @@ function normalizeCacheOptions(
       filesystemCache.buildDependencies,
       context
     ),
-    idleTimeout:
-      filesystemCache.idleTimeout === undefined
-        ? 60_000
-        : assertNonNegativeInteger(
+    ...(filesystemCache.maxAge === undefined
+      ? {}
+      : {
+          maxAge: assertNonNegativeNumber(
+            filesystemCache.maxAge,
+            "options.cache.maxAge"
+          )
+        }),
+    ...(filesystemCache.idleTimeout === undefined
+      ? {}
+      : {
+          idleTimeout: assertNonNegativeInteger(
             filesystemCache.idleTimeout,
             "options.cache.idleTimeout"
           ),
+        }),
     idleTimeoutForInitialStore:
       filesystemCache.idleTimeoutForInitialStore === undefined
         ? 5_000
@@ -1084,6 +1096,7 @@ function assertCacheKeysForType(
     "name",
     "version",
     "buildDependencies",
+    "maxAge",
     "idleTimeout",
     "readonly",
     "hashAlgorithm",
@@ -1605,6 +1618,13 @@ function assertNonNegativeInteger(value: unknown, name: string): number {
     value < 0
   ) {
     throw new TypeError(`${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function assertNonNegativeNumber(value: unknown, name: string): number {
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative number`);
   }
   return value;
 }

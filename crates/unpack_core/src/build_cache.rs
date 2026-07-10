@@ -5,17 +5,22 @@ use std::{
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Duration,
 };
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     ModuleIdentity, SnapshotOptions, SnapshotStrategy,
     cache_hash::stable_hash,
     code_generation_record::CodeGenerationResult,
     pack_file::{
-        AssetRenderRecordCodec, AssetRenderRecordDto, CodeGenerationRecordCodec,
-        CodeGenerationRecordDto, CodecRegistry, ModuleBuildRecordCodec, ModuleBuildRecordDto,
-        PackFile, PackFileAddress, PackFileETag, PackFileGuardDto, PackFileWriteBatch,
-        PublicationBase, ResolveRecordCodec, ResolveRecordDto, SnapshotDto,
+        AccessStamp, AssetRenderRecordCodec, AssetRenderRecordDto, CodeGenerationRecordCodec,
+        CodeGenerationRecordDto, CodecRegistry, DEFAULT_MAX_AGE, ModuleBuildRecordCodec,
+        ModuleBuildRecordDto, PackFile, PackFileAddress, PackFileETag, PackFileGuardDto,
+        PackFileRetention, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
+        ResolveRecordDto, SnapshotDto,
     },
     parser::ParsedModule,
     rendered_source::RenderedSource,
@@ -153,6 +158,7 @@ pub struct CacheOptions {
     pub name: Option<String>,
     pub version: Option<String>,
     pub build_dependencies: Vec<BuildDependency>,
+    pub max_age: Duration,
     pub max_memory_generations: Option<u32>,
     pub idle_timeout: Option<u32>,
     pub idle_timeout_for_initial_store: Option<u32>,
@@ -175,6 +181,7 @@ impl CacheOptions {
             name: None,
             version: None,
             build_dependencies: Vec::new(),
+            max_age: DEFAULT_MAX_AGE,
             max_memory_generations: None,
             idle_timeout: None,
             idle_timeout_for_initial_store: None,
@@ -191,6 +198,7 @@ impl CacheOptions {
             name: None,
             version: None,
             build_dependencies: Vec::new(),
+            max_age: DEFAULT_MAX_AGE,
             max_memory_generations: None,
             idle_timeout: None,
             idle_timeout_for_initial_store: None,
@@ -207,6 +215,7 @@ impl CacheOptions {
             name: None,
             version: None,
             build_dependencies: Vec::new(),
+            max_age: DEFAULT_MAX_AGE,
             max_memory_generations: None,
             idle_timeout: Some(60_000),
             idle_timeout_for_initial_store: Some(5_000),
@@ -239,6 +248,20 @@ struct BuildCacheInner {
     persistent_guard_error: Option<String>,
     #[cfg(test)]
     publish_barrier: Option<PublishBarrier>,
+    clock: Arc<dyn CacheClock>,
+}
+
+trait CacheClock: fmt::Debug + Send + Sync {
+    fn now(&self) -> AccessStamp;
+}
+
+#[derive(Debug)]
+struct SystemCacheClock;
+
+impl CacheClock for SystemCacheClock {
+    fn now(&self) -> AccessStamp {
+        AccessStamp::now()
+    }
 }
 
 #[cfg(test)]
@@ -248,12 +271,38 @@ struct PublishBarrier {
     release: Arc<std::sync::Barrier>,
 }
 
+#[cfg(test)]
+struct ManualCacheClock {
+    now_millis: AtomicU64,
+}
+
+#[cfg(test)]
+impl ManualCacheClock {
+    fn at_millis(now_millis: u64) -> Self {
+        Self {
+            now_millis: AtomicU64::new(now_millis),
+        }
+    }
+
+    fn set_millis(&self, now_millis: u64) {
+        self.now_millis.store(now_millis, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+impl CacheClock for ManualCacheClock {
+    fn now(&self) -> AccessStamp {
+        AccessStamp::from_millis(self.now_millis.load(Ordering::SeqCst))
+    }
+}
+
 impl BuildCacheInner {
     fn new(
         options: &CacheOptions,
         file_system_info: &FileSystemInfo,
         build_dependency_snapshot_strategy: SnapshotStrategy,
         resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+        clock: Arc<dyn CacheClock>,
     ) -> Self {
         let cache = Cache::from_options(
             options,
@@ -271,6 +320,7 @@ impl BuildCacheInner {
             persistent_guard_error: None,
             #[cfg(test)]
             publish_barrier: None,
+            clock,
         }
     }
 }
@@ -330,7 +380,20 @@ impl fmt::Debug for CacheEntry {
 trait CacheLayer: fmt::Debug + Send + Sync {
     fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry>;
     fn store(&mut self, address: CacheAddress, entry: CacheEntry);
-    fn publish(&mut self, _guard: &PackFileGuardDto) -> io::Result<()> {
+    fn touch(
+        &mut self,
+        _address: &CacheAddress,
+        _etag: Option<&CacheETag>,
+        _stamp: AccessStamp,
+    ) -> bool {
+        false
+    }
+    fn publish(
+        &mut self,
+        _guard: &PackFileGuardDto,
+        _stamp: AccessStamp,
+        _max_age: Duration,
+    ) -> io::Result<()> {
         Ok(())
     }
     fn has_publication(&self) -> bool {
@@ -425,12 +488,20 @@ impl PackFileCacheLayer {
         }
     }
 
-    fn publish(&mut self, guard: PackFileGuardDto) -> io::Result<()> {
+    fn publish(
+        &mut self,
+        guard: PackFileGuardDto,
+        stamp: AccessStamp,
+        max_age: Duration,
+    ) -> io::Result<()> {
         let Some(root) = self.root.as_ref() else {
             self.pending.clear();
             return Ok(());
         };
         let mut batch = PackFileWriteBatch::new();
+        if let Some(pack_file) = &self.pack_file {
+            pack_file.copy_access_updates_to(&mut batch);
+        }
         for (address, entry) in &self.pending {
             let pack_address = address.to_pack_file_address();
             let pack_etag = entry.etag.as_ref().map(CacheETag::to_pack_file_etag);
@@ -477,7 +548,13 @@ impl PackFileCacheLayer {
                 }
             }
         }
-        PackFile::publish_batch(root, Some(guard), self.publication_base, batch)?;
+        PackFile::publish_batch_with_retention(
+            root,
+            Some(guard),
+            self.publication_base,
+            batch,
+            PackFileRetention::new(stamp, max_age),
+        )?;
         self.pending.clear();
         let pack_file = PackFile::open(root, self.registry.clone());
         self.publication_base = PublicationBase::PreserveEntries {
@@ -551,8 +628,29 @@ impl CacheLayer for PackFileCacheLayer {
         self.pending.insert(address, entry);
     }
 
-    fn publish(&mut self, guard: &PackFileGuardDto) -> io::Result<()> {
-        PackFileCacheLayer::publish(self, guard.clone())
+    fn touch(
+        &mut self,
+        address: &CacheAddress,
+        etag: Option<&CacheETag>,
+        stamp: AccessStamp,
+    ) -> bool {
+        if !self.active {
+            return false;
+        }
+        let pack_address = address.to_pack_file_address();
+        let pack_etag = etag.map(CacheETag::to_pack_file_etag);
+        self.pack_file
+            .as_mut()
+            .is_some_and(|pack_file| pack_file.touch(&pack_address, pack_etag.as_ref(), stamp))
+    }
+
+    fn publish(
+        &mut self,
+        guard: &PackFileGuardDto,
+        stamp: AccessStamp,
+        max_age: Duration,
+    ) -> io::Result<()> {
+        PackFileCacheLayer::publish(self, guard.clone(), stamp, max_age)
     }
 
     fn has_publication(&self) -> bool {
@@ -629,7 +727,8 @@ impl Cache {
         family: CacheItemFamily,
         address: &CacheAddress,
         etag: Option<&CacheETag>,
-    ) -> Option<Arc<V>>
+        stamp: AccessStamp,
+    ) -> (Option<Arc<V>>, bool)
     where
         V: Send + Sync + 'static,
     {
@@ -651,11 +750,20 @@ impl Cache {
                 self.work.for_family_mut(family).restores += 1;
             }
             self.work.for_family_mut(family).hits += 1;
-            return Some(value);
+            let mut persistent_access_changed = false;
+            for slot in self
+                .layers
+                .iter_mut()
+                .filter(|slot| slot.kind == CacheLayerKind::Persistent)
+            {
+                let touched = slot.layer.touch(address, etag, stamp);
+                persistent_access_changed |= touched && slot.writable;
+            }
+            return (Some(value), persistent_access_changed);
         }
 
         self.work.for_family_mut(family).misses += 1;
-        None
+        (None, false)
     }
 
     fn store<V>(
@@ -706,7 +814,12 @@ impl Cache {
         self.work
     }
 
-    fn publish_persistent(&mut self, guard: PackFileGuardDto) -> io::Result<()> {
+    fn publish_persistent(
+        &mut self,
+        guard: PackFileGuardDto,
+        stamp: AccessStamp,
+        max_age: Duration,
+    ) -> io::Result<()> {
         let Some(slot) = self
             .layers
             .iter_mut()
@@ -714,7 +827,7 @@ impl Cache {
         else {
             return Ok(());
         };
-        slot.layer.publish(&guard)
+        slot.layer.publish(&guard, stamp, max_age)
     }
 
     fn has_persistent_publication(&self) -> bool {
@@ -960,6 +1073,26 @@ impl ModuleBuildRecord {
 
 impl BuildCache {
     pub(crate) fn new(options: CacheOptions, snapshot_options: SnapshotOptions) -> Self {
+        Self::new_with_clock_inner(options, snapshot_options, Arc::new(SystemCacheClock))
+    }
+
+    #[cfg(test)]
+    fn new_with_clock<C>(
+        options: CacheOptions,
+        snapshot_options: SnapshotOptions,
+        clock: Arc<C>,
+    ) -> Self
+    where
+        C: CacheClock + 'static,
+    {
+        Self::new_with_clock_inner(options, snapshot_options, clock)
+    }
+
+    fn new_with_clock_inner(
+        options: CacheOptions,
+        snapshot_options: SnapshotOptions,
+        clock: Arc<dyn CacheClock>,
+    ) -> Self {
         let build_dependency_snapshot_strategy = snapshot_options.build_dependencies;
         let resolve_build_dependency_snapshot_strategy =
             snapshot_options.resolve_build_dependencies;
@@ -969,6 +1102,7 @@ impl BuildCache {
             &file_system_info,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
+            clock,
         );
         Self {
             options,
@@ -1074,7 +1208,10 @@ impl BuildCache {
                 "Build Dependency state was not stored before cache publication",
             )
         })?;
-        inner.cache.publish_persistent(guard)?;
+        let stamp = inner.clock.now();
+        inner
+            .cache
+            .publish_persistent(guard, stamp, self.options.max_age)?;
         inner.published_generation = inner.published_generation.max(target_generation);
         inner.initial_store_pending = false;
         Ok(())
@@ -1200,7 +1337,13 @@ where
             namespace: self.namespace,
             identifier: key.cache_identifier(),
         };
-        inner.cache.get(self.family, &address, etag)
+        let stamp = inner.clock.now();
+        let (value, persistent_access_changed) =
+            inner.cache.get(self.family, &address, etag, stamp);
+        if persistent_access_changed {
+            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+        }
+        value
     }
 
     pub(crate) fn store(&self, key: K, etag: Option<CacheETag>, value: V) {
@@ -1335,6 +1478,20 @@ mod tests {
         assert_eq!(options.idle_timeout, Some(60_000));
         assert_eq!(options.idle_timeout_for_initial_store, Some(5_000));
         assert_eq!(options.idle_timeout_after_large_changes, Some(1_000));
+    }
+
+    #[test]
+    fn filesystem_max_age_defaults_to_sixty_days_and_exceeds_u32_milliseconds() {
+        let options = CacheOptions::filesystem();
+        assert_eq!(options.max_age, Duration::from_secs(60 * 24 * 60 * 60));
+        assert!(options.max_age.as_millis() > u128::from(u32::MAX));
+
+        let mut overridden = options;
+        overridden.max_age = Duration::from_millis(u64::from(u32::MAX) + 1);
+        assert_eq!(
+            overridden.max_age,
+            Duration::from_millis(u64::from(u32::MAX) + 1)
+        );
     }
 
     #[test]
@@ -1507,6 +1664,79 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_hits_refresh_persistent_access_before_max_age_gc()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let resource = temp.path().join("src/dep.js");
+        write(&resource, "export const value = 1;")?;
+        let file_system_info = FileSystemInfo::new();
+        let record = ResolveRecord::new(
+            ModuleIdentity::new(resource.clone()),
+            resource.clone(),
+            BTreeSet::from([resource]),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            &file_system_info,
+            SnapshotStrategy::timestamp(),
+        )
+        .await?;
+        let first_key = ResolveRequest::new(temp.path(), "./first");
+        let recent_key = ResolveRequest::new(temp.path(), "./recent");
+        let clock = Arc::new(ManualCacheClock::at_millis(1_000));
+        let mut options = CacheOptions::filesystem();
+        options.cache_location = Some(temp.path().join("cache"));
+        options.max_age = Duration::from_millis(100);
+
+        let first =
+            BuildCache::new_with_clock(options.clone(), SnapshotOptions::default(), clock.clone());
+        first
+            .normal_module_factory()
+            .store(first_key.clone(), None, record.clone());
+        first.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 1);
+
+        clock.set_millis(1_050);
+        let second =
+            BuildCache::new_with_clock(options.clone(), SnapshotOptions::default(), clock.clone());
+        let facade = second.normal_module_factory();
+        assert!(facade.get(&first_key, None).is_some());
+        second.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 2);
+
+        clock.set_millis(1_120);
+        assert!(facade.get(&first_key, None).is_some());
+        second.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 3);
+
+        clock.set_millis(1_221);
+        facade.store(recent_key.clone(), None, record.clone());
+        second.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 4);
+
+        clock.set_millis(1_222);
+        facade.store(recent_key.clone(), None, record);
+        second.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 5);
+
+        let third = BuildCache::new_with_clock(options, SnapshotOptions::default(), clock);
+        let facade = third.normal_module_factory();
+        assert!(facade.get(&first_key, None).is_none());
+        assert!(facade.get(&recent_key, None).is_some());
+        Ok(())
+    }
+
+    fn pack_revision(options: &CacheOptions) -> u64 {
+        PackFile::open(
+            options
+                .cache_location
+                .as_ref()
+                .expect("filesystem cache should have a location"),
+            persistent_codec_registry(),
+        )
+        .revision()
     }
 
     fn write(path: impl AsRef<Path>, source: &str) -> io::Result<()> {

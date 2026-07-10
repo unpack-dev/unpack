@@ -1194,6 +1194,7 @@ mod tests {
 
         let mut readonly_options = options;
         readonly_options.cache.readonly = true;
+        readonly_options.cache.max_age = std::time::Duration::ZERO;
         let readonly_compiler = Compiler::new(readonly_options);
         assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 0);
         assert_eq!(readonly_compiler.build_cache.stats().module_entries, 0);

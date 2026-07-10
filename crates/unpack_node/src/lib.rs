@@ -73,6 +73,8 @@ pub struct NativeCacheOptions {
     pub version: Option<String>,
     #[napi(js_name = "buildDependencies")]
     pub build_dependencies: Vec<NativeBuildDependency>,
+    #[napi(js_name = "maxAge")]
+    pub max_age: Option<f64>,
     #[napi(js_name = "maxMemoryGenerations")]
     pub max_memory_generations: Option<u32>,
     #[napi(js_name = "idleTimeout")]
@@ -275,7 +277,7 @@ impl NativeCompiler {
             .map(|entry| Entry::new(entry.name, entry.request))
             .collect::<Vec<_>>();
         let mut compiler_options = CompilerOptions::new(context, entries);
-        compiler_options.cache = cache_options_from_native(options.cache);
+        compiler_options.cache = cache_options_from_native(options.cache)?;
         compiler_options.snapshot = snapshot_options_from_native(options.snapshot)?;
         compiler_options.infrastructure_logging =
             infrastructure_logging_options_from_native(options.infrastructure_logging);
@@ -289,7 +291,7 @@ impl NativeCompiler {
     }
 }
 
-fn cache_options_from_native(options: NativeCacheOptions) -> CacheOptions {
+fn cache_options_from_native(options: NativeCacheOptions) -> Result<CacheOptions> {
     let mut cache = match options.cache_type.as_str() {
         "disabled" => CacheOptions::disabled(),
         "filesystem" => CacheOptions::filesystem(),
@@ -307,12 +309,25 @@ fn cache_options_from_native(options: NativeCacheOptions) -> CacheOptions {
             files: dependency.files.into_iter().map(PathBuf::from).collect(),
         })
         .collect();
+    if let Some(max_age) = options.max_age {
+        if max_age.is_nan() || max_age < 0.0 {
+            return Err(napi::Error::from_reason(
+                "options.cache.maxAge must be a non-negative number",
+            ));
+        }
+        cache.max_age = if max_age.is_infinite() {
+            std::time::Duration::MAX
+        } else {
+            std::time::Duration::try_from_secs_f64(max_age / 1_000.0)
+                .unwrap_or(std::time::Duration::MAX)
+        };
+    }
     cache.max_memory_generations = options.max_memory_generations;
     cache.idle_timeout = options.idle_timeout;
     cache.idle_timeout_for_initial_store = options.idle_timeout_for_initial_store;
     cache.idle_timeout_after_large_changes = options.idle_timeout_after_large_changes;
     cache.readonly = options.readonly.unwrap_or(false);
-    cache
+    Ok(cache)
 }
 
 fn snapshot_options_from_native(options: NativeSnapshotOptions) -> Result<SnapshotOptions> {

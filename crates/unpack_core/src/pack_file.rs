@@ -73,6 +73,9 @@ mod tests {
             }
         );
 
+        assert!(pack_file.touch(&first, Some(&etag), AccessStamp::from_millis(1_000)));
+        assert_eq!(pack_file.read_stats().content_reads, 0);
+
         assert!(
             pack_file
                 .get_resolve_record(&first, Some(&PackFileETag::new(b"stale")))
@@ -498,6 +501,151 @@ mod tests {
     }
 
     #[test]
+    fn max_age_gc_expires_only_old_unused_entries_after_the_strict_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let first = PackFileAddress::new("unpack/resolve", b"first");
+        let recent = PackFileAddress::new("unpack/resolve", b"recent");
+        let restored = PackFileAddress::new("unpack/resolve", b"restored");
+        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let mut clock = ManualClock::at_millis(1_000);
+        let max_age = Duration::from_millis(100);
+
+        let mut initial = PackFileWriteBatch::new();
+        initial.insert(&registry, first.clone(), None, resolve_record("first.js"))?;
+        initial.insert(&registry, recent.clone(), None, resolve_record("recent.js"))?;
+        initial.insert(
+            &registry,
+            restored.clone(),
+            None,
+            resolve_record("restored.js"),
+        )?;
+        PackFile::publish_batch_with_retention(
+            temp.path(),
+            None,
+            PublicationBase::ReplaceAll,
+            initial,
+            PackFileRetention::new(clock.stamp(), max_age),
+        )?;
+        let initial_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode initial retained index");
+        let shared_content = initial_index.entries[&first].content.file.clone();
+
+        clock.advance_millis(50);
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        assert!(opened.touch(&recent, None, clock.stamp()));
+        let mut second = PackFileWriteBatch::new();
+        opened.copy_access_updates_to(&mut second);
+        PackFile::publish_batch_with_retention(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            second,
+            PackFileRetention::new(clock.stamp(), max_age),
+        )?;
+        let second_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode second retained index");
+        assert_eq!(second_index.entries[&first].last_used_revision, 1);
+        assert_eq!(second_index.entries[&first].unused_since_revision, Some(2));
+        assert_eq!(second_index.entries[&recent].last_used_revision, 2);
+        assert_eq!(second_index.entries[&recent].unused_since_revision, None);
+        assert_eq!(
+            second_index.entries[&recent].last_access,
+            AccessStamp::from_millis(1_050)
+        );
+        assert_eq!(
+            second_index.entries[&restored].unused_since_revision,
+            Some(2)
+        );
+
+        clock.advance_millis(50);
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        assert!(opened.touch(&restored, None, clock.stamp()));
+        let mut boundary = PackFileWriteBatch::new();
+        opened.copy_access_updates_to(&mut boundary);
+        PackFile::publish_batch_with_retention(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            boundary,
+            PackFileRetention::new(clock.stamp(), max_age),
+        )?;
+        let boundary_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode boundary index");
+        assert_eq!(
+            boundary_index.entries[&first].unused_since_revision,
+            Some(2)
+        );
+        assert_eq!(
+            boundary_index.entries[&recent].unused_since_revision,
+            Some(3)
+        );
+        assert_eq!(boundary_index.entries[&restored].last_used_revision, 3);
+        assert_eq!(
+            boundary_index.entries[&restored].unused_since_revision,
+            None
+        );
+        assert_eq!(
+            PackFile::open(temp.path(), registry.clone()).entry_count(),
+            3,
+            "maxAge is strict: equality must retain the entry"
+        );
+
+        clock.advance_millis(1);
+        let opened = PackFile::open(temp.path(), registry.clone());
+        PackFile::publish_batch_with_retention(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            PackFileWriteBatch::new(),
+            PackFileRetention::new(clock.stamp(), max_age),
+        )?;
+
+        let mut retained = PackFile::open(temp.path(), registry);
+        assert!(retained.get_resolve_record(&first, None).is_none());
+        assert!(retained.get_resolve_record(&recent, None).is_some());
+        assert!(retained.get_resolve_record(&restored, None).is_some());
+        let retained_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode retained index");
+        assert!(!retained_index.entries.contains_key(&first));
+        assert_eq!(
+            retained_index.entries[&recent].content,
+            initial_index.entries[&recent].content
+        );
+        assert_eq!(
+            retained_index.entries[&restored].content,
+            initial_index.entries[&restored].content
+        );
+        assert!(temp.path().join(shared_content).exists());
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ManualClock {
+        now_millis: u64,
+    }
+
+    impl ManualClock {
+        fn at_millis(now_millis: u64) -> Self {
+            Self { now_millis }
+        }
+
+        fn advance_millis(&mut self, millis: u64) {
+            self.now_millis += millis;
+        }
+
+        fn stamp(self) -> AccessStamp {
+            AccessStamp::from_millis(self.now_millis)
+        }
+    }
+
+    #[test]
     fn production_records_convert_to_and_from_their_persistent_dtos()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut resolve_dto = resolve_record("conversion.js");
@@ -570,6 +718,18 @@ mod tests {
             .entry_count(),
             0
         );
+
+        let (temp, address, _, registry) = published_record("invalid-history.js")?;
+        let index_path = temp.path().join(INDEX_FILE);
+        let mut index = decode_index(&fs::read(&index_path)?).expect("decode valid history index");
+        let invalid_revision = index.revision + 1;
+        index
+            .entries
+            .get_mut(&address)
+            .expect("history entry should exist")
+            .last_used_revision = invalid_revision;
+        fs::write(&index_path, encode_index(&index)?)?;
+        assert_eq!(PackFile::open(temp.path(), registry).entry_count(), 0);
 
         Ok(())
     }
@@ -1043,6 +1203,7 @@ const MAX_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FIELD_BYTES: usize = 1024 * 1024;
 const MAX_COLLECTION_ENTRIES: usize = 100_000;
+pub(crate) const DEFAULT_MAX_AGE: Duration = Duration::from_secs(60 * 24 * 60 * 60);
 const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
 const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c001");
 const CODE_GENERATION_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.cgen.c001");
@@ -1074,6 +1235,48 @@ pub(crate) struct StableCodecId([u8; 16]);
 impl StableCodecId {
     pub(crate) const fn new(bytes: [u8; 16]) -> Self {
         Self(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct AccessStamp {
+    unix_millis: u64,
+}
+
+impl AccessStamp {
+    pub(crate) const fn from_millis(unix_millis: u64) -> Self {
+        Self { unix_millis }
+    }
+
+    pub(crate) fn now() -> Self {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        Self::from_millis(u64::try_from(millis).unwrap_or(u64::MAX))
+    }
+
+    fn elapsed_since(self, earlier: Self) -> Option<Duration> {
+        self.unix_millis
+            .checked_sub(earlier.unix_millis)
+            .map(Duration::from_millis)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PackFileRetention {
+    now: AccessStamp,
+    max_age: Duration,
+}
+
+impl PackFileRetention {
+    pub(crate) const fn new(now: AccessStamp, max_age: Duration) -> Self {
+        Self { now, max_age }
+    }
+
+    #[cfg(test)]
+    fn system_default() -> Self {
+        Self::new(AccessStamp::now(), DEFAULT_MAX_AGE)
     }
 }
 
@@ -1341,6 +1544,7 @@ struct PendingPackFileItem {
 #[derive(Debug, Default)]
 pub(crate) struct PackFileWriteBatch {
     items: BTreeMap<PackFileAddress, PendingPackFileItem>,
+    accesses: BTreeMap<PackFileAddress, AccessStamp>,
 }
 
 impl PackFileWriteBatch {
@@ -1366,6 +1570,13 @@ impl PackFileWriteBatch {
             },
         );
         Ok(())
+    }
+
+    fn record_access(&mut self, address: PackFileAddress, stamp: AccessStamp) {
+        self.accesses
+            .entry(address)
+            .and_modify(|current| *current = (*current).max(stamp))
+            .or_insert(stamp);
     }
 }
 
@@ -3238,6 +3449,11 @@ struct PackFileIndexEntry {
     type_id: StableTypeId,
     codec_id: StableCodecId,
     content: ContentReference,
+    last_access: AccessStamp,
+    last_used_revision: u64,
+    // None means the item was used in the current published revision. Some is the first
+    // revision that carried it forward without observing an access.
+    unused_since_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3262,6 +3478,7 @@ pub(crate) struct PackFile {
     root: PathBuf,
     registry: CodecRegistry,
     index: PackFileIndex,
+    access_updates: BTreeMap<PackFileAddress, AccessStamp>,
     #[cfg(test)]
     reads: PackFileReadStats,
 }
@@ -3281,6 +3498,7 @@ impl PackFile {
             root,
             registry,
             index,
+            access_updates: BTreeMap::new(),
             #[cfg(test)]
             reads: PackFileReadStats {
                 index_reads: usize::from(index_path.exists()),
@@ -3300,6 +3518,40 @@ impl PackFile {
 
     pub(crate) fn guard(&self) -> Option<&PackFileGuardDto> {
         self.index.guard.as_ref()
+    }
+
+    pub(crate) fn touch(
+        &mut self,
+        address: &PackFileAddress,
+        etag: Option<&PackFileETag>,
+        stamp: AccessStamp,
+    ) -> bool {
+        let Some(entry) = self.index.entries.get(address) else {
+            return false;
+        };
+        if entry.etag.as_ref() != etag {
+            return false;
+        }
+        let stamp = stamp.max(entry.last_access);
+        match self.access_updates.entry(address.clone()) {
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(stamp);
+                true
+            }
+            std::collections::btree_map::Entry::Occupied(mut occupied)
+                if stamp > *occupied.get() =>
+            {
+                occupied.insert(stamp);
+                true
+            }
+            std::collections::btree_map::Entry::Occupied(_) => false,
+        }
+    }
+
+    pub(crate) fn copy_access_updates_to(&self, batch: &mut PackFileWriteBatch) {
+        for (address, stamp) in &self.access_updates {
+            batch.record_access(address.clone(), *stamp);
+        }
     }
 
     pub(crate) fn get<T: PackFileItem>(
@@ -3370,13 +3622,37 @@ impl PackFile {
         publish_items(root.as_ref(), registry, items, PublishFault::None)
     }
 
-    pub(crate) fn publish_batch(
+    #[cfg(test)]
+    fn publish_batch(
         root: impl AsRef<Path>,
         guard: Option<PackFileGuardDto>,
         base: PublicationBase,
         batch: PackFileWriteBatch,
     ) -> io::Result<()> {
-        publish_batch(root.as_ref(), guard, base, batch, PublishFault::None)
+        Self::publish_batch_with_retention(
+            root,
+            guard,
+            base,
+            batch,
+            PackFileRetention::system_default(),
+        )
+    }
+
+    pub(crate) fn publish_batch_with_retention(
+        root: impl AsRef<Path>,
+        guard: Option<PackFileGuardDto>,
+        base: PublicationBase,
+        batch: PackFileWriteBatch,
+        retention: PackFileRetention,
+    ) -> io::Result<()> {
+        publish_batch(
+            root.as_ref(),
+            guard,
+            base,
+            batch,
+            retention,
+            PublishFault::None,
+        )
     }
 
     #[cfg(test)]
@@ -3453,6 +3729,7 @@ where
         current.guard,
         PublicationBase::PreserveEntries { expected_revision },
         batch,
+        PackFileRetention::system_default(),
         fault,
     )
 }
@@ -3462,6 +3739,7 @@ fn publish_batch(
     guard: Option<PackFileGuardDto>,
     base: PublicationBase,
     batch: PackFileWriteBatch,
+    retention: PackFileRetention,
     fault: PublishFault,
 ) -> io::Result<()> {
     let current = read_bounded(&root.join(INDEX_FILE), MAX_INDEX_BYTES)
@@ -3485,6 +3763,23 @@ fn publish_batch(
         .revision
         .checked_add(1)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PackFile revision overflow"))?;
+    let PackFileWriteBatch { items, accesses } = batch;
+    let pending_addresses = items.keys().cloned().collect::<BTreeSet<_>>();
+    for (address, entry) in &mut entries {
+        if pending_addresses.contains(address) {
+            continue;
+        }
+        if let Some(access) = accesses.get(address) {
+            entry.last_access = entry.last_access.max(*access);
+            entry.last_used_revision = revision;
+            entry.unused_since_revision = None;
+        } else if entry.unused_since_revision.is_none() {
+            entry.unused_since_revision = Some(revision);
+        }
+    }
+    entries.retain(|address, entry| {
+        pending_addresses.contains(address) || !entry_is_expired(entry, revision, retention)
+    });
 
     fs::create_dir_all(root)?;
     let content_directory = root.join(CONTENT_DIRECTORY);
@@ -3492,7 +3787,7 @@ fn publish_batch(
     let filename = format!("pack-{revision:016x}.bin");
     let relative_path = PathBuf::from(CONTENT_DIRECTORY).join(&filename);
     let mut content_pack = Vec::new();
-    for (address, item) in batch.items {
+    for (address, item) in items {
         let frame = encode_content(item.type_id, item.codec_id, &item.payload)?;
         let offset = u64::try_from(content_pack.len()).map_err(|_| {
             io::Error::new(
@@ -3523,6 +3818,9 @@ fn publish_batch(
                     length,
                     checksum: frame_checksum,
                 },
+                last_access: retention.now,
+                last_used_revision: revision,
+                unused_since_revision: None,
             },
         );
     }
@@ -3559,6 +3857,20 @@ fn publish_batch(
         return Err(error);
     }
     sync_directory(root)
+}
+
+fn entry_is_expired(
+    entry: &PackFileIndexEntry,
+    candidate_revision: u64,
+    retention: PackFileRetention,
+) -> bool {
+    entry
+        .unused_since_revision
+        .is_some_and(|revision| revision < candidate_revision)
+        && retention
+            .now
+            .elapsed_since(entry.last_access)
+            .is_some_and(|age| age > retention.max_age)
 }
 
 fn injected_publish_error(point: &str) -> io::Error {
@@ -3630,6 +3942,9 @@ fn encode_index(index: &PackFileIndex) -> io::Result<Vec<u8>> {
         body.write_u64(entry.content.offset);
         body.write_u64(entry.content.length);
         body.write_u64(entry.content.checksum);
+        body.write_u64(entry.last_access.unix_millis);
+        body.write_u64(entry.last_used_revision);
+        body.write_optional_u64(entry.unused_since_revision);
     }
     encode_frame(INDEX_MAGIC, &body.finish(), MAX_INDEX_BYTES)
 }
@@ -3667,6 +3982,16 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
             return None;
         }
         let checksum = decoder.read_u64()?;
+        let last_access = AccessStamp::from_millis(decoder.read_u64()?);
+        let last_used_revision = decoder.read_u64()?;
+        let unused_since_revision = decoder.read_optional_u64()?;
+        if last_used_revision > revision
+            || unused_since_revision.is_some_and(|unused_since| {
+                unused_since > revision || unused_since < last_used_revision
+            })
+        {
+            return None;
+        }
         entries.insert(
             address,
             PackFileIndexEntry {
@@ -3679,6 +4004,9 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
                     length,
                     checksum,
                 },
+                last_access,
+                last_used_revision,
+                unused_since_revision,
             },
         );
     }

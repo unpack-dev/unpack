@@ -228,10 +228,9 @@ impl Compilation {
             self.render_ids_assigned,
             "Render IDs must be assigned before code generation"
         );
-        self.code_generation_results = Some(code_generation::generate_code(
-            &self.module_graph,
-            &self.chunk_graph,
-        ));
+        let outcome = code_generation::generate_code(&self.module_graph, &self.chunk_graph);
+        self.errors.extend(outcome.errors);
+        self.code_generation_results = Some(outcome.results);
         self.asset_render_manifest = None;
     }
 

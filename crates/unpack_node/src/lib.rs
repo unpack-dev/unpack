@@ -11,8 +11,8 @@ use napi::Result;
 use napi_derive::napi;
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use unpack_core::{
-    Asset, BuildDependency, CacheCompression, CacheIdleReason, CacheOptions, Compiler, CompilerOptions, Entry,
-    Error as CoreError, InfrastructureLogEvent, InfrastructureLogLevel,
+    Asset, BuildDependency, CacheCompression, CacheIdleReason, CacheOptions, Compiler,
+    CompilerOptions, Entry, Error as CoreError, InfrastructureLogEvent, InfrastructureLogLevel,
     InfrastructureLoggingOptions, SnapshotOptions, SnapshotPathPattern, SnapshotStrategy,
 };
 
@@ -584,6 +584,13 @@ fn stats_error(error: &CoreError) -> NativeStatsError {
         CoreError::MakeTask { message } => NativeStatsError {
             message: error.to_string(),
             path: None,
+            request: None,
+            issuer: None,
+            stack: Some(message.clone()),
+        },
+        CoreError::CodeGeneration { path, message, .. } => NativeStatsError {
+            message: error.to_string(),
+            path: Some(path.to_string_lossy().into_owned()),
             request: None,
             issuer: None,
             stack: Some(message.clone()),

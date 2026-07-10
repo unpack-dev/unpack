@@ -39,6 +39,13 @@ pub enum Error {
 
     #[error("module {0:?} does not have a filesystem parent directory")]
     MissingModuleDirectory(ModuleId),
+
+    #[error("failed to generate {path} ({module:?}): {message}")]
+    CodeGeneration {
+        module: ModuleId,
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl Error {
@@ -49,6 +56,7 @@ impl Error {
                 | Self::Read { .. }
                 | Self::Parse { .. }
                 | Self::UnsupportedDynamicImport { .. }
+                | Self::CodeGeneration { .. }
         )
     }
 

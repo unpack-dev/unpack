@@ -6,7 +6,7 @@ use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleId, Result, UnpackResolver,
     build_cache::BuildCache,
-    code_generation::{self, AssetRenderPlan, CodeGenerationResults, RenderedSource},
+    code_generation::{self, AssetRenderPlan, CodeGenerationResults, RenderedAssetSource},
     make::{self, MakeState},
     snapshot::FileSystemInfo,
 };
@@ -21,7 +21,7 @@ pub struct Compilation {
     chunk_graph: ChunkGraph,
     code_generation_results: Option<CodeGenerationResults>,
     asset_render_plan: Option<AssetRenderPlan>,
-    rendered_asset_sources: Option<Vec<RenderedSource>>,
+    rendered_asset_sources: Option<Vec<RenderedAssetSource>>,
     assets: Vec<Asset>,
     entries: Vec<ModuleId>,
     errors: Vec<Error>,
@@ -190,8 +190,7 @@ impl Compilation {
         self.rendered_asset_sources = Some(code_generation::render_asset_sources(
             self.asset_render_plan
                 .as_ref()
-                .expect("render plan should exist before Asset rendering")
-                .manifest(),
+                .expect("render plan should exist before Asset rendering"),
             self.code_generation_results
                 .as_ref()
                 .expect("code generation results should exist before Asset rendering"),

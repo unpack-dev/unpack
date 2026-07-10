@@ -1234,25 +1234,23 @@ mod tests {
         let module_record = ModuleBuildRecord::try_from(module_dto.clone())?;
         assert_eq!(ModuleBuildRecordDto::try_from(&module_record)?, module_dto);
 
-        let code_generation_record = CodeGenerationResult::from_record_source(
-            CodeGenerationSource::OriginalWithReplacements {
-                prefix: "prefix".to_string(),
-                original_source: "before".to_string(),
-                original_name: "./fixture.js".to_string(),
-                replacements: vec![CodeGenerationReplacement {
-                    start: 0,
-                    end: 6,
-                    content: "after".to_string(),
-                    name: None,
-                    enforce: ReplacementEnforce::Normal,
-                }],
-                suffix: "suffix".to_string(),
-            },
-        );
-        let code_generation_dto = CodeGenerationRecordDto::from(&code_generation_record);
+        let code_generation_source = CodeGenerationSource::OriginalWithReplacements {
+            prefix: "prefix".to_string(),
+            original_source: "before".to_string(),
+            original_name: "./fixture.js".to_string(),
+            replacements: vec![CodeGenerationReplacement {
+                start: 0,
+                end: 6,
+                content: "after".to_string(),
+                name: None,
+                enforce: ReplacementEnforce::Normal,
+            }],
+            suffix: "suffix".to_string(),
+        };
+        let code_generation_dto = CodeGenerationRecordDto::from(&code_generation_source);
         assert_eq!(
-            CodeGenerationResult::try_from(code_generation_dto)?,
-            code_generation_record
+            CodeGenerationSource::try_from(code_generation_dto)?,
+            code_generation_source
         );
         Ok(())
     }
@@ -1742,9 +1740,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rspack_sources::ReplacementEnforce;
 use brotli::{CompressorWriter, Decompressor};
 use flate2::{Compression as GzipLevel, read::GzDecoder, write::GzEncoder};
+#[cfg(test)]
+use rspack_sources::ReplacementEnforce;
+
+#[cfg(test)]
+use crate::code_generation_record::{CodeGenerationReplacement, CodeGenerationSource};
 
 use crate::{
     AsyncDependenciesBlock, ConstDependency, Dependency, EntryDependency,
@@ -1754,9 +1756,6 @@ use crate::{
     ModuleDependency, ModuleIdentity, ModuleType, NullDependency, SourceRange,
     build_cache::{ModuleBuildRecord, ResolveRecord},
     cache_hash::stable_hash,
-    code_generation_record::{
-        CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
-    },
     parser::ParsedModule,
     rendered_source::RenderedSource,
     snapshot::{PersistentManagedItemState, PersistentSnapshotEntry, Snapshot},
@@ -1790,11 +1789,13 @@ const BROTLI_WINDOW_BITS: u32 = 22;
 const GZIP_LEVEL: u32 = 6;
 const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
 const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c001");
+#[cfg(test)]
 const CODE_GENERATION_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.cgen.c001");
 const ASSET_RENDER_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.astr.c001");
 pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.resolve.1");
 pub(crate) const MODULE_BUILD_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.moduleb.1");
+#[cfg(test)]
 pub(crate) const CODE_GENERATION_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.codegen.1");
 pub(crate) const ASSET_RENDER_RECORD_TYPE_ID: StableTypeId =
@@ -2073,11 +2074,13 @@ pub(crate) struct AssetRenderRecordDto {
     pub(crate) source_map: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeGenerationRecordDto {
     pub(crate) source: CodeGenerationSourceDto,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CodeGenerationSourceDto {
     Raw {
@@ -2092,6 +2095,7 @@ pub(crate) enum CodeGenerationSourceDto {
     },
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeGenerationReplacementDto {
     pub(crate) start: u32,
@@ -2101,6 +2105,7 @@ pub(crate) struct CodeGenerationReplacementDto {
     pub(crate) enforce: ReplacementEnforceDto,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplacementEnforceDto {
     Pre,
@@ -2491,9 +2496,10 @@ impl TryFrom<ModuleBuildRecordDto> for ModuleBuildRecord {
     }
 }
 
-impl From<&CodeGenerationResult> for CodeGenerationRecordDto {
-    fn from(record: &CodeGenerationResult) -> Self {
-        let source = match record.record_source() {
+#[cfg(test)]
+impl From<&CodeGenerationSource> for CodeGenerationRecordDto {
+    fn from(record: &CodeGenerationSource) -> Self {
+        let source = match record {
             CodeGenerationSource::Raw { source } => CodeGenerationSourceDto::Raw {
                 source: source.clone(),
             },
@@ -2528,7 +2534,8 @@ impl From<&CodeGenerationResult> for CodeGenerationRecordDto {
     }
 }
 
-impl TryFrom<CodeGenerationRecordDto> for CodeGenerationResult {
+#[cfg(test)]
+impl TryFrom<CodeGenerationRecordDto> for CodeGenerationSource {
     type Error = io::Error;
 
     fn try_from(record: CodeGenerationRecordDto) -> io::Result<Self> {
@@ -2562,7 +2569,7 @@ impl TryFrom<CodeGenerationRecordDto> for CodeGenerationResult {
                 suffix,
             },
         };
-        Ok(CodeGenerationResult::from_record_source(source))
+        Ok(source)
     }
 }
 
@@ -2955,6 +2962,7 @@ impl PackFileItem for ModuleBuildRecordDto {
     const TYPE_ID: StableTypeId = MODULE_BUILD_RECORD_TYPE_ID;
 }
 
+#[cfg(test)]
 impl PackFileItem for CodeGenerationRecordDto {
     const TYPE_ID: StableTypeId = CODE_GENERATION_RECORD_TYPE_ID;
 }
@@ -3032,6 +3040,7 @@ impl CodecRegistry {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_code_generation_record(mut self, codec: CodeGenerationRecordCodec) -> Self {
         self.register::<CodeGenerationRecordDto, _>(codec);
         self
@@ -3159,11 +3168,13 @@ impl ItemCodec<ModuleBuildRecordDto> for ModuleBuildRecordCodec {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CodeGenerationRecordCodec {
     codec_id: StableCodecId,
 }
 
+#[cfg(test)]
 impl CodeGenerationRecordCodec {
     pub(crate) const fn current() -> Self {
         Self {
@@ -3172,6 +3183,7 @@ impl CodeGenerationRecordCodec {
     }
 }
 
+#[cfg(test)]
 impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
     fn codec_id(&self) -> StableCodecId {
         self.codec_id
@@ -3257,6 +3269,7 @@ impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
     }
 }
 
+#[cfg(test)]
 fn validate_code_generation_record(record: &CodeGenerationRecordDto) -> io::Result<()> {
     let CodeGenerationSourceDto::OriginalWithReplacements {
         original_source,

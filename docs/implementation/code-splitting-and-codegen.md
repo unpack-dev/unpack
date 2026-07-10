@@ -4,12 +4,14 @@ This plan implements dynamic-import code splitting and webpack-shaped code gener
 
 ## Target Shape
 
-The compilation pipeline should be explicit:
+The compilation pipeline is explicit and keeps webpack's post-Make sealing boundary:
 
 1. `make`
-2. `build_chunk_graph`
-3. `code_generation`
-4. `create_assets`
+2. `seal`
+   1. `build_chunk_graph`
+   2. assign module and chunk render IDs
+   3. `code_generation`
+   4. `create_assets`
 
 `Compiler::run()` should return a `Compilation` with a module graph, chunk graph, code generation results, and in-memory assets. Disk output, CLI, config files, and target selection are out of scope for the first implementation.
 
@@ -129,6 +131,12 @@ Add `Chunk::split(new_chunk)` as the common rewiring operation for future split 
 ## Slice 6: Code Generation Core
 
 Add code generation based on `rspack_sources`.
+
+Code generation is keyed only by module identity inside one `Compilation`. Each
+renderable module produces exactly one source-preserving result plus its direct
+runtime requirements. Results are not persisted or reused by later
+compilations. Chunk asset rendering consumes those results and owns the module
+factory wrapper.
 
 Core pieces:
 

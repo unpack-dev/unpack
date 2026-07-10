@@ -675,10 +675,7 @@ impl Compiler {
         let result = async {
             let mut compilation = self.create_compilation();
             compilation.make().await?;
-            compilation.build_chunk_graph();
-            compilation.assign_render_ids();
-            compilation.code_generation();
-            compilation.create_assets();
+            compilation.seal();
             Ok(compilation)
         }
         .instrument(tracing::trace_span!("Compiler::run"))
@@ -1145,6 +1142,7 @@ mod tests {
 
         assert_eq!(settling.await?.diagnostic(), None);
         assert_eq!(running.await??.errors(), []);
+        assert_eq!(compiler.settle_cache().await.diagnostic(), None);
         let registry = CodecRegistry::new()
             .with_resolve_record(ResolveRecordCodec::current())
             .with_module_build_record(ModuleBuildRecordCodec::current());

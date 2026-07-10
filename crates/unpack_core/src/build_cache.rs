@@ -15,10 +15,9 @@ use crate::{
     InfrastructureLogEvent, InfrastructureLogLevel, ModuleIdentity, SnapshotOptions,
     SnapshotStrategy, UnpackResolver,
     cache_hash::stable_hash,
-    code_generation_record::CodeGenerationResult,
     pack_file::{
-        AccessStamp, AssetRenderRecordCodec, AssetRenderRecordDto, CodeGenerationRecordCodec,
-        CodeGenerationRecordDto, CodecRegistry, DEFAULT_MAX_AGE, ModuleBuildRecordCodec,
+        AccessStamp, AssetRenderRecordCodec, AssetRenderRecordDto, CodecRegistry, DEFAULT_MAX_AGE,
+        ModuleBuildRecordCodec,
         ModuleBuildRecordDto, PackFile, PackFileAddress, PackFileETag, PackFileGuardDto,
         PackFileRetention, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
         ResolveRecordDto, SnapshotDto,
@@ -35,8 +34,6 @@ use crate::{
 
 const RESOLVE_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/resolve");
 const MODULE_BUILD_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/module-build");
-const CODE_GENERATION_CACHE_NAMESPACE: CacheNamespace =
-    CacheNamespace::new("unpack/code-generation");
 const ASSET_RENDER_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/asset-render");
 const CACHE_PROFILE_LOGGER: &str = "unpack.Cache.Profile";
 const CACHE_WRITER_LOGGER: &str = "unpack.Cache.Writer";
@@ -823,16 +820,9 @@ impl PackFileCacheLayer {
                     let dto = ModuleBuildRecordDto::try_from(record.as_ref())?;
                     batch.insert(&self.registry, pack_address, pack_etag, dto)?;
                 }
-                CacheItemFamily::CodeGeneration => {
-                    let record = entry.value::<CodeGenerationResult>().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Code Generation Cache Item contains an unexpected value",
-                        )
-                    })?;
-                    let dto = CodeGenerationRecordDto::from(record.as_ref());
-                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
-                }
+                CacheItemFamily::CodeGeneration => unreachable!(
+                    "Code Generation Results are Compilation-owned and cannot be persisted"
+                ),
                 CacheItemFamily::AssetRender => {
                     let record = entry.value::<RenderedSource>().ok_or_else(|| {
                         io::Error::new(
@@ -908,16 +898,6 @@ impl CacheLayer for PackFileCacheLayer {
                 let record = ModuleBuildRecord::try_from((*dto).clone()).ok()?;
                 Some(CacheEntry::new(
                     CacheItemFamily::ModuleBuild,
-                    etag.cloned(),
-                    record,
-                ))
-            }
-            CODE_GENERATION_CACHE_NAMESPACE => {
-                let dto =
-                    pack_file.get::<CodeGenerationRecordDto>(&pack_address, pack_etag.as_ref())?;
-                let record = CodeGenerationResult::try_from((*dto).clone()).ok()?;
-                Some(CacheEntry::new(
-                    CacheItemFamily::CodeGeneration,
                     etag.cloned(),
                     record,
                 ))
@@ -1529,13 +1509,6 @@ impl BuildCache {
         self.facade(MODULE_BUILD_CACHE_NAMESPACE, CacheItemFamily::ModuleBuild)
     }
 
-    pub(crate) fn code_generations<K>(&self) -> CacheFacade<K, CodeGenerationResult> {
-        self.facade(
-            CODE_GENERATION_CACHE_NAMESPACE,
-            CacheItemFamily::CodeGeneration,
-        )
-    }
-
     pub(crate) fn asset_renders<K>(&self) -> CacheFacade<K, RenderedSource> {
         self.facade(ASSET_RENDER_CACHE_NAMESPACE, CacheItemFamily::AssetRender)
     }
@@ -1875,7 +1848,6 @@ fn persistent_codec_registry() -> CodecRegistry {
     CodecRegistry::new()
         .with_resolve_record(ResolveRecordCodec::current())
         .with_module_build_record(ModuleBuildRecordCodec::current())
-        .with_code_generation_record(CodeGenerationRecordCodec::current())
         .with_asset_render_record(AssetRenderRecordCodec::current())
 }
 

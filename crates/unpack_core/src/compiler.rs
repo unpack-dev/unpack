@@ -1,4 +1,8 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex, Weak},
+    time::Duration,
+};
 
 use crate::{
     CacheOptions, Compilation, InfrastructureLoggingOptions, ResolveOptions, Result,
@@ -54,14 +58,570 @@ impl CompilerOptions {
 pub struct Compiler {
     options: CompilerOptions,
     build_cache: BuildCache,
+    cache_lifecycle: Arc<CacheLifecycle>,
+}
+
+#[derive(Debug)]
+pub struct PendingCompilation {
+    compilation: Option<Compilation>,
+    cache_activity: Option<CacheRunActivity>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheLifecycleOutcome {
+    diagnostic: Option<String>,
+}
+
+impl CacheLifecycleOutcome {
+    pub fn diagnostic(&self) -> Option<&str> {
+        self.diagnostic.as_deref()
+    }
+}
+
+impl PendingCompilation {
+    pub fn compilation(&self) -> &Compilation {
+        self.compilation
+            .as_ref()
+            .expect("pending compilation should exist until finish")
+    }
+
+    pub fn finish(mut self) -> Compilation {
+        let compilation = self
+            .compilation
+            .take()
+            .expect("pending compilation should only be finished once");
+        drop(self.cache_activity.take());
+        compilation
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheIdleReason {
+    Ordinary,
+    LargeChange,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CacheIdleTimeouts {
+    ordinary: Duration,
+    initial_store: Duration,
+    after_large_change: Duration,
+}
+
+impl CacheIdleTimeouts {
+    fn from_options(options: &CacheOptions) -> Self {
+        Self {
+            ordinary: Duration::from_millis(u64::from(options.idle_timeout.unwrap_or(60_000))),
+            initial_store: Duration::from_millis(u64::from(
+                options.idle_timeout_for_initial_store.unwrap_or(5_000),
+            )),
+            after_large_change: Duration::from_millis(u64::from(
+                options.idle_timeout_after_large_changes.unwrap_or(1_000),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheActivity {
+    Ready,
+    Active { run_id: u64 },
+    Idle,
+    ShuttingDown,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScheduledCacheFlush {
+    token: u64,
+    deadline: tokio::time::Instant,
+    reason: CacheFlushReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheFlushReason {
+    InitialStore,
+    Ordinary,
+    LargeChange,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InFlightCacheFlush {
+    target_generation: u64,
+}
+
+#[derive(Debug)]
+struct CacheLifecycleState {
+    activity: CacheActivity,
+    shutdown_run_id: Option<u64>,
+    scheduled: Option<ScheduledCacheFlush>,
+    flush: Option<InFlightCacheFlush>,
+    diagnostic: Option<String>,
+    shutdown_outcome: Option<CacheLifecycleOutcome>,
+    initial_store_deadline: Option<tokio::time::Instant>,
+    ordinary_deadline: Option<tokio::time::Instant>,
+    large_change_deadline: Option<tokio::time::Instant>,
+    next_run_id: u64,
+    next_timer_token: u64,
+}
+
+#[derive(Debug)]
+struct CacheLifecycle {
+    build_cache: BuildCache,
+    timeouts: CacheIdleTimeouts,
+    state: Mutex<CacheLifecycleState>,
+    changed: tokio::sync::watch::Sender<u64>,
+}
+
+impl CacheLifecycle {
+    fn new(build_cache: BuildCache, options: &CacheOptions) -> Arc<Self> {
+        let (changed, _) = tokio::sync::watch::channel(0);
+        Arc::new(Self {
+            build_cache,
+            timeouts: CacheIdleTimeouts::from_options(options),
+            state: Mutex::new(CacheLifecycleState {
+                activity: CacheActivity::Ready,
+                shutdown_run_id: None,
+                scheduled: None,
+                flush: None,
+                diagnostic: None,
+                shutdown_outcome: None,
+                initial_store_deadline: None,
+                ordinary_deadline: None,
+                large_change_deadline: None,
+                next_run_id: 1,
+                next_timer_token: 1,
+            }),
+            changed,
+        })
+    }
+
+    fn end_idle(self: &Arc<Self>, idle_reason: CacheIdleReason) -> Result<CacheRunActivity> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("cache lifecycle mutex should not be poisoned");
+        match state.activity {
+            CacheActivity::Ready | CacheActivity::Idle => {}
+            CacheActivity::Active { .. } => return Err(crate::Error::CompilerBusy),
+            CacheActivity::ShuttingDown | CacheActivity::Closed => {
+                return Err(crate::Error::CompilerClosed);
+            }
+        }
+        state.scheduled = None;
+        state.ordinary_deadline = None;
+        state.large_change_deadline = None;
+        let run_id = state.next_run_id;
+        state.next_run_id = state.next_run_id.saturating_add(1);
+        state.activity = CacheActivity::Active { run_id };
+        drop(state);
+        self.notify_changed();
+        Ok(CacheRunActivity {
+            lifecycle: Arc::downgrade(self),
+            run_id,
+            idle_reason,
+        })
+    }
+
+    fn begin_idle(self: &Arc<Self>, run_id: u64, idle_reason: CacheIdleReason) {
+        let should_schedule = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("cache lifecycle mutex should not be poisoned");
+            if state.activity == CacheActivity::ShuttingDown
+                && state.shutdown_run_id == Some(run_id)
+            {
+                state.shutdown_run_id = None;
+                false
+            } else if state.activity != (CacheActivity::Active { run_id }) {
+                return;
+            } else {
+                state.activity = CacheActivity::Idle;
+                if self.build_cache.pending_generation().is_some() {
+                    let now = tokio::time::Instant::now();
+                    state.ordinary_deadline = Some(now + self.timeouts.ordinary);
+                    if self.build_cache.initial_store_pending()
+                        && state.initial_store_deadline.is_none()
+                    {
+                        state.initial_store_deadline = Some(now + self.timeouts.initial_store);
+                    }
+                    if idle_reason == CacheIdleReason::LargeChange {
+                        state.large_change_deadline = Some(now + self.timeouts.after_large_change);
+                    }
+                    state.flush.is_none()
+                } else {
+                    state.initial_store_deadline = None;
+                    state.ordinary_deadline = None;
+                    state.large_change_deadline = None;
+                    false
+                }
+            }
+        };
+        self.notify_changed();
+        if should_schedule {
+            self.schedule_idle_timer();
+        }
+    }
+
+    fn schedule_idle_timer(self: &Arc<Self>) {
+        let plan = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("cache lifecycle mutex should not be poisoned");
+            if state.activity != CacheActivity::Idle
+                || state.flush.is_some()
+                || state.scheduled.is_some()
+            {
+                return;
+            }
+            let Some(target_generation) = self.build_cache.pending_generation() else {
+                state.initial_store_deadline = None;
+                state.ordinary_deadline = None;
+                state.large_change_deadline = None;
+                return;
+            };
+            let now = tokio::time::Instant::now();
+            if state.ordinary_deadline.is_none() {
+                state.ordinary_deadline = Some(now + self.timeouts.ordinary);
+            }
+            if self.build_cache.initial_store_pending() && state.initial_store_deadline.is_none() {
+                state.initial_store_deadline = Some(now + self.timeouts.initial_store);
+            }
+            let (reason, deadline) = [
+                (CacheFlushReason::InitialStore, state.initial_store_deadline),
+                (CacheFlushReason::LargeChange, state.large_change_deadline),
+                (CacheFlushReason::Ordinary, state.ordinary_deadline),
+            ]
+            .into_iter()
+            .filter_map(|(reason, deadline)| deadline.map(|deadline| (reason, deadline)))
+            .min_by_key(|(_, deadline)| *deadline)
+            .expect("dirty cache should always have an idle deadline");
+            let token = state.next_timer_token;
+            state.next_timer_token = state.next_timer_token.saturating_add(1);
+            state.scheduled = Some(ScheduledCacheFlush {
+                token,
+                deadline,
+                reason,
+            });
+            (token, deadline, target_generation)
+        };
+        self.notify_changed();
+        let (token, deadline, target_generation) = plan;
+        let lifecycle = Arc::downgrade(self);
+        tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            let Some(lifecycle) = lifecycle.upgrade() else {
+                return;
+            };
+            lifecycle.fire_timer(token, target_generation).await;
+        });
+    }
+
+    async fn fire_timer(self: Arc<Self>, token: u64, target_generation: u64) {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("cache lifecycle mutex should not be poisoned");
+            if state.activity != CacheActivity::Idle {
+                return;
+            }
+            let Some(scheduled) = state.scheduled.filter(|scheduled| scheduled.token == token)
+            else {
+                return;
+            };
+            if tokio::time::Instant::now() < scheduled.deadline {
+                return;
+            }
+            state.scheduled = None;
+            match scheduled.reason {
+                CacheFlushReason::InitialStore => state.initial_store_deadline = None,
+                CacheFlushReason::Ordinary => state.ordinary_deadline = None,
+                CacheFlushReason::LargeChange => state.large_change_deadline = None,
+            }
+        }
+        self.notify_changed();
+        let Some(current_target) = self.build_cache.pending_generation() else {
+            return;
+        };
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("cache lifecycle mutex should not be poisoned");
+            if state.activity != CacheActivity::Idle || state.flush.is_some() {
+                return;
+            }
+            state.flush = Some(InFlightCacheFlush {
+                target_generation: current_target.max(target_generation),
+            });
+        }
+        self.notify_changed();
+        self.perform_flush(current_target.max(target_generation))
+            .await;
+    }
+
+    async fn perform_flush(self: &Arc<Self>, target_generation: u64) {
+        let build_cache = self.build_cache.clone();
+        let result = match tokio::task::spawn_blocking(move || {
+            build_cache.publish_generation(target_generation)
+        })
+        .await
+        {
+            Ok(result) => result.map_err(|error| error.to_string()),
+            Err(error) => Err(format!("cache publication task failed: {error}")),
+        };
+        let mut state = self
+            .state
+            .lock()
+            .expect("cache lifecycle mutex should not be poisoned");
+        if state
+            .flush
+            .is_some_and(|flush| flush.target_generation == target_generation)
+        {
+            state.flush = None;
+        }
+        let should_schedule = match result {
+            Ok(()) => {
+                if self.build_cache.pending_generation().is_none() {
+                    state.initial_store_deadline = None;
+                    state.ordinary_deadline = None;
+                    state.large_change_deadline = None;
+                    false
+                } else {
+                    state.activity == CacheActivity::Idle && state.scheduled.is_none()
+                }
+            }
+            Err(error) => {
+                state.diagnostic = Some(error);
+                false
+            }
+        };
+        drop(state);
+        self.notify_changed();
+        if should_schedule {
+            self.schedule_idle_timer();
+        }
+    }
+
+    async fn settle(self: &Arc<Self>) -> CacheLifecycleOutcome {
+        let mut changed = self.changed.subscribe();
+        loop {
+            enum Action {
+                Start(u64),
+                Wait,
+                Done(CacheLifecycleOutcome),
+            }
+
+            let action = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("cache lifecycle mutex should not be poisoned");
+                state.scheduled = None;
+                state.ordinary_deadline = None;
+                state.large_change_deadline = None;
+                if let Some(diagnostic) = state.diagnostic.take() {
+                    if matches!(state.activity, CacheActivity::Idle) {
+                        state.activity = CacheActivity::Ready;
+                    }
+                    Action::Done(CacheLifecycleOutcome {
+                        diagnostic: Some(diagnostic),
+                    })
+                } else if matches!(state.activity, CacheActivity::Active { .. })
+                    || state.flush.is_some()
+                {
+                    Action::Wait
+                } else {
+                    drop(state);
+                    let target = self.build_cache.pending_generation();
+                    let mut state = self
+                        .state
+                        .lock()
+                        .expect("cache lifecycle mutex should not be poisoned");
+                    if matches!(state.activity, CacheActivity::Active { .. })
+                        || state.flush.is_some()
+                    {
+                        Action::Wait
+                    } else if let Some(target_generation) = target {
+                        state.flush = Some(InFlightCacheFlush { target_generation });
+                        Action::Start(target_generation)
+                    } else {
+                        if matches!(state.activity, CacheActivity::Idle) {
+                            state.activity = CacheActivity::Ready;
+                        }
+                        Action::Done(CacheLifecycleOutcome::default())
+                    }
+                }
+            };
+
+            match action {
+                Action::Start(target_generation) => {
+                    self.notify_changed();
+                    self.perform_flush(target_generation).await;
+                }
+                Action::Wait => {
+                    if changed.changed().await.is_err() {
+                        return CacheLifecycleOutcome {
+                            diagnostic: Some("cache lifecycle stopped unexpectedly".to_string()),
+                        };
+                    }
+                }
+                Action::Done(outcome) => {
+                    self.notify_changed();
+                    return outcome;
+                }
+            }
+        }
+    }
+
+    async fn shutdown(self: &Arc<Self>) -> CacheLifecycleOutcome {
+        let mut changed = self.changed.subscribe();
+        loop {
+            enum Action {
+                Start(u64),
+                Wait,
+                Retry,
+                Done(CacheLifecycleOutcome),
+            }
+
+            let action = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("cache lifecycle mutex should not be poisoned");
+                match state.activity {
+                    CacheActivity::Closed => {
+                        Action::Done(state.shutdown_outcome.clone().unwrap_or_default())
+                    }
+                    CacheActivity::Ready | CacheActivity::Idle => {
+                        state.activity = CacheActivity::ShuttingDown;
+                        state.scheduled = None;
+                        state.initial_store_deadline = None;
+                        state.ordinary_deadline = None;
+                        state.large_change_deadline = None;
+                        Action::Retry
+                    }
+                    CacheActivity::Active { run_id } => {
+                        state.activity = CacheActivity::ShuttingDown;
+                        state.shutdown_run_id = Some(run_id);
+                        state.scheduled = None;
+                        state.initial_store_deadline = None;
+                        state.ordinary_deadline = None;
+                        state.large_change_deadline = None;
+                        Action::Retry
+                    }
+                    CacheActivity::ShuttingDown => {
+                        if state.shutdown_run_id.is_some() || state.flush.is_some() {
+                            Action::Wait
+                        } else {
+                            let diagnostic = state.diagnostic.take();
+                            drop(state);
+                            let target = self.build_cache.pending_generation();
+                            let mut state = self
+                                .state
+                                .lock()
+                                .expect("cache lifecycle mutex should not be poisoned");
+                            if state.shutdown_run_id.is_some() || state.flush.is_some() {
+                                Action::Wait
+                            } else if diagnostic.is_some() {
+                                let outcome = CacheLifecycleOutcome { diagnostic };
+                                state.activity = CacheActivity::Closed;
+                                state.shutdown_outcome = Some(outcome.clone());
+                                Action::Done(outcome)
+                            } else if let Some(target_generation) = target {
+                                state.flush = Some(InFlightCacheFlush { target_generation });
+                                Action::Start(target_generation)
+                            } else {
+                                let outcome = CacheLifecycleOutcome::default();
+                                state.activity = CacheActivity::Closed;
+                                state.shutdown_outcome = Some(outcome.clone());
+                                Action::Done(outcome)
+                            }
+                        }
+                    }
+                }
+            };
+            match action {
+                Action::Start(target_generation) => {
+                    self.notify_changed();
+                    self.perform_flush(target_generation).await;
+                }
+                Action::Wait => {
+                    if changed.changed().await.is_err() {
+                        return CacheLifecycleOutcome {
+                            diagnostic: Some("cache lifecycle stopped unexpectedly".to_string()),
+                        };
+                    }
+                }
+                Action::Retry => {
+                    self.notify_changed();
+                }
+                Action::Done(outcome) => {
+                    self.notify_changed();
+                    return outcome;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn wait_for_idle_publication(&self) {
+        let mut changed = self.changed.subscribe();
+        loop {
+            let (flush_in_flight, diagnostic) = {
+                let state = self
+                    .state
+                    .lock()
+                    .expect("cache lifecycle mutex should not be poisoned");
+                (state.flush.is_some(), state.diagnostic.clone())
+            };
+            assert!(
+                diagnostic.is_none(),
+                "cache publication failed: {diagnostic:?}"
+            );
+            if self.build_cache.pending_generation().is_none() && !flush_in_flight {
+                return;
+            }
+            changed
+                .changed()
+                .await
+                .expect("cache lifecycle should remain observable");
+        }
+    }
+
+    fn notify_changed(&self) {
+        self.changed.send_modify(|version| {
+            *version = version.wrapping_add(1);
+        });
+    }
+}
+
+#[derive(Debug)]
+struct CacheRunActivity {
+    lifecycle: Weak<CacheLifecycle>,
+    run_id: u64,
+    idle_reason: CacheIdleReason,
+}
+
+impl Drop for CacheRunActivity {
+    fn drop(&mut self) {
+        if let Some(lifecycle) = self.lifecycle.upgrade() {
+            lifecycle.begin_idle(self.run_id, self.idle_reason);
+        }
+    }
 }
 
 impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
         let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
+        let cache_lifecycle = CacheLifecycle::new(build_cache.clone(), &options.cache);
         Self {
             options,
             build_cache,
+            cache_lifecycle,
         }
     }
 
@@ -78,6 +638,17 @@ impl Compiler {
     }
 
     pub async fn run(&self) -> Result<Compilation> {
+        Ok(self
+            .run_until_finalize(CacheIdleReason::Ordinary)
+            .await?
+            .finish())
+    }
+
+    pub async fn run_until_finalize(
+        &self,
+        idle_reason: CacheIdleReason,
+    ) -> Result<PendingCompilation> {
+        let cache_activity = self.cache_lifecycle.end_idle(idle_reason)?;
         let result = async {
             let mut compilation = self.create_compilation();
             compilation.make().await?;
@@ -88,8 +659,14 @@ impl Compiler {
         }
         .instrument(tracing::trace_span!("Compiler::run"))
         .await;
+        if result.is_ok() {
+            self.build_cache.store_build_dependencies();
+        }
         self.build_cache.trace_work_counters();
-        result
+        result.map(|compilation| PendingCompilation {
+            compilation: Some(compilation),
+            cache_activity: Some(cache_activity),
+        })
     }
 
     pub fn flush_cache(&self) -> std::result::Result<(), String> {
@@ -98,6 +675,19 @@ impl Compiler {
         self.build_cache
             .flush_to_filesystem()
             .map_err(|error| error.to_string())
+    }
+
+    pub async fn settle_cache(&self) -> CacheLifecycleOutcome {
+        self.cache_lifecycle.settle().await
+    }
+
+    pub async fn shutdown(&self) -> CacheLifecycleOutcome {
+        self.cache_lifecycle.shutdown().await
+    }
+
+    #[cfg(test)]
+    async fn wait_for_idle_cache_publication(&self) {
+        self.cache_lifecycle.wait_for_idle_publication().await;
     }
 }
 
@@ -122,12 +712,18 @@ fn normalize_context(context: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::Path};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        path::Path,
+        sync::{Arc, Barrier},
+    };
 
     use super::*;
     use crate::{
+        BuildDependency,
         build_cache::{CacheItemFamily, CacheItemWork},
-        pack_file::PackFile,
+        pack_file::{CodecRegistry, ModuleBuildRecordCodec, PackFile, ResolveRecordCodec},
     };
 
     #[tokio::test]
@@ -354,6 +950,219 @@ mod tests {
             third.chunk_graph().chunks().as_ptr()
         );
 
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compiler_owns_initial_idle_cache_publication()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(temp.path().join("index.js"), "export const value = 1;")?;
+        let cache_temp = tempfile::tempdir()?;
+        let cache_location = cache_temp.path().join("compiler-owned-idle");
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location.clone());
+        options.cache.idle_timeout = Some(60_000);
+        options.cache.idle_timeout_for_initial_store = Some(20);
+
+        let compiler = Compiler::new(options);
+        compiler.run().await?;
+        assert!(!PackFile::index_path(&cache_location).exists());
+
+        tokio::time::advance(std::time::Duration::from_millis(19)).await;
+        assert!(!PackFile::index_path(&cache_location).exists());
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        compiler.wait_for_idle_cache_publication().await;
+        assert!(PackFile::index_path(&cache_location).exists());
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_idle_begins_only_after_the_run_is_finalized()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(temp.path().join("index.js"), "export const value = 1;")?;
+        let cache_temp = tempfile::tempdir()?;
+        let cache_location = cache_temp.path().join("finalize-before-idle");
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location.clone());
+        options.cache.idle_timeout_for_initial_store = Some(0);
+
+        let compiler = Compiler::new(options);
+        let pending = compiler
+            .run_until_finalize(CacheIdleReason::Ordinary)
+            .await?;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(!PackFile::index_path(&cache_location).exists());
+
+        let compilation = pending.finish();
+        assert_eq!(compilation.errors(), []);
+        compiler.wait_for_idle_cache_publication().await;
+        assert!(PackFile::index_path(&cache_location).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settling_idle_cache_drains_pending_work_and_keeps_compiler_reusable()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(temp.path().join("index.js"), "export const value = 1;")?;
+        let cache_temp = tempfile::tempdir()?;
+        let cache_location = cache_temp.path().join("settled-watch-cache");
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location.clone());
+        options.cache.idle_timeout_for_initial_store = Some(60_000);
+
+        let compiler = Compiler::new(options);
+        compiler.run().await?;
+        assert!(!PackFile::index_path(&cache_location).exists());
+
+        let outcome = compiler.settle_cache().await;
+        assert_eq!(outcome.diagnostic(), None);
+        assert!(PackFile::index_path(&cache_location).exists());
+        assert_eq!(compiler.run().await?.errors(), []);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_pending_cache_work_is_idempotent_and_prevents_new_runs()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(temp.path().join("index.js"), "export const value = 1;")?;
+        let cache_temp = tempfile::tempdir()?;
+        let cache_location = cache_temp.path().join("shutdown-cache");
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location.clone());
+        options.cache.idle_timeout_for_initial_store = Some(60_000);
+
+        let compiler = Compiler::new(options);
+        compiler.run().await?;
+        assert!(!PackFile::index_path(&cache_location).exists());
+
+        assert_eq!(compiler.shutdown().await.diagnostic(), None);
+        assert!(PackFile::index_path(&cache_location).exists());
+        assert_eq!(compiler.shutdown().await.diagnostic(), None);
+        assert!(matches!(
+            compiler.run().await,
+            Err(crate::Error::CompilerClosed)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_run_keeps_the_earliest_initial_store_deadline()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let entry = temp.path().join("index.js");
+        write(&entry, "export const value = 'before';")?;
+        let cache_temp = tempfile::tempdir()?;
+        let cache_location = cache_temp.path().join("initial-deadline");
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location.clone());
+        options.cache.idle_timeout = Some(500);
+        options.cache.idle_timeout_for_initial_store = Some(200);
+
+        let compiler = Compiler::new(options);
+        compiler.run().await?;
+        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+        write(&entry, "export const value = 'after';")?;
+        compiler.run().await?;
+
+        tokio::time::advance(std::time::Duration::from_millis(49)).await;
+        assert!(!PackFile::index_path(&cache_location).exists());
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        compiler.wait_for_idle_cache_publication().await;
+        assert!(PackFile::index_path(&cache_location).exists());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn store_during_publication_remains_dirty_for_a_later_revision()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let entry = temp.path().join("index.js");
+        write(&entry, "export const value = 'before';")?;
+        let cache_temp = tempfile::tempdir()?;
+        let cache_location = cache_temp.path().join("generation-race");
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location.clone());
+        options.cache.idle_timeout_for_initial_store = Some(60_000);
+
+        let compiler = Compiler::new(options);
+        compiler.run().await?;
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        compiler
+            .build_cache
+            .install_publish_barrier(entered.clone(), release.clone());
+
+        let settling_compiler = compiler.clone();
+        let settling = tokio::spawn(async move { settling_compiler.settle_cache().await });
+        tokio::task::yield_now().await;
+        entered.wait();
+
+        write(&entry, "export const value = 'after';")?;
+        let running_compiler = compiler.clone();
+        let running = tokio::spawn(async move { running_compiler.run().await });
+        tokio::task::yield_now().await;
+        release.wait();
+
+        assert_eq!(settling.await?.diagnostic(), None);
+        assert_eq!(running.await??.errors(), []);
+        let registry = CodecRegistry::new()
+            .with_resolve_record(ResolveRecordCodec::current())
+            .with_module_build_record(ModuleBuildRecordCodec::current());
+        assert_eq!(PackFile::open(&cache_location, registry).revision(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_dependencies_are_stored_before_finalize_and_begin_idle()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(temp.path().join("index.js"), "export const value = 1;")?;
+        let config = temp.path().join("build.config.js");
+        write(&config, "export default 'before';")?;
+        let cache_temp = tempfile::tempdir()?;
+        let cache_location = cache_temp.path().join("build-dependency-order");
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(cache_location);
+        options.cache.idle_timeout_for_initial_store = Some(60_000);
+        options.cache.build_dependencies = vec![BuildDependency {
+            name: "config".to_string(),
+            files: vec![config.clone()],
+        }];
+
+        let compiler = Compiler::new(options.clone());
+        let pending = compiler
+            .run_until_finalize(CacheIdleReason::Ordinary)
+            .await?;
+        write(&config, "export default 'after';")?;
+        pending.finish();
+        assert_eq!(compiler.settle_cache().await.diagnostic(), None);
+
+        let second = Compiler::new(options);
+        second.run().await?;
+        assert_eq!(
+            second
+                .build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 0,
+                misses: 1,
+                stores: 1,
+                restores: 0,
+                evictions: 0,
+            }
+        );
         Ok(())
     }
 

@@ -151,6 +151,8 @@ pub struct CacheOptions {
     pub build_dependencies: Vec<BuildDependency>,
     pub max_memory_generations: Option<u32>,
     pub idle_timeout: Option<u32>,
+    pub idle_timeout_for_initial_store: Option<u32>,
+    pub idle_timeout_after_large_changes: Option<u32>,
     pub readonly: bool,
 }
 
@@ -171,6 +173,8 @@ impl CacheOptions {
             build_dependencies: Vec::new(),
             max_memory_generations: None,
             idle_timeout: None,
+            idle_timeout_for_initial_store: None,
+            idle_timeout_after_large_changes: None,
             readonly: false,
         }
     }
@@ -185,6 +189,8 @@ impl CacheOptions {
             build_dependencies: Vec::new(),
             max_memory_generations: None,
             idle_timeout: None,
+            idle_timeout_for_initial_store: None,
+            idle_timeout_after_large_changes: None,
             readonly: false,
         }
     }
@@ -198,7 +204,9 @@ impl CacheOptions {
             version: None,
             build_dependencies: Vec::new(),
             max_memory_generations: None,
-            idle_timeout: None,
+            idle_timeout: Some(60_000),
+            idle_timeout_for_initial_store: Some(5_000),
+            idle_timeout_after_large_changes: Some(1_000),
             readonly: false,
         }
     }
@@ -220,7 +228,20 @@ pub struct BuildDependency {
 #[derive(Debug)]
 struct BuildCacheInner {
     cache: Cache,
-    dirty: bool,
+    dirty_generation: u64,
+    published_generation: u64,
+    initial_store_pending: bool,
+    persistent_guard: Option<PackFileGuardDto>,
+    persistent_guard_error: Option<String>,
+    #[cfg(test)]
+    publish_barrier: Option<PublishBarrier>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct PublishBarrier {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
 }
 
 impl BuildCacheInner {
@@ -230,14 +251,22 @@ impl BuildCacheInner {
         build_dependency_snapshot_strategy: SnapshotStrategy,
         resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
     ) -> Self {
+        let cache = Cache::from_options(
+            options,
+            file_system_info,
+            build_dependency_snapshot_strategy,
+            resolve_build_dependency_snapshot_strategy,
+        );
+        let initial_store_pending = !cache.has_persistent_publication();
         Self {
-            cache: Cache::from_options(
-                options,
-                file_system_info,
-                build_dependency_snapshot_strategy,
-                resolve_build_dependency_snapshot_strategy,
-            ),
-            dirty: false,
+            cache,
+            dirty_generation: 0,
+            published_generation: 0,
+            initial_store_pending,
+            persistent_guard: None,
+            persistent_guard_error: None,
+            #[cfg(test)]
+            publish_barrier: None,
         }
     }
 }
@@ -299,6 +328,9 @@ trait CacheLayer: fmt::Debug + Send + Sync {
     fn store(&mut self, address: CacheAddress, entry: CacheEntry);
     fn publish(&mut self, _guard: &PackFileGuardDto) -> io::Result<()> {
         Ok(())
+    }
+    fn has_publication(&self) -> bool {
+        false
     }
     #[allow(dead_code)]
     fn evict(&mut self, address: &CacheAddress) -> bool;
@@ -480,6 +512,10 @@ impl CacheLayer for PackFileCacheLayer {
         PackFileCacheLayer::publish(self, guard.clone())
     }
 
+    fn has_publication(&self) -> bool {
+        self.active
+    }
+
     fn evict(&mut self, address: &CacheAddress) -> bool {
         self.pending.remove(address).is_some()
     }
@@ -636,6 +672,13 @@ impl Cache {
             return Ok(());
         };
         slot.layer.publish(&guard)
+    }
+
+    fn has_persistent_publication(&self) -> bool {
+        self.layers
+            .iter()
+            .find(|slot| slot.kind == CacheLayerKind::Persistent)
+            .is_some_and(|slot| slot.layer.has_publication())
     }
 }
 
@@ -914,27 +957,93 @@ impl BuildCache {
         }
     }
 
-    pub(crate) fn flush_to_filesystem(&self) -> io::Result<()> {
+    pub(crate) fn store_build_dependencies(&self) {
         if self.options.kind != CacheKind::Filesystem || self.options.readonly {
-            return Ok(());
+            return;
         }
-
-        if !self
-            .inner
-            .lock()
-            .expect("build cache mutex should not be poisoned")
-            .dirty
-        {
-            return Ok(());
-        }
-        let guard = self.current_persistent_guard()?;
+        let guard = self
+            .current_persistent_guard()
+            .map_err(|error| error.to_string());
         let mut inner = self
             .inner
             .lock()
             .expect("build cache mutex should not be poisoned");
+        match guard {
+            Ok(guard) => {
+                inner.persistent_guard = Some(guard);
+                inner.persistent_guard_error = None;
+            }
+            Err(error) => {
+                inner.persistent_guard = None;
+                inner.persistent_guard_error = Some(error);
+            }
+        }
+    }
+
+    pub(crate) fn pending_generation(&self) -> Option<u64> {
+        let inner = self
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        (inner.dirty_generation > inner.published_generation).then_some(inner.dirty_generation)
+    }
+
+    pub(crate) fn initial_store_pending(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .initial_store_pending
+    }
+
+    pub(crate) fn publish_generation(&self, target_generation: u64) -> io::Result<()> {
+        if self.options.kind != CacheKind::Filesystem || self.options.readonly {
+            return Ok(());
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        if target_generation <= inner.published_generation {
+            return Ok(());
+        }
+        #[cfg(test)]
+        if let Some(barrier) = inner.publish_barrier.take() {
+            barrier.entered.wait();
+            barrier.release.wait();
+        }
+        if let Some(error) = &inner.persistent_guard_error {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, error.clone()));
+        }
+        let guard = inner.persistent_guard.clone().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Build Dependency state was not stored before cache publication",
+            )
+        })?;
         inner.cache.publish_persistent(guard)?;
-        inner.dirty = false;
+        inner.published_generation = inner.published_generation.max(target_generation);
+        inner.initial_store_pending = false;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_publish_barrier(
+        &self,
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .publish_barrier = Some(PublishBarrier { entered, release });
+    }
+
+    pub(crate) fn flush_to_filesystem(&self) -> io::Result<()> {
+        self.store_build_dependencies();
+        let Some(target_generation) = self.pending_generation() else {
+            return Ok(());
+        };
+        self.publish_generation(target_generation)
     }
 
     #[cfg(test)]
@@ -1043,7 +1152,7 @@ where
             identifier: key.cache_identifier(),
         };
         if inner.cache.store(self.family, address, etag, value) {
-            inner.dirty = true;
+            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
         }
     }
 
@@ -1150,6 +1259,14 @@ mod tests {
         fn cache_identifier(&self) -> CacheIdentifier {
             CacheIdentifier::new(self.0)
         }
+    }
+
+    #[test]
+    fn filesystem_cache_uses_pinned_idle_timeout_defaults() {
+        let options = CacheOptions::filesystem();
+        assert_eq!(options.idle_timeout, Some(60_000));
+        assert_eq!(options.idle_timeout_for_initial_store, Some(5_000));
+        assert_eq!(options.idle_timeout_after_large_changes, Some(1_000));
     }
 
     #[test]

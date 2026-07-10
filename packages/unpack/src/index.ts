@@ -35,6 +35,8 @@ export interface FilesystemCacheOptions {
   version?: string;
   buildDependencies?: Record<string, string[]>;
   idleTimeout?: number;
+  idleTimeoutForInitialStore?: number;
+  idleTimeoutAfterLargeChanges?: number;
   readonly?: boolean;
   hashAlgorithm?: string;
   managedPaths?: SnapshotPathPattern[];
@@ -148,6 +150,8 @@ interface NormalizedCacheOptions {
   version?: string;
   buildDependencies: NormalizedBuildDependency[];
   idleTimeout?: number;
+  idleTimeoutForInitialStore?: number;
+  idleTimeoutAfterLargeChanges?: number;
   readonly: boolean;
 }
 
@@ -255,8 +259,9 @@ interface NativeFlushResult {
 }
 
 interface NativeCompiler {
-  run(): Promise<NativeRunResult>;
-  flushCache(): Promise<NativeFlushResult>;
+  run(idleReason?: "ordinary" | "largeChange"): Promise<NativeRunResult>;
+  settleCache(): Promise<NativeFlushResult>;
+  shutdown(): Promise<NativeFlushResult>;
   close(): void;
 }
 
@@ -269,20 +274,14 @@ const native = require("./unpack_node.node") as NativeBinding;
 
 class CompilerImpl implements Compiler {
   #closed = false;
+  #closing: Promise<Error | null> | undefined;
   #running = false;
   #watching: WatchingImpl | undefined;
-  #idleFlushTimer: ReturnType<typeof setTimeout> | undefined;
-  #pendingCacheFlush: Promise<NativeFlushResult> | undefined;
-  readonly #writableFilesystemCache: boolean;
-  readonly #cacheIdleTimeout: number;
   readonly #infrastructureLoggingLevel: InfrastructureLoggingLevel;
   readonly #nativeCompiler: NativeCompiler;
 
   constructor(options: NormalizedOptions) {
     this.#nativeCompiler = native.createCompiler(options);
-    this.#writableFilesystemCache =
-      options.cache.type === "filesystem" && !options.cache.readonly;
-    this.#cacheIdleTimeout = options.cache.idleTimeout ?? 0;
     this.#infrastructureLoggingLevel = options.infrastructureLogging.level;
   }
 
@@ -314,7 +313,7 @@ class CompilerImpl implements Compiler {
     let run: Promise<NativeRunResult>;
     try {
       this.#emitInfrastructureLog("info", "unpack.Compiler", "run started");
-      run = this.#nativeCompiler.run();
+      run = this.#nativeCompiler.run("ordinary");
     } catch (error) {
       this.#running = false;
       const infrastructureError = toError(error, "InfrastructureError");
@@ -334,7 +333,6 @@ class CompilerImpl implements Compiler {
           return;
         }
 
-        this.#scheduleIdleCacheFlush();
         this.#emitInfrastructureLog("info", "unpack.Compiler", "run completed");
         callback(null, new StatsImpl(normalizeNativeStats(result.stats)));
       },
@@ -355,11 +353,10 @@ class CompilerImpl implements Compiler {
       const error = namedError("CompilerClosedError", "compiler is closed");
       this.#emitInfrastructureLog("error", "unpack.Watch", error.message);
       const watching = new WatchingImpl(
-        (watchHandler) => {
+        (_idleReason, watchHandler) => {
           defer(() => watchHandler(error));
         },
-        () => Promise.resolve(null),
-        () => {},
+        async () => null,
         defaultWatchOptions()
       );
       watching.start(handler);
@@ -370,11 +367,10 @@ class CompilerImpl implements Compiler {
       const error = namedError("ConcurrentRunError", "compiler is already running");
       this.#emitInfrastructureLog("error", "unpack.Watch", error.message);
       const watching = new WatchingImpl(
-        (watchHandler) => {
+        (_idleReason, watchHandler) => {
           defer(() => watchHandler(error));
         },
-        () => Promise.resolve(null),
-        () => {},
+        async () => null,
         defaultWatchOptions()
       );
       watching.start(handler);
@@ -382,12 +378,13 @@ class CompilerImpl implements Compiler {
     }
 
     const watching = new WatchingImpl(
-      (watchHandler) => this.#runWatchCompilation(watchHandler),
-      () => this.#flushCacheNow(),
-      () => {
+      (idleReason, watchHandler) => this.#runWatchCompilation(idleReason, watchHandler),
+      async () => {
+        const settleError = await this.#settleCache();
         if (this.#watching === watching) {
           this.#watching = undefined;
         }
+        return settleError;
       },
       normalizedWatchOptions
     );
@@ -419,36 +416,23 @@ class CompilerImpl implements Compiler {
       return;
     }
 
-    try {
-      this.#clearIdleFlushTimer();
-      this.#flushCacheNow().then((flushError) => {
-        if (flushError) {
-          callback(flushError);
-          return;
-        }
-
-        try {
-          this.#nativeCompiler.close();
-          this.#closed = true;
-          callback(null);
-        } catch (error) {
-          const infrastructureError = toError(error, "InfrastructureError");
-          this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
-          callback(infrastructureError);
-        }
-      });
-    } catch (error) {
-      const infrastructureError = toError(error, "InfrastructureError");
-      this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
-      defer(() => callback(infrastructureError));
+    if (this.#closed) {
+      defer(() => callback(null));
+      return;
     }
+
+    this.#closing ??= this.#shutdownAndClose();
+    void this.#closing.then((error) => callback(error));
   }
 
-  async #runWatchCompilation(handler: WatchHandler): Promise<void> {
+  async #runWatchCompilation(
+    idleReason: "ordinary" | "largeChange",
+    handler: WatchHandler
+  ): Promise<void> {
     let run: Promise<NativeRunResult>;
     try {
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation started");
-      run = this.#nativeCompiler.run();
+      run = this.#nativeCompiler.run(idleReason);
     } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
       this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
@@ -466,7 +450,6 @@ class CompilerImpl implements Compiler {
         return;
       }
 
-      this.#scheduleIdleCacheFlush();
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation completed");
       handler(null, new StatsImpl(normalizeNativeStats(result.stats)));
     } catch (error) {
@@ -476,60 +459,40 @@ class CompilerImpl implements Compiler {
     }
   }
 
-  #scheduleIdleCacheFlush(): void {
-    if (!this.#writableFilesystemCache || this.#closed) {
-      return;
-    }
-
-    this.#clearIdleFlushTimer();
-    this.#idleFlushTimer = setTimeout(() => {
-      this.#idleFlushTimer = undefined;
-      void this.#flushCacheNow();
-    }, this.#cacheIdleTimeout);
-  }
-
-  #clearIdleFlushTimer(): void {
-    if (this.#idleFlushTimer !== undefined) {
-      clearTimeout(this.#idleFlushTimer);
-      this.#idleFlushTimer = undefined;
-    }
-  }
-
-  async #flushCacheNow(): Promise<Error | null> {
-    if (!this.#writableFilesystemCache) {
-      return null;
-    }
-
-    const startsFlush = this.#pendingCacheFlush === undefined;
-    if (startsFlush) {
-      this.#emitInfrastructureLog("info", "unpack.Cache", "cache flush started");
-    }
-    const flush = this.#pendingCacheFlush ?? this.#nativeCompiler.flushCache();
-    this.#pendingCacheFlush = flush;
-
+  async #settleCache(): Promise<Error | null> {
     try {
-      const result = await flush;
+      const result = await this.#nativeCompiler.settleCache();
       if (result.error) {
-        const error = namedError(result.error.name, result.error.message);
-        if (startsFlush) {
-          this.#emitInfrastructureLog("warn", "unpack.Cache", error.message);
-        }
-        return error;
-      }
-      if (startsFlush) {
-        this.#emitInfrastructureLog("info", "unpack.Cache", "cache flush completed");
+        return namedError(result.error.name, result.error.message);
       }
       return null;
     } catch (error) {
+      return toError(error, "InfrastructureError");
+    }
+  }
+
+  async #shutdown(): Promise<Error | null> {
+    try {
+      const result = await this.#nativeCompiler.shutdown();
+      if (result.error) {
+        return namedError(result.error.name, result.error.message);
+      }
+      return null;
+    } catch (error) {
+      return toError(error, "InfrastructureError");
+    }
+  }
+
+  async #shutdownAndClose(): Promise<Error | null> {
+    const shutdownError = await this.#shutdown();
+    try {
+      this.#nativeCompiler.close();
+      this.#closed = true;
+      return shutdownError;
+    } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
-      if (startsFlush) {
-        this.#emitInfrastructureLog("error", "unpack.Cache", infrastructureError.message);
-      }
+      this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
       return infrastructureError;
-    } finally {
-      if (this.#pendingCacheFlush === flush) {
-        this.#pendingCacheFlush = undefined;
-      }
     }
   }
 
@@ -556,32 +519,36 @@ class CompilerImpl implements Compiler {
 
 class WatchingImpl implements Watching {
   #closed = false;
+  #closing: Promise<Error | null> | undefined;
   #running = false;
   #invalidated = false;
   #handler: WatchHandler | undefined;
   #rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #watchers: WatchSubscription[] = [];
-  readonly #runCompilation: (handler: WatchHandler) => Promise<void> | void;
-  readonly #flushCache: () => Promise<Error | null>;
-  readonly #onClose: () => void;
+  readonly #runCompilation: (
+    idleReason: "ordinary" | "largeChange",
+    handler: WatchHandler
+  ) => Promise<void> | void;
+  readonly #onClose: () => Promise<Error | null>;
   readonly #watchOptions: NormalizedWatchOptions;
   readonly #closeCallbacks: CloseCallback[] = [];
 
   constructor(
-    runCompilation: (handler: WatchHandler) => Promise<void> | void,
-    flushCache: () => Promise<Error | null>,
-    onClose: () => void,
+    runCompilation: (
+      idleReason: "ordinary" | "largeChange",
+      handler: WatchHandler
+    ) => Promise<void> | void,
+    onClose: () => Promise<Error | null>,
     watchOptions: NormalizedWatchOptions
   ) {
     this.#runCompilation = runCompilation;
-    this.#flushCache = flushCache;
     this.#onClose = onClose;
     this.#watchOptions = watchOptions;
   }
 
   start(handler: WatchHandler): void {
     this.#handler = handler;
-    this.#run();
+    this.#run("ordinary");
   }
 
   invalidate(): void {
@@ -596,13 +563,13 @@ class WatchingImpl implements Watching {
       return;
     }
 
-    this.#run();
+    this.#run("largeChange");
   }
 
   close(callback: CloseCallback): void {
     assertFunction(callback, "callback");
 
-    if (this.#closed && !this.#running) {
+    if (this.#closed && !this.#running && !this.#closing) {
       defer(() => callback(null));
       return;
     }
@@ -618,7 +585,7 @@ class WatchingImpl implements Watching {
     }
   }
 
-  async #run(): Promise<void> {
+  async #run(idleReason: "ordinary" | "largeChange"): Promise<void> {
     if (this.#closed || this.#running || !this.#handler) {
       return;
     }
@@ -627,7 +594,7 @@ class WatchingImpl implements Watching {
     this.#closeWatchers();
     this.#running = true;
     let latestStats: Stats | undefined;
-    await this.#runCompilation((err, stats) => {
+    await this.#runCompilation(idleReason, (err, stats) => {
       if (!err && stats) {
         latestStats = stats;
       }
@@ -647,16 +614,17 @@ class WatchingImpl implements Watching {
 
     if (this.#invalidated) {
       this.#invalidated = false;
-      await this.#run();
+      await this.#run("largeChange");
     }
   }
 
   async #finishClose(): Promise<void> {
+    this.#closing ??= this.#onClose();
+    const closeError = await this.#closing;
     const callbacks = this.#closeCallbacks.splice(0);
-    const flushError = await this.#flushCache();
-    this.#onClose();
+    this.#closing = undefined;
     for (const callback of callbacks) {
-      callback(flushError);
+      callback(closeError);
     }
   }
 
@@ -953,6 +921,8 @@ function normalizeCacheOptions(
       "version",
       "buildDependencies",
       "idleTimeout",
+      "idleTimeoutForInitialStore",
+      "idleTimeoutAfterLargeChanges",
       "readonly",
       "hashAlgorithm",
       "managedPaths",
@@ -1022,14 +992,27 @@ function normalizeCacheOptions(
       filesystemCache.buildDependencies,
       context
     ),
-    ...(filesystemCache.idleTimeout === undefined
-      ? {}
-      : {
-          idleTimeout: assertNonNegativeInteger(
+    idleTimeout:
+      filesystemCache.idleTimeout === undefined
+        ? 60_000
+        : assertNonNegativeInteger(
             filesystemCache.idleTimeout,
             "options.cache.idleTimeout"
-          )
-        }),
+          ),
+    idleTimeoutForInitialStore:
+      filesystemCache.idleTimeoutForInitialStore === undefined
+        ? 5_000
+        : assertNonNegativeInteger(
+            filesystemCache.idleTimeoutForInitialStore,
+            "options.cache.idleTimeoutForInitialStore"
+          ),
+    idleTimeoutAfterLargeChanges:
+      filesystemCache.idleTimeoutAfterLargeChanges === undefined
+        ? 1_000
+        : assertNonNegativeInteger(
+            filesystemCache.idleTimeoutAfterLargeChanges,
+            "options.cache.idleTimeoutAfterLargeChanges"
+          ),
     readonly
   };
 }

@@ -53,7 +53,7 @@ impl NormalModuleFactory {
             .request()
             .expect("module dependency should have a request");
         let resolve_request = ResolveRequest::new(context, request);
-        if let Some(record) = self.cache.get(&resolve_request) {
+        if let Some(record) = self.cache.get(&resolve_request, None) {
             if record
                 .is_valid_with_cache(
                     &self.file_system_info,
@@ -137,7 +137,7 @@ impl NormalModuleFactory {
         )
         .await?;
         let factorized = FactorizedModule::from_resolve_record(&record);
-        self.cache.store(resolve_request, record);
+        self.cache.store(resolve_request, None, record);
 
         Ok(factorized)
     }

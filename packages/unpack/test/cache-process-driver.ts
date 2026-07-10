@@ -15,11 +15,7 @@ void observeBuild(request).then((observation) => {
 });
 
 async function observeBuild(
-<<<<<<< HEAD
   current: CacheProcessRequest
-=======
-  buildRequest: CacheProcessRequest
->>>>>>> origin/main
 ): Promise<CacheProcessObservation> {
   const base = {
     pid: process.pid,
@@ -29,18 +25,13 @@ async function observeBuild(
     hasStats: false,
     hasErrors: null,
     assets: [],
-<<<<<<< HEAD
     assetDetails: [],
     outputPath: null,
     cacheWork: null
-=======
-    outputPath: null
->>>>>>> origin/main
   } satisfies CacheProcessObservation;
 
   let compiler: ReturnType<typeof unpack> | ReturnType<typeof webpack>;
   try {
-<<<<<<< HEAD
     const { outputPath, sourcemap, ...options } = current.options;
     compiler =
       current.bundler === "webpack"
@@ -48,26 +39,13 @@ async function observeBuild(
             ...options,
             entry: options.entry ?? "./src/index.js",
             devtool: sourcemap ? "source-map" : false,
-=======
-    const { outputPath, ...options } = buildRequest.options;
-    compiler =
-      buildRequest.bundler === "webpack"
-        ? webpack({
-            ...options,
-            entry: options.entry ?? "./src/index.js",
-            devtool: false,
->>>>>>> origin/main
             infrastructureLogging: { level: "none" },
             output: { path: outputPath, filename: "main.js" }
           } as unknown as Parameters<typeof webpack>[0])
         : unpack({
             ...options,
             entry: options.entry ?? "./src/index.js",
-<<<<<<< HEAD
             sourcemap: sourcemap ?? false,
-=======
-            sourcemap: false,
->>>>>>> origin/main
             infrastructureLogging: { level: "none" },
             output: { path: outputPath }
           } as Parameters<typeof unpack>[0]);
@@ -79,11 +57,7 @@ async function observeBuild(
     };
   }
 
-<<<<<<< HEAD
   const run = await runCompiler(compiler, current.bundler);
-=======
-  const run = await runCompiler(compiler, buildRequest.bundler);
->>>>>>> origin/main
   const closeError = await closeCompiler(compiler);
   return {
     ...base,
@@ -91,10 +65,7 @@ async function observeBuild(
     hasStats: run.hasStats,
     hasErrors: run.hasErrors,
     assets: run.assets,
-<<<<<<< HEAD
     assetDetails: run.assetDetails,
-=======
->>>>>>> origin/main
     outputPath: run.outputPath
   };
 }
@@ -108,10 +79,7 @@ async function runCompiler(
     hasStats: boolean;
     hasErrors: boolean | null;
     assets: string[];
-<<<<<<< HEAD
     assetDetails: { name: string; size: number }[];
-=======
->>>>>>> origin/main
     outputPath: string | null;
   }>((resolve) => {
     compiler.run((error, stats) => {
@@ -121,10 +89,7 @@ async function runCompiler(
           hasStats: stats !== undefined,
           hasErrors: stats?.hasErrors() ?? null,
           assets: [],
-<<<<<<< HEAD
           assetDetails: [],
-=======
->>>>>>> origin/main
           outputPath: null
         });
         return;
@@ -144,7 +109,6 @@ async function runCompiler(
         assets: (json.assets ?? []).flatMap((asset) =>
           asset.name === undefined ? [] : [asset.name]
         ).sort(),
-<<<<<<< HEAD
         assetDetails: (json.assets ?? [])
           .flatMap((asset) =>
             asset.name === undefined
@@ -152,8 +116,6 @@ async function runCompiler(
               : [{ name: asset.name, size: asset.size }]
           )
           .sort((left, right) => left.name.localeCompare(right.name)),
-=======
->>>>>>> origin/main
         outputPath: json.outputPath ?? null
       });
     });

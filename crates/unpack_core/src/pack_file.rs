@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -16,48 +15,6 @@ mod tests {
         let etag = PackFileETag::new(b"resolve-inputs-v1");
         let record = resolve_record("dep.js");
         let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
-=======
-#![allow(dead_code)]
-
-#[cfg(test)]
-mod tests {
-    use std::{collections::BTreeSet, fs, path::Path};
-
-    use tempfile::tempdir;
-
-    use super::*;
-    use crate::{
-        ModuleIdentity, SnapshotStrategy, build_cache::ResolveRecord, snapshot::FileSystemInfo,
-    };
-
-    #[tokio::test]
-    async fn resolve_records_round_trip_through_the_registered_private_codec()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;
-        let source = temp.path().join("src/dep.js");
-        fs::create_dir_all(source.parent().expect("source should have a parent"))?;
-        fs::write(&source, "export const value = 1;")?;
-        let missing = temp.path().join("src/missing.js");
-        let address = PackFileAddress::new("unpack/resolve", b"issuer:/project/src|request:./dep");
-        let etag = PackFileETag::new(b"resolve-inputs-v1");
-        let actual_record = ResolveRecord::new(
-            ModuleIdentity::new(&source),
-            source.clone(),
-            BTreeSet::from([source]),
-            BTreeSet::from([temp.path().join("src")]),
-            BTreeSet::from([missing]),
-            &FileSystemInfo::default(),
-            SnapshotStrategy::timestamp_and_hash(),
-        )
-        .await?;
-        let codec = ResolveRecordCodec::current();
-        let record = codec.to_dto(&actual_record);
-        assert_eq!(
-            codec.from_dto(record.clone()).as_ref(),
-            Some(&actual_record)
-        );
-        let registry = CodecRegistry::new().with_resolve_record(codec);
->>>>>>> origin/main
 
         PackFile::publish_resolve_records(
             temp.path(),
@@ -73,20 +30,11 @@ mod tests {
 
         let mut pack_file = PackFile::open(temp.path(), registry);
         assert_eq!(pack_file.entry_count(), 1);
-<<<<<<< HEAD
         assert_eq!(
             pack_file
                 .get_resolve_record(&address, Some(&etag))
                 .as_deref(),
             Some(&record)
-=======
-        let restored_dto = pack_file
-            .get_resolve_record(&address, Some(&etag))
-            .expect("Resolve Record DTO should restore");
-        assert_eq!(
-            codec.from_dto((*restored_dto).clone()).as_ref(),
-            Some(&actual_record)
->>>>>>> origin/main
         );
 
         Ok(())
@@ -122,7 +70,6 @@ mod tests {
                 content_reads: 0,
                 content_bytes_read: 0,
                 decoded_records: 0,
-<<<<<<< HEAD
                 retained_content_bytes: 0,
             }
         );
@@ -130,11 +77,6 @@ mod tests {
         assert!(pack_file.touch(&first, Some(&etag), AccessStamp::from_millis(1_000)));
         assert_eq!(pack_file.read_stats().content_reads, 0);
 
-=======
-            }
-        );
-
->>>>>>> origin/main
         assert!(
             pack_file
                 .get_resolve_record(&first, Some(&PackFileETag::new(b"stale")))
@@ -205,7 +147,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn module_build_records_round_trip_every_parsed_module_variant()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
@@ -1317,8 +1258,6 @@ mod tests {
     }
 
     #[test]
-=======
->>>>>>> origin/main
     fn invalid_index_framing_and_length_bounds_open_as_an_empty_packfile()
     -> Result<(), Box<dyn std::error::Error>> {
         let (temp, _, _, _) = published_record("truncated.js")?;
@@ -1349,7 +1288,6 @@ mod tests {
             0
         );
 
-<<<<<<< HEAD
         let (temp, address, _, registry) = published_record("invalid-history.js")?;
         let index_path = temp.path().join(INDEX_FILE);
         let mut index = decode_index(&fs::read(&index_path)?).expect("decode valid history index");
@@ -1362,8 +1300,6 @@ mod tests {
         fs::write(&index_path, encode_index(&index)?)?;
         assert_eq!(PackFile::open(temp.path(), registry).entry_count(), 0);
 
-=======
->>>>>>> origin/main
         Ok(())
     }
 
@@ -1509,11 +1445,7 @@ mod tests {
         let path = PathBytes(vec![b'/', b'p', b'k', b'g', 0xff]);
         assert_eq!(
             path.to_path_buf()
-<<<<<<< HEAD
                 .expect("Linux path bytes should be recoverable")
-=======
-                .expect("Unix path bytes should round-trip")
->>>>>>> origin/main
                 .as_os_str()
                 .as_bytes(),
             path.0
@@ -1679,7 +1611,6 @@ mod tests {
         }
     }
 
-<<<<<<< HEAD
     fn module_build_record() -> ModuleBuildRecordDto {
         let source =
             "export default 1;                                                              "
@@ -1750,8 +1681,6 @@ mod tests {
         }
     }
 
-=======
->>>>>>> origin/main
     fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         haystack
             .windows(needle.len())
@@ -1805,16 +1734,11 @@ mod tests {
 
 use std::{
     any::Any,
-<<<<<<< HEAD
     collections::{BTreeMap, BTreeSet, HashMap},
-=======
-    collections::{BTreeMap, HashMap},
->>>>>>> origin/main
     fmt, fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
-<<<<<<< HEAD
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -1836,17 +1760,10 @@ use crate::{
     parser::ParsedModule,
     rendered_source::RenderedSource,
     snapshot::{PersistentManagedItemState, PersistentSnapshotEntry, Snapshot},
-=======
->>>>>>> origin/main
 };
 
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-<<<<<<< HEAD
-=======
-#[cfg(windows)]
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
->>>>>>> origin/main
 
 const INDEX_FILE: &str = "index.pack";
 const CONTENT_DIRECTORY: &str = "content";
@@ -1854,7 +1771,6 @@ const INDEX_MAGIC: &[u8] = b"UNPACK-PACKFILE-INDEX\0";
 const CONTENT_MAGIC: &[u8] = b"UNPACK-PACKFILE-CONTENT\0";
 const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONTENT_BYTES: usize = 32 * 1024 * 1024;
-<<<<<<< HEAD
 const MAX_ENCODED_CONTENT_BYTES: usize = 40 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FIELD_BYTES: usize = 1024 * 1024;
@@ -1883,13 +1799,6 @@ pub(crate) const CODE_GENERATION_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.codegen.1");
 pub(crate) const ASSET_RENDER_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.asset-r.1");
-=======
-const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
-const MAX_FIELD_BYTES: usize = 1024 * 1024;
-const MAX_COLLECTION_ENTRIES: usize = 100_000;
-const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId(*b"unpack.rslv.c001");
-pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId(*b"unpack.resolve.1");
->>>>>>> origin/main
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct StableTypeId([u8; 16]);
@@ -1913,7 +1822,6 @@ impl StableCodecId {
     }
 }
 
-<<<<<<< HEAD
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct AccessStamp {
     unix_millis: u64,
@@ -2032,8 +1940,6 @@ impl PackFileRetention {
     }
 }
 
-=======
->>>>>>> origin/main
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct PackFileAddress {
     namespace: Vec<u8>,
@@ -2067,51 +1973,17 @@ impl PathBytes {
         Self(path.as_os_str().as_bytes().to_vec())
     }
 
-<<<<<<< HEAD
     #[cfg(not(unix))]
     pub(crate) fn from_path(path: &Path) -> Self {
         Self(path.to_string_lossy().as_bytes().to_vec())
     }
 
-=======
->>>>>>> origin/main
     #[cfg(unix)]
     pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
         Some(PathBuf::from(std::ffi::OsString::from_vec(self.0.clone())))
     }
 
-<<<<<<< HEAD
     #[cfg(not(unix))]
-=======
-    #[cfg(windows)]
-    pub(crate) fn from_path(path: &Path) -> Self {
-        Self(
-            path.as_os_str()
-                .encode_wide()
-                .flat_map(u16::to_le_bytes)
-                .collect(),
-        )
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
-        let chunks = self.0.chunks_exact(2);
-        if !chunks.remainder().is_empty() {
-            return None;
-        }
-        let wide = chunks
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect::<Vec<_>>();
-        Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    pub(crate) fn from_path(path: &Path) -> Self {
-        Self(path.to_string_lossy().as_bytes().to_vec())
-    }
-
-    #[cfg(not(any(unix, windows)))]
->>>>>>> origin/main
     pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
         String::from_utf8(self.0.clone()).ok().map(PathBuf::from)
     }
@@ -2187,7 +2059,6 @@ pub(crate) enum ManagedItemStateDto {
     Package { name: String, version: String },
 }
 
-<<<<<<< HEAD
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModuleBuildRecordDto {
     pub(crate) parsed: ParsedModuleDto,
@@ -3072,8 +2943,6 @@ impl From<SourceRangeDto> for SourceRange {
     }
 }
 
-=======
->>>>>>> origin/main
 pub(crate) trait PackFileItem: Clone + Send + Sync + 'static {
     const TYPE_ID: StableTypeId;
 }
@@ -3082,7 +2951,6 @@ impl PackFileItem for ResolveRecordDto {
     const TYPE_ID: StableTypeId = RESOLVE_RECORD_TYPE_ID;
 }
 
-<<<<<<< HEAD
 impl PackFileItem for ModuleBuildRecordDto {
     const TYPE_ID: StableTypeId = MODULE_BUILD_RECORD_TYPE_ID;
 }
@@ -3095,8 +2963,6 @@ impl PackFileItem for AssetRenderRecordDto {
     const TYPE_ID: StableTypeId = ASSET_RENDER_RECORD_TYPE_ID;
 }
 
-=======
->>>>>>> origin/main
 pub(crate) trait ItemCodec<T: PackFileItem>: fmt::Debug + Send + Sync + 'static {
     fn codec_id(&self) -> StableCodecId;
     fn encode(&self, value: &T) -> io::Result<Vec<u8>>;
@@ -3146,11 +3012,7 @@ where
     }
 }
 
-<<<<<<< HEAD
 #[derive(Debug, Clone, Default)]
-=======
-#[derive(Debug, Default)]
->>>>>>> origin/main
 pub(crate) struct CodecRegistry {
     codecs: HashMap<StableTypeId, Arc<dyn ErasedItemCodec>>,
 }
@@ -3165,7 +3027,6 @@ impl CodecRegistry {
         self
     }
 
-<<<<<<< HEAD
     pub(crate) fn with_module_build_record(mut self, codec: ModuleBuildRecordCodec) -> Self {
         self.register::<ModuleBuildRecordDto, _>(codec);
         self
@@ -3182,8 +3043,6 @@ impl CodecRegistry {
     }
 
     #[allow(dead_code)]
-=======
->>>>>>> origin/main
     pub(crate) fn with_codec<T, C>(mut self, codec: C) -> Self
     where
         T: PackFileItem,
@@ -3253,20 +3112,6 @@ impl ResolveRecordCodec {
         }
     }
 
-<<<<<<< HEAD
-=======
-    pub(crate) fn to_dto(self, record: &crate::build_cache::ResolveRecord) -> ResolveRecordDto {
-        record.to_pack_file_dto()
-    }
-
-    pub(crate) fn from_dto(
-        self,
-        dto: ResolveRecordDto,
-    ) -> Option<crate::build_cache::ResolveRecord> {
-        crate::build_cache::ResolveRecord::from_pack_file_dto(dto)
-    }
-
->>>>>>> origin/main
     #[cfg(test)]
     const fn with_codec_id(codec_id: StableCodecId) -> Self {
         Self { codec_id }
@@ -3287,7 +3132,6 @@ impl ItemCodec<ResolveRecordDto> for ResolveRecordCodec {
     }
 }
 
-<<<<<<< HEAD
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ModuleBuildRecordCodec {
     codec_id: StableCodecId,
@@ -3802,8 +3646,6 @@ fn source_range_is_valid(range: SourceRangeDto, source: &str) -> bool {
     }
 }
 
-=======
->>>>>>> origin/main
 fn encode_resolve_record(record: &ResolveRecordDto) -> io::Result<Vec<u8>> {
     let mut encoder = Encoder::default();
     encoder.write_u8(match record.identity.module_type {
@@ -3818,7 +3660,6 @@ fn encode_resolve_record(record: &ResolveRecordDto) -> io::Result<Vec<u8>> {
     encoder.write_paths(&record.file_dependencies)?;
     encoder.write_paths(&record.context_dependencies)?;
     encoder.write_paths(&record.missing_dependencies)?;
-<<<<<<< HEAD
     encode_snapshot(&mut encoder, &record.snapshot)?;
     Ok(encoder.finish())
 }
@@ -3826,10 +3667,6 @@ fn encode_resolve_record(record: &ResolveRecordDto) -> io::Result<Vec<u8>> {
 fn encode_snapshot(encoder: &mut Encoder, snapshot: &SnapshotDto) -> io::Result<()> {
     encoder.write_count(snapshot.entries.len())?;
     for entry in &snapshot.entries {
-=======
-    encoder.write_count(record.snapshot.entries.len())?;
-    for entry in &record.snapshot.entries {
->>>>>>> origin/main
         match entry {
             SnapshotEntryDto::File {
                 path,
@@ -3879,11 +3716,7 @@ fn encode_snapshot(encoder: &mut Encoder, snapshot: &SnapshotDto) -> io::Result<
             }
         }
     }
-<<<<<<< HEAD
     Ok(())
-=======
-    Ok(encoder.finish())
->>>>>>> origin/main
 }
 
 fn decode_resolve_record(bytes: &[u8]) -> Option<ResolveRecordDto> {
@@ -3904,7 +3737,6 @@ fn decode_resolve_record(bytes: &[u8]) -> Option<ResolveRecordDto> {
     let file_dependencies = decoder.read_paths()?;
     let context_dependencies = decoder.read_paths()?;
     let missing_dependencies = decoder.read_paths()?;
-<<<<<<< HEAD
     let snapshot = decode_snapshot(&mut decoder)?;
     decoder.finish()?;
     Some(ResolveRecordDto {
@@ -3918,8 +3750,6 @@ fn decode_resolve_record(bytes: &[u8]) -> Option<ResolveRecordDto> {
 }
 
 fn decode_snapshot(decoder: &mut Decoder<'_>) -> Option<SnapshotDto> {
-=======
->>>>>>> origin/main
     let entry_count = decoder.read_count()?;
     let mut entries = Vec::with_capacity(entry_count);
     for _ in 0..entry_count {
@@ -3959,19 +3789,7 @@ fn decode_snapshot(decoder: &mut Decoder<'_>) -> Option<SnapshotDto> {
             _ => return None,
         });
     }
-<<<<<<< HEAD
     Some(SnapshotDto { entries })
-=======
-    decoder.finish()?;
-    Some(ResolveRecordDto {
-        identity,
-        resource,
-        file_dependencies,
-        context_dependencies,
-        missing_dependencies,
-        snapshot: SnapshotDto { entries },
-    })
->>>>>>> origin/main
 }
 
 #[derive(Debug, Default)]
@@ -4022,15 +3840,11 @@ impl Encoder {
     }
 
     fn write_bytes(&mut self, value: &[u8]) -> io::Result<()> {
-<<<<<<< HEAD
         self.write_bytes_with_limit(value, MAX_FIELD_BYTES)
     }
 
     fn write_bytes_with_limit(&mut self, value: &[u8], limit: usize) -> io::Result<()> {
         if value.len() > limit {
-=======
-        if value.len() > MAX_FIELD_BYTES {
->>>>>>> origin/main
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "PackFile field exceeds the configured bound",
@@ -4065,13 +3879,10 @@ impl Encoder {
         self.write_bytes(value.as_bytes())
     }
 
-<<<<<<< HEAD
     fn write_record_string(&mut self, value: &str) -> io::Result<()> {
         self.write_bytes_with_limit(value.as_bytes(), MAX_RECORD_BYTES)
     }
 
-=======
->>>>>>> origin/main
     fn write_path(&mut self, value: &PathBytes) -> io::Result<()> {
         self.write_bytes(&value.0)
     }
@@ -4089,7 +3900,6 @@ impl Encoder {
         }
     }
 
-<<<<<<< HEAD
     fn write_optional_record_string(&mut self, value: Option<&str>) -> io::Result<()> {
         match value {
             Some(value) => {
@@ -4103,8 +3913,6 @@ impl Encoder {
         }
     }
 
-=======
->>>>>>> origin/main
     fn write_optional_u64(&mut self, value: Option<u64>) {
         match value {
             Some(value) => {
@@ -4203,17 +4011,12 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_bytes(&mut self) -> Option<Vec<u8>> {
-<<<<<<< HEAD
         self.read_bytes_with_limit(MAX_FIELD_BYTES)
     }
 
     fn read_bytes_with_limit(&mut self, limit: usize) -> Option<Vec<u8>> {
         let length = usize::try_from(self.read_u32()?).ok()?;
         if length > limit {
-=======
-        let length = usize::try_from(self.read_u32()?).ok()?;
-        if length > MAX_FIELD_BYTES {
->>>>>>> origin/main
             return None;
         }
         let end = self.position.checked_add(length)?;
@@ -4234,13 +4037,10 @@ impl<'a> Decoder<'a> {
         String::from_utf8(self.read_bytes()?).ok()
     }
 
-<<<<<<< HEAD
     fn read_record_string(&mut self) -> Option<String> {
         String::from_utf8(self.read_bytes_with_limit(MAX_RECORD_BYTES)?).ok()
     }
 
-=======
->>>>>>> origin/main
     fn read_path(&mut self) -> Option<PathBytes> {
         Some(PathBytes(self.read_bytes()?))
     }
@@ -4253,7 +4053,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-<<<<<<< HEAD
     fn read_optional_record_string(&mut self) -> Option<Option<String>> {
         match self.read_u8()? {
             0 => Some(None),
@@ -4262,8 +4061,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-=======
->>>>>>> origin/main
     fn read_optional_u64(&mut self) -> Option<Option<u64>> {
         match self.read_u8()? {
             0 => Some(None),
@@ -4309,10 +4106,7 @@ impl<'a> Decoder<'a> {
 #[derive(Debug, Clone, Default)]
 struct PackFileIndex {
     revision: u64,
-<<<<<<< HEAD
     guard: Option<PackFileGuardDto>,
-=======
->>>>>>> origin/main
     entries: BTreeMap<PackFileAddress, PackFileIndexEntry>,
 }
 
@@ -4322,14 +4116,11 @@ struct PackFileIndexEntry {
     type_id: StableTypeId,
     codec_id: StableCodecId,
     content: ContentReference,
-<<<<<<< HEAD
     last_access: AccessStamp,
     last_used_revision: u64,
     // None means the item was used in the current published revision. Some is the first
     // revision that carried it forward without observing an access.
     unused_since_revision: Option<u64>,
-=======
->>>>>>> origin/main
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4338,11 +4129,8 @@ struct ContentReference {
     offset: u64,
     length: u64,
     checksum: u64,
-<<<<<<< HEAD
     pack_size: u64,
     compression: PackFileCompression,
-=======
->>>>>>> origin/main
 }
 
 #[cfg(test)]
@@ -4352,10 +4140,7 @@ struct PackFileReadStats {
     content_reads: usize,
     content_bytes_read: usize,
     decoded_records: usize,
-<<<<<<< HEAD
     retained_content_bytes: usize,
-=======
->>>>>>> origin/main
 }
 
 #[derive(Debug)]
@@ -4363,18 +4148,14 @@ pub(crate) struct PackFile {
     root: PathBuf,
     registry: CodecRegistry,
     index: PackFileIndex,
-<<<<<<< HEAD
     access_updates: BTreeMap<PackFileAddress, AccessStamp>,
     allow_collecting_memory: bool,
     content_buffers: HashMap<PathBuf, Vec<u8>>,
-=======
->>>>>>> origin/main
     #[cfg(test)]
     reads: PackFileReadStats,
 }
 
 impl PackFile {
-<<<<<<< HEAD
     pub(crate) fn index_path(root: impl AsRef<Path>) -> PathBuf {
         root.as_ref().join(INDEX_FILE)
     }
@@ -4391,11 +4172,6 @@ impl PackFile {
     ) -> Self {
         let root = root.as_ref().to_path_buf();
         let index_path = Self::index_path(&root);
-=======
-    pub(crate) fn open(root: impl AsRef<Path>, registry: CodecRegistry) -> Self {
-        let root = root.as_ref().to_path_buf();
-        let index_path = root.join(INDEX_FILE);
->>>>>>> origin/main
         let index = read_bounded(&index_path, MAX_INDEX_BYTES)
             .and_then(|bytes| decode_index(&bytes))
             .unwrap_or_default();
@@ -4403,12 +4179,9 @@ impl PackFile {
             root,
             registry,
             index,
-<<<<<<< HEAD
             access_updates: BTreeMap::new(),
             allow_collecting_memory: options.allow_collecting_memory,
             content_buffers: HashMap::new(),
-=======
->>>>>>> origin/main
             #[cfg(test)]
             reads: PackFileReadStats {
                 index_reads: usize::from(index_path.exists()),
@@ -4421,7 +4194,6 @@ impl PackFile {
         self.index.entries.len()
     }
 
-<<<<<<< HEAD
     pub(crate) fn revision(&self) -> u64 {
         self.index.revision
     }
@@ -4464,8 +4236,6 @@ impl PackFile {
         }
     }
 
-=======
->>>>>>> origin/main
     pub(crate) fn get<T: PackFileItem>(
         &mut self,
         address: &PackFileAddress,
@@ -4475,28 +4245,15 @@ impl PackFile {
         if entry.etag.as_ref() != etag || entry.type_id != T::TYPE_ID {
             return None;
         }
-<<<<<<< HEAD
         if self.registry.codecs.get(&entry.type_id)?.codec_id() != entry.codec_id {
             return None;
         }
 
-=======
-        let codec = self.registry.codecs.get(&entry.type_id)?;
-        if codec.codec_id() != entry.codec_id {
-            return None;
-        }
-
-        let path = self.root.join(&entry.content.file);
->>>>>>> origin/main
         #[cfg(test)]
         {
             self.reads.content_reads += 1;
         }
-<<<<<<< HEAD
         let frame = self.read_content_frame(&entry.content)?;
-=======
-        let frame = read_content_reference(&path, &entry.content)?;
->>>>>>> origin/main
         #[cfg(test)]
         {
             self.reads.content_bytes_read += frame.len();
@@ -4516,7 +4273,6 @@ impl PackFile {
         Some(Arc::new(value))
     }
 
-<<<<<<< HEAD
     fn read_content_frame(&mut self, reference: &ContentReference) -> Option<Vec<u8>> {
         let path = self.root.join(&reference.file);
         if reference.compression == PackFileCompression::None {
@@ -4540,8 +4296,6 @@ impl PackFile {
         content_frame_from_pack(self.content_buffers.get(&reference.file)?, reference)
     }
 
-=======
->>>>>>> origin/main
     pub(crate) fn get_resolve_record(
         &mut self,
         address: &PackFileAddress,
@@ -4550,7 +4304,6 @@ impl PackFile {
         self.get(address, etag)
     }
 
-<<<<<<< HEAD
     pub(crate) fn get_module_build_record(
         &mut self,
         address: &PackFileAddress,
@@ -4561,9 +4314,6 @@ impl PackFile {
 
     #[cfg(test)]
     fn publish_items<T, I>(
-=======
-    pub(crate) fn publish_items<T, I>(
->>>>>>> origin/main
         root: impl AsRef<Path>,
         registry: &CodecRegistry,
         items: I,
@@ -4575,7 +4325,6 @@ impl PackFile {
         publish_items(root.as_ref(), registry, items, PublishFault::None)
     }
 
-<<<<<<< HEAD
     #[cfg(test)]
     fn publish_batch(
         root: impl AsRef<Path>,
@@ -4628,9 +4377,6 @@ impl PackFile {
 
     #[cfg(test)]
     fn publish_resolve_records<I>(
-=======
-    pub(crate) fn publish_resolve_records<I>(
->>>>>>> origin/main
         root: impl AsRef<Path>,
         registry: &CodecRegistry,
         records: I,
@@ -4642,7 +4388,6 @@ impl PackFile {
     }
 
     #[cfg(test)]
-<<<<<<< HEAD
     fn publish_module_build_records<I>(
         root: impl AsRef<Path>,
         registry: &CodecRegistry,
@@ -4655,8 +4400,6 @@ impl PackFile {
     }
 
     #[cfg(test)]
-=======
->>>>>>> origin/main
     fn read_stats(&self) -> PackFileReadStats {
         self.reads
     }
@@ -4682,10 +4425,7 @@ enum PublishFault {
     BeforeIndexReplace,
 }
 
-<<<<<<< HEAD
 #[cfg(test)]
-=======
->>>>>>> origin/main
 fn publish_items<T, I>(
     root: &Path,
     registry: &CodecRegistry,
@@ -4696,7 +4436,6 @@ where
     T: PackFileItem,
     I: IntoIterator<Item = (PackFileAddress, Option<PackFileETag>, T)>,
 {
-<<<<<<< HEAD
     let current = read_bounded(&root.join(INDEX_FILE), MAX_INDEX_BYTES)
         .and_then(|bytes| decode_index(&bytes))
         .unwrap_or_default();
@@ -4757,20 +4496,10 @@ fn publish_batch(
         }
         PublicationBase::ReplaceAll => BTreeMap::new(),
     };
-=======
-    let items = items
-        .into_iter()
-        .map(|(address, etag, value)| (address, (etag, value)))
-        .collect::<BTreeMap<_, _>>();
-    let current = read_bounded(&root.join(INDEX_FILE), MAX_INDEX_BYTES)
-        .and_then(|bytes| decode_index(&bytes))
-        .unwrap_or_default();
->>>>>>> origin/main
     let revision = current
         .revision
         .checked_add(1)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PackFile revision overflow"))?;
-<<<<<<< HEAD
     let PackFileWriteBatch { items, accesses } = batch;
     let pending_addresses = items.keys().cloned().collect::<BTreeSet<_>>();
     for (address, entry) in &mut entries {
@@ -4908,13 +4637,10 @@ fn publish_batch(
             used: true,
         });
     }
-=======
->>>>>>> origin/main
 
     fs::create_dir_all(root)?;
     let content_directory = root.join(CONTENT_DIRECTORY);
     fs::create_dir_all(&content_directory)?;
-<<<<<<< HEAD
     let mut encoded_packs = Vec::<Vec<StagedContentItem>>::new();
     let mut current_pack = Vec::new();
     let mut current_pack_bytes = 0usize;
@@ -4936,33 +4662,11 @@ fn publish_batch(
                 io::Error::new(io::ErrorKind::InvalidData, "content pack size overflow")
             })?;
         if current_pack_bytes > MAX_CONTENT_BYTES {
-=======
-    let filename = format!("pack-{revision:016x}.bin");
-    let relative_path = PathBuf::from(CONTENT_DIRECTORY).join(&filename);
-    let mut content_pack = Vec::new();
-    let mut entries = current.entries;
-    for (address, (etag, value)) in items {
-        let (codec_id, payload) = registry.encode(&value)?;
-        let frame = encode_content(T::TYPE_ID, codec_id, &payload)?;
-        let offset = u64::try_from(content_pack.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "content pack offset is too large",
-            )
-        })?;
-        let length = u64::try_from(frame.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "content frame is too large")
-        })?;
-        let frame_checksum = checksum(&frame);
-        content_pack.extend_from_slice(&frame);
-        if content_pack.len() > MAX_CONTENT_BYTES {
->>>>>>> origin/main
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "content pack exceeds the configured bound",
             ));
         }
-<<<<<<< HEAD
         current_pack.push(item);
     }
     if !current_pack.is_empty() {
@@ -5027,44 +4731,18 @@ fn publish_batch(
         let temporary_path = content_directory.join(format!(".{filename}.tmp"));
         let encoded_content = encode_content_pack(content_pack, options.compression)?;
         write_synced(&temporary_path, &encoded_content)?;
-=======
-        entries.insert(
-            address,
-            PackFileIndexEntry {
-                etag,
-                type_id: T::TYPE_ID,
-                codec_id,
-                content: ContentReference {
-                    file: relative_path.clone(),
-                    offset,
-                    length,
-                    checksum: frame_checksum,
-                },
-            },
-        );
-    }
-
-    if !content_pack.is_empty() {
-        let final_path = root.join(&relative_path);
-        let temporary_path = content_directory.join(format!(".{filename}.tmp"));
-        write_synced(&temporary_path, &content_pack)?;
->>>>>>> origin/main
         if let Err(error) = fs::rename(&temporary_path, &final_path) {
             let _ = fs::remove_file(&temporary_path);
             return Err(error);
         }
-<<<<<<< HEAD
     }
     if pack_count > 0 {
-=======
->>>>>>> origin/main
         sync_directory(&content_directory)?;
     }
 
     if fault == PublishFault::AfterContentCommit {
         return Err(injected_publish_error("after content commit"));
     }
-<<<<<<< HEAD
     force_test_process_termination(PublishFault::AfterContentCommit);
 
     let index = PackFileIndex {
@@ -5072,10 +4750,6 @@ fn publish_batch(
         guard,
         entries,
     };
-=======
-
-    let index = PackFileIndex { revision, entries };
->>>>>>> origin/main
     let index_bytes = encode_index(&index)?;
     let temporary_index = root.join(format!(".{INDEX_FILE}-{revision:016x}.tmp"));
     write_synced(&temporary_index, &index_bytes)?;
@@ -5083,15 +4757,11 @@ fn publish_batch(
         let _ = fs::remove_file(&temporary_index);
         return Err(injected_publish_error("before index replacement"));
     }
-<<<<<<< HEAD
     force_test_process_termination(PublishFault::BeforeIndexReplace);
-=======
->>>>>>> origin/main
     if let Err(error) = fs::rename(&temporary_index, root.join(INDEX_FILE)) {
         let _ = fs::remove_file(&temporary_index);
         return Err(error);
     }
-<<<<<<< HEAD
     sync_directory(root)?;
 
     let referenced_files = index
@@ -5127,16 +4797,12 @@ fn entry_is_expired(
             .now
             .elapsed_since(entry.last_access)
             .is_some_and(|age| age > retention.max_age)
-=======
-    sync_directory(root)
->>>>>>> origin/main
 }
 
 fn injected_publish_error(point: &str) -> io::Error {
     io::Error::other(format!("injected PackFile failure {point}"))
 }
 
-<<<<<<< HEAD
 fn content_pack_filename(
     revision: u64,
     pack_index: usize,
@@ -5217,8 +4883,6 @@ fn force_test_process_termination(point: PublishFault) {
     }
 }
 
-=======
->>>>>>> origin/main
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = fs::File::create(path)?;
     file.write_all(bytes)?;
@@ -5239,7 +4903,6 @@ fn read_bounded(path: &Path, maximum: usize) -> Option<Vec<u8>> {
     (bytes.len() == length).then_some(bytes)
 }
 
-<<<<<<< HEAD
 fn read_content_pack(
     path: &Path,
     compression: PackFileCompression,
@@ -5290,11 +4953,6 @@ fn read_content_reference(path: &Path, reference: &ContentReference) -> Option<V
     let file_length = fs::metadata(path).ok()?.len();
     if usize::try_from(file_length).ok()? > MAX_CONTENT_BYTES || file_length != reference.pack_size
     {
-=======
-fn read_content_reference(path: &Path, reference: &ContentReference) -> Option<Vec<u8>> {
-    let file_length = fs::metadata(path).ok()?.len();
-    if usize::try_from(file_length).ok()? > MAX_CONTENT_BYTES {
->>>>>>> origin/main
         return None;
     }
     let end = reference.offset.checked_add(reference.length)?;
@@ -5315,7 +4973,6 @@ fn read_content_reference(path: &Path, reference: &ContentReference) -> Option<V
 fn encode_index(index: &PackFileIndex) -> io::Result<Vec<u8>> {
     let mut body = Encoder::default();
     body.write_u64(index.revision);
-<<<<<<< HEAD
     match &index.guard {
         Some(guard) => {
             body.write_u8(1);
@@ -5325,8 +4982,6 @@ fn encode_index(index: &PackFileIndex) -> io::Result<Vec<u8>> {
         }
         None => body.write_u8(0),
     }
-=======
->>>>>>> origin/main
     body.write_count(index.entries.len())?;
     for (address, entry) in &index.entries {
         body.write_bytes(&address.namespace)?;
@@ -5340,7 +4995,6 @@ fn encode_index(index: &PackFileIndex) -> io::Result<Vec<u8>> {
         body.write_u64(entry.content.offset);
         body.write_u64(entry.content.length);
         body.write_u64(entry.content.checksum);
-<<<<<<< HEAD
         body.write_u64(entry.content.pack_size);
         body.write_u8(match entry.content.compression {
             PackFileCompression::None => 0,
@@ -5350,8 +5004,6 @@ fn encode_index(index: &PackFileIndex) -> io::Result<Vec<u8>> {
         body.write_u64(entry.last_access.unix_millis);
         body.write_u64(entry.last_used_revision);
         body.write_optional_u64(entry.unused_since_revision);
-=======
->>>>>>> origin/main
     }
     encode_frame(INDEX_MAGIC, &body.finish(), MAX_INDEX_BYTES)
 }
@@ -5360,7 +5012,6 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
     let body = decode_frame(bytes, INDEX_MAGIC, MAX_INDEX_BYTES)?;
     let mut decoder = Decoder::new(body);
     let revision = decoder.read_u64()?;
-<<<<<<< HEAD
     let guard = match decoder.read_u8()? {
         0 => None,
         1 => Some(PackFileGuardDto {
@@ -5370,8 +5021,6 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
         }),
         _ => return None,
     };
-=======
->>>>>>> origin/main
     let count = decoder.read_count()?;
     let mut entries = BTreeMap::new();
     for _ in 0..count {
@@ -5392,7 +5041,6 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
             return None;
         }
         let checksum = decoder.read_u64()?;
-<<<<<<< HEAD
         let pack_size = decoder.read_u64()?;
         if usize::try_from(pack_size).ok()? > MAX_CONTENT_BYTES
             || offset.checked_add(length)? > pack_size
@@ -5415,8 +5063,6 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
         {
             return None;
         }
-=======
->>>>>>> origin/main
         entries.insert(
             address,
             PackFileIndexEntry {
@@ -5428,29 +5074,21 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
                     offset,
                     length,
                     checksum,
-<<<<<<< HEAD
                     pack_size,
                     compression,
                 },
                 last_access,
                 last_used_revision,
                 unused_since_revision,
-=======
-                },
->>>>>>> origin/main
             },
         );
     }
     decoder.finish()?;
-<<<<<<< HEAD
     Some(PackFileIndex {
         revision,
         guard,
         entries,
     })
-=======
-    Some(PackFileIndex { revision, entries })
->>>>>>> origin/main
 }
 
 fn encode_content(

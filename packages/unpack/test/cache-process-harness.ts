@@ -12,10 +12,7 @@ export interface CacheProcessOptions {
   mode?: "development" | "production" | "none";
   name?: string;
   outputPath: string;
-<<<<<<< HEAD
   sourcemap?: boolean;
-=======
->>>>>>> origin/main
   cache?: boolean | Record<string, unknown>;
   snapshot?: Record<string, unknown>;
 }
@@ -33,7 +30,6 @@ export interface CacheProcessObservation {
   hasStats: boolean;
   hasErrors: boolean | null;
   assets: string[];
-<<<<<<< HEAD
   assetDetails: { name: string; size: number }[];
   outputPath: string | null;
   cacheWork: CacheWorkObservation | null;
@@ -57,9 +53,6 @@ export interface CacheWorkObservation {
 export interface CacheProcessTermination {
   code: number | null;
   signal: string | null;
-=======
-  outputPath: string | null;
->>>>>>> origin/main
 }
 
 export async function runColdWarmBuilds(
@@ -73,11 +66,7 @@ export async function runColdWarmBuilds(
 
 export async function runCacheProcess(
   request: CacheProcessRequest,
-<<<<<<< HEAD
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
-=======
-  options: { cwd?: string } = {}
->>>>>>> origin/main
 ): Promise<CacheProcessObservation> {
   const driver = fileURLToPath(new URL("./cache-process-driver.js", import.meta.url));
   const { stdout, stderr } = await execFile(
@@ -85,23 +74,18 @@ export async function runCacheProcess(
     [driver, JSON.stringify(request)],
     {
       cwd: options.cwd,
-<<<<<<< HEAD
       maxBuffer: 1024 * 1024,
       env: {
         ...process.env,
         ...options.env,
         UNPACK_INTERNAL_TRACING: "unpack_core::cache_work=info"
       }
-=======
-      maxBuffer: 1024 * 1024
->>>>>>> origin/main
     }
   );
   const output = stdout.trim().split("\n").at(-1);
   if (!output) {
     throw new Error(`cache process produced no observation${stderr ? `: ${stderr}` : ""}`);
   }
-<<<<<<< HEAD
   return {
     ...(JSON.parse(output) as CacheProcessObservation),
     cacheWork: parseCacheWork(stderr)
@@ -162,7 +146,4 @@ function parseCacheWork(stderr: string): CacheWorkObservation | null {
     codeGeneration: item("code_generation"),
     assetRender: item("asset_render")
   };
-=======
-  return JSON.parse(output) as CacheProcessObservation;
->>>>>>> origin/main
 }

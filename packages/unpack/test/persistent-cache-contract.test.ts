@@ -1,8 +1,4 @@
-<<<<<<< HEAD
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
-=======
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
->>>>>>> origin/main
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
@@ -13,10 +9,7 @@ import type { CacheOptions, Compiler, Mode, Stats } from "@unpack-js/core";
 
 import {
   runCacheProcess,
-<<<<<<< HEAD
   runCacheProcessExpectTermination,
-=======
->>>>>>> origin/main
   runColdWarmBuilds
 } from "./cache-process-harness.js";
 import type { CacheProcessObservation } from "./cache-process-harness.js";
@@ -32,7 +25,6 @@ test("cache booleans override mode-dependent defaults", async () => {
   await assertCacheOverrideBehavior("development", false, "after");
 });
 
-<<<<<<< HEAD
 test("Linux process termination during PackFile publication never exposes a partial revision", async (t) => {
   if (process.platform !== "linux") {
     t.skip("Persistent Cache crash recovery is a Linux-only contract");
@@ -73,8 +65,6 @@ test("Linux process termination during PackFile publication never exposes a part
   }
 });
 
-=======
->>>>>>> origin/main
 test("cache objects require a type and reject fields outside the selected cache type synchronously", () => {
   const createCompiler = (cache: unknown) => () =>
     unpack({
@@ -88,7 +78,6 @@ test("cache objects require a type and reject fields outside the selected cache 
     /options\.cache\.cacheLocation is only valid for filesystem cache/
   );
   assert.throws(
-<<<<<<< HEAD
     createCompiler({ type: "memory", cacheUnaffected: true }),
     /options\.cache contains unsupported option 'cacheUnaffected'/
   );
@@ -98,14 +87,6 @@ test("cache objects require a type and reject fields outside the selected cache 
       buildDependencies: { config: [""] }
     }),
     /options\.cache\.buildDependencies\.config\[0\] must not be empty/
-=======
-    createCompiler({ type: "filesystem", maxMemoryGenerations: 2 }),
-    /options\.cache contains unsupported option 'maxMemoryGenerations'/
-  );
-  assert.throws(
-    createCompiler({ type: "memory", cacheUnaffected: true }),
-    /options\.cache contains unsupported option 'cacheUnaffected'/
->>>>>>> origin/main
   );
   assert.throws(
     createCompiler({ type: "filesystem", memoryCacheUnaffected: true }),
@@ -114,7 +95,6 @@ test("cache objects require a type and reject fields outside the selected cache 
   assert.doesNotThrow(createCompiler({ type: "memory" }));
 });
 
-<<<<<<< HEAD
 test("memory generation limits follow webpack's zero, finite, and unbounded contract", () => {
   const createCompiler = (cache: CacheOptions) => () =>
     unpack({ entry: "./src/index.js", cache });
@@ -160,8 +140,6 @@ test("memory generation limits follow webpack's zero, finite, and unbounded cont
   );
 });
 
-=======
->>>>>>> origin/main
 test("filesystem cache derives its name and directory from the top-level contract across processes", async () => {
   const fixture = await createFixture({
     "package.json": "{}",
@@ -252,11 +230,7 @@ test("explicit filesystem cache paths must be absolute and cacheLocation takes p
   }
 });
 
-<<<<<<< HEAD
 test("validates inert fields and active persistent cache controls", async () => {
-=======
-test("only the approved webpack cache fields are accepted as inert", async () => {
->>>>>>> origin/main
   const fixture = await createFixture({
     "src/index.js": "export const value = 'inert-options';"
   });
@@ -282,7 +256,6 @@ test("only the approved webpack cache fields are accepted as inert", async () =>
       /options\.cache\.immutablePaths\[0\] must be an absolute path/
     );
     assert.throws(
-<<<<<<< HEAD
       createCompiler({ type: "filesystem", maxAge: -1 }),
       /options\.cache\.maxAge must be a non-negative number/
     );
@@ -335,11 +308,6 @@ test("only the approved webpack cache fields are accepted as inert", async () =>
         )
       );
     }
-=======
-      createCompiler({ type: "filesystem", maxAge: 1 }),
-      /options\.cache contains unknown option 'maxAge'/
-    );
->>>>>>> origin/main
 
     const compiler = unpack({
       context: fixture,
@@ -348,12 +316,9 @@ test("only the approved webpack cache fields are accepted as inert", async () =>
       cache: {
         type: "filesystem",
         cacheLocation,
-<<<<<<< HEAD
         maxAge: Number.POSITIVE_INFINITY,
         compression: "gzip",
         allowCollectingMemory: true,
-=======
->>>>>>> origin/main
         hashAlgorithm: "not-a-runtime-hash",
         managedPaths: [fixture, /node_modules/g],
         immutablePaths: [/immutable/y]
@@ -364,14 +329,11 @@ test("only the approved webpack cache fields are accepted as inert", async () =>
 
     assert.equal(result.err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /inert-options/);
-<<<<<<< HEAD
     assert.ok(
       (await readdir(join(cacheLocation, "content"))).every((file) =>
         file.endsWith(".bin.gz")
       )
     );
-=======
->>>>>>> origin/main
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -435,7 +397,6 @@ test("selective cold and warm observations run Unpack and pinned webpack in inde
   }
 });
 
-<<<<<<< HEAD
 test("unchanged Resolve and Module Build work restores in an independent process", async () => {
   const fixture = await createFixture({
     "src/index.js": "import './dep.js'; export const result = 'ok';",
@@ -997,8 +958,6 @@ test("legacy JSON and CBOR cache files remain untouched and are treated as cold"
   }
 });
 
-=======
->>>>>>> origin/main
 test("cache validation is synchronous for Unpack and pinned webpack", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"
@@ -1058,36 +1017,6 @@ test("filesystem cache falls back to cwd and explicit cache name overrides top-l
   }
 });
 
-<<<<<<< HEAD
-=======
-test("empty top-level name uses the default derived cache name", async () => {
-  const fixture = await createFixture({
-    "src/index.js": "export const value = 1;"
-  });
-
-  try {
-    const observation = await runCacheProcess(
-      {
-        bundler: "unpack",
-        options: {
-          context: fixture,
-          mode: "production",
-          name: "",
-          outputPath: join(fixture, "dist"),
-          cache: { type: "filesystem" }
-        }
-      },
-      { cwd: fixture }
-    );
-
-    assert.equal(observation.error, null);
-    assert.ok(await stat(join(fixture, ".cache/unpack/default-production")));
-  } finally {
-    await rm(fixture, { recursive: true, force: true });
-  }
-});
-
->>>>>>> origin/main
 test("Context Module and cache-unaffected surfaces remain synchronously unsupported", () => {
   const createCompiler = (options: Record<string, unknown>) => () =>
     unpack(
@@ -1165,7 +1094,6 @@ function publicBuildOutcome(observation: CacheProcessObservation) {
   };
 }
 
-<<<<<<< HEAD
 function singleModuleCacheWork(kind: "cold" | "warm") {
   const item =
     kind === "cold"
@@ -1220,10 +1148,6 @@ async function assertOmittedCacheBehavior(mode: Mode, expected: "before" | "afte
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
   }
-=======
-async function assertOmittedCacheBehavior(mode: Mode, expected: "before" | "after") {
-  await assertCacheBehavior(mode, expected);
->>>>>>> origin/main
 }
 
 async function assertCacheOverrideBehavior(
@@ -1231,17 +1155,6 @@ async function assertCacheOverrideBehavior(
   cache: boolean,
   expected: "before" | "after"
 ) {
-<<<<<<< HEAD
-=======
-  await assertCacheBehavior(mode, expected, cache);
-}
-
-async function assertCacheBehavior(
-  mode: Mode,
-  expected: "before" | "after",
-  cache?: boolean
-) {
->>>>>>> origin/main
   const fixture = await createFixture({
     "src/index.js": "export const value = 'before';"
   });
@@ -1254,11 +1167,7 @@ async function assertCacheBehavior(
     mode,
     entry: "./src/index.js",
     sourcemap: false,
-<<<<<<< HEAD
     cache,
-=======
-    ...(cache === undefined ? {} : { cache }),
->>>>>>> origin/main
     snapshot: {
       module: { timestamp: false, hash: false }
     }
@@ -1266,10 +1175,6 @@ async function assertCacheBehavior(
 
   try {
     assert.equal((await runCompiler(compiler)).err, null);
-<<<<<<< HEAD
-=======
-    assert.match(await readFile(output, "utf8"), /before/);
->>>>>>> origin/main
     await writeFile(entry, "export const value = 'after';", "utf8");
     await utimes(entry, stableTime, stableTime);
     assert.equal((await runCompiler(compiler)).err, null);

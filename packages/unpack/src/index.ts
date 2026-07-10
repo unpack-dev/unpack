@@ -271,7 +271,7 @@ interface NativeFlushResult {
 
 interface NativeCompiler {
   run(): Promise<NativeRunResult>;
-  flushCache(): Promise<NativeFlushResult>;
+  settleCache(): Promise<NativeFlushResult>;
   close(): void;
 }
 
@@ -522,7 +522,7 @@ class CompilerImpl implements Compiler {
     if (startsFlush) {
       this.#emitInfrastructureLog("info", "unpack.Cache", "cache flush started");
     }
-    const flush = this.#pendingCacheFlush ?? this.#nativeCompiler.flushCache();
+    const flush = this.#pendingCacheFlush ?? this.#nativeCompiler.settleCache();
     this.#pendingCacheFlush = flush;
 
     try {

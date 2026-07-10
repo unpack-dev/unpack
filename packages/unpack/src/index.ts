@@ -299,8 +299,11 @@ class CompilerImpl implements Compiler {
   #watching: WatchingImpl | undefined;
   #idleFlushTimer: ReturnType<typeof setTimeout> | undefined;
   #pendingCacheFlush: Promise<NativeFlushResult> | undefined;
+  #hasCompletedFilesystemCompilation = false;
   readonly #writableFilesystemCache: boolean;
   readonly #cacheIdleTimeout: number;
+  readonly #cacheInitialStoreTimeout: number;
+  readonly #cacheLargeChangeTimeout: number;
   readonly #infrastructureLoggingLevel: InfrastructureLoggingLevel;
   readonly #nativeCompiler: NativeCompiler;
 
@@ -308,7 +311,11 @@ class CompilerImpl implements Compiler {
     this.#nativeCompiler = native.createCompiler(options);
     this.#writableFilesystemCache =
       options.cache.type === "filesystem" && !options.cache.readonly;
-    this.#cacheIdleTimeout = options.cache.idleTimeout ?? 0;
+    this.#cacheIdleTimeout = options.cache.idleTimeout ?? 60_000;
+    this.#cacheInitialStoreTimeout =
+      options.cache.idleTimeoutForInitialStore ?? 5_000;
+    this.#cacheLargeChangeTimeout =
+      options.cache.idleTimeoutAfterLargeChanges ?? 1_000;
     this.#infrastructureLoggingLevel = options.infrastructureLogging.level;
   }
 
@@ -360,7 +367,12 @@ class CompilerImpl implements Compiler {
           return;
         }
 
-        this.#scheduleIdleCacheFlush();
+        this.#scheduleIdleCacheFlush(
+          this.#hasCompletedFilesystemCompilation
+            ? this.#cacheIdleTimeout
+            : this.#cacheInitialStoreTimeout
+        );
+        this.#hasCompletedFilesystemCompilation = true;
         this.#emitInfrastructureLog("info", "unpack.Compiler", "run completed");
         callback(null, new StatsImpl(normalizeNativeStats(result.stats)));
       },
@@ -487,7 +499,12 @@ class CompilerImpl implements Compiler {
         return;
       }
 
-      this.#scheduleIdleCacheFlush();
+      this.#scheduleIdleCacheFlush(
+        this.#hasCompletedFilesystemCompilation
+          ? this.#cacheLargeChangeTimeout
+          : this.#cacheInitialStoreTimeout
+      );
+      this.#hasCompletedFilesystemCompilation = true;
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation completed");
       handler(null, new StatsImpl(normalizeNativeStats(result.stats)));
     } catch (error) {
@@ -497,16 +514,13 @@ class CompilerImpl implements Compiler {
     }
   }
 
-  #scheduleIdleCacheFlush(): void {
-    if (!this.#writableFilesystemCache || this.#closed) {
-      return;
-    }
-
+  #scheduleIdleCacheFlush(delay: number): void {
+    if (!this.#writableFilesystemCache || this.#closed) return;
     this.#clearIdleFlushTimer();
     this.#idleFlushTimer = setTimeout(() => {
       this.#idleFlushTimer = undefined;
       void this.#flushCacheNow();
-    }, this.#cacheIdleTimeout);
+    }, delay);
   }
 
   #clearIdleFlushTimer(): void {

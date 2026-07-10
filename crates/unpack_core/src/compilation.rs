@@ -6,7 +6,7 @@ use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleId, Result, UnpackResolver,
     build_cache::BuildCache,
-    code_generation,
+    code_generation::{self, CodeGenerationResults, RenderManifest},
     make::{self, MakeState},
     snapshot::FileSystemInfo,
 };
@@ -19,6 +19,8 @@ pub struct Compilation {
     build_cache: BuildCache,
     module_graph: ModuleGraph,
     chunk_graph: ChunkGraph,
+    code_generation_results: Option<CodeGenerationResults>,
+    asset_render_manifest: Option<RenderManifest>,
     assets: Vec<Asset>,
     entries: Vec<ModuleId>,
     errors: Vec<Error>,
@@ -40,6 +42,8 @@ impl Compilation {
             build_cache,
             module_graph: ModuleGraph::default(),
             chunk_graph: ChunkGraph::default(),
+            code_generation_results: None,
+            asset_render_manifest: None,
             assets: Vec::new(),
             entries: Vec::new(),
             errors: Vec::new(),
@@ -152,17 +156,52 @@ impl Compilation {
             "unpack.Compilation",
             "asset creation started",
         );
-        self.assets = code_generation::create_assets(
-            &self.options,
-            &self.module_graph,
-            &self.chunk_graph,
-            &self.entries,
-        );
+        self.create_asset_render_manifest();
+        self.render_assets();
         self.log_infrastructure(
             InfrastructureLogLevel::Verbose,
             "unpack.Compilation",
             "asset creation completed",
         );
+    }
+
+    pub fn create_asset_render_manifest(&mut self) {
+        if self.code_generation_results.is_none() {
+            self.code_generation();
+        }
+        self.asset_render_manifest = Some(code_generation::create_render_manifest(
+            &self.chunk_graph,
+            &self.entries,
+            self.code_generation_results
+                .as_ref()
+                .expect("code generation results should exist before render manifest creation"),
+        ));
+    }
+
+    pub fn render_assets(&mut self) {
+        if self.asset_render_manifest.is_none() {
+            self.create_asset_render_manifest();
+        }
+        self.assets = code_generation::render_assets(
+            &self.options,
+            self.asset_render_manifest
+                .as_ref()
+                .expect("render manifest should exist before Asset rendering"),
+            self.code_generation_results
+                .as_ref()
+                .expect("code generation results should exist before Asset rendering"),
+        );
+    }
+
+    pub fn code_generation(&mut self) {
+        let span = tracing::trace_span!("Compilation::code_generation");
+        let _enter = span.enter();
+        self.code_generation_results = Some(code_generation::generate_code(
+            &self.options,
+            &self.module_graph,
+            &self.chunk_graph,
+        ));
+        self.asset_render_manifest = None;
     }
 
     fn log_infrastructure(

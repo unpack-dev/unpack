@@ -1,0 +1,4 @@
+{
+  "runtimeExpression": "[entry.renamed, entry.star]",
+  "expected": [42, "ok"]
+}

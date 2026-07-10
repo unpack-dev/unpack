@@ -169,6 +169,7 @@ impl Compilation {
         self.build_chunk_graph();
         self.assign_render_ids();
         self.code_generation();
+        self.process_runtime_requirements();
         self.create_assets();
     }
 
@@ -232,6 +233,17 @@ impl Compilation {
             &self.chunk_graph,
         ));
         self.asset_render_manifest = None;
+    }
+
+    pub(crate) fn process_runtime_requirements(&mut self) {
+        let requirements = self
+            .code_generation_results
+            .as_ref()
+            .expect("code generation results should exist before Runtime Requirements processing")
+            .runtime_requirements()
+            .map(|(module, requirements)| (module, requirements.clone()))
+            .collect::<Vec<_>>();
+        self.chunk_graph.process_runtime_requirements(requirements);
     }
 
     fn log_infrastructure(

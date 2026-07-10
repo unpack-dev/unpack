@@ -365,6 +365,11 @@ mod tests {
 
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
         let results = generate_code(&module_graph, &chunk_graph);
+        chunk_graph.process_runtime_requirements(
+            results
+                .runtime_requirements()
+                .map(|(module, requirements)| (module, requirements.clone())),
+        );
         let manifest = create_render_manifest(&chunk_graph, &[module], &results);
         let assets = render_assets(&options, &build_cache, &manifest, &results);
         let main = assets
@@ -406,6 +411,11 @@ mod tests {
 
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
         let results = generate_code(&module_graph, &chunk_graph);
+        chunk_graph.process_runtime_requirements(
+            results
+                .runtime_requirements()
+                .map(|(module, requirements)| (module, requirements.clone())),
+        );
         let manifest = create_render_manifest(&chunk_graph, &entries, &results);
         render_assets(&options, &build_cache, &manifest, &results)
     }

@@ -18,3 +18,6 @@ Optional manifest fields:
 
 - `entry`: override the default `./src/index.js` entry.
 - `entryAsset`: override the default emitted `main.js` asset to require.
+- `expectedErrors`: require completed-compilation Stats errors containing these strings.
+- `expectedErrorCount`: require the exact number of completed-compilation errors.
+- `expectedAssets`: require the exact emitted Asset names.

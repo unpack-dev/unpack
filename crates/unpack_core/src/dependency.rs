@@ -173,6 +173,34 @@ impl Dependency {
                 | Self::HarmonyExportImportedSpecifier(_)
         )
     }
+
+    pub(crate) fn source_ranges(&self) -> Vec<SourceRange> {
+        let mut ranges = Vec::new();
+        match self {
+            Self::Entry(_) | Self::HarmonyExportSpecifier(_) | Self::Null(_) => {}
+            Self::HarmonyImportSideEffect(dependency) => {
+                ranges.extend(dependency.module.range);
+            }
+            Self::HarmonyImportSpecifier(dependency) => {
+                ranges.extend(dependency.module.range);
+                ranges.push(dependency.usage_range);
+            }
+            Self::HarmonyExportHeader(dependency) => {
+                ranges.push(dependency.statement_range);
+                ranges.extend(dependency.declaration_range);
+            }
+            Self::HarmonyExportExpression(dependency) => {
+                ranges.push(dependency.statement_range);
+                ranges.push(dependency.range);
+            }
+            Self::HarmonyExportImportedSpecifier(dependency) => {
+                ranges.extend(dependency.module.range);
+            }
+            Self::Const(dependency) => ranges.push(dependency.range),
+            Self::Import(dependency) => ranges.extend(dependency.module.range),
+        }
+        ranges
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

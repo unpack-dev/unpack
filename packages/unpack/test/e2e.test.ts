@@ -31,6 +31,9 @@ interface BundleExecutionCase {
   entryAsset?: string;
   runtimeExpression: string;
   expected: unknown;
+  expectedErrors?: string[];
+  expectedErrorCount?: number;
+  expectedAssets?: string[];
 }
 
 interface BundleExecutionCaseManifest {
@@ -38,6 +41,9 @@ interface BundleExecutionCaseManifest {
   entryAsset?: string;
   runtimeExpression: string;
   expected: unknown;
+  expectedErrors?: string[];
+  expectedErrorCount?: number;
+  expectedAssets?: string[];
 }
 
 const bundleExecutionCases = await readBundleExecutionCases();
@@ -61,13 +67,35 @@ async function runBundleExecutionCase(bundleCase: BundleExecutionCase) {
     });
 
     assert.equal(err, null);
-    assert.equal(stats?.hasErrors(), false);
+    const errors = stats?.toJson().errors ?? [];
+    if (bundleCase.expectedErrors === undefined && bundleCase.expectedErrorCount === undefined) {
+      assert.equal(stats?.hasErrors(), false);
+    } else {
+      if (bundleCase.expectedErrors !== undefined) {
+        assert.equal(stats?.hasErrors(), true);
+        for (const expectedError of bundleCase.expectedErrors) {
+          assert.ok(
+            errors.some((error) => error.message.includes(expectedError)),
+            `expected Stats error containing ${JSON.stringify(expectedError)}`
+          );
+        }
+      }
+      if (bundleCase.expectedErrorCount !== undefined) {
+        assert.equal(errors.length, bundleCase.expectedErrorCount);
+      }
+    }
     assert.ok(
       stats?.toJson().assets.some((asset) => asset.name === (bundleCase.entryAsset ?? defaultEntryAsset))
     );
     assert.ok(
       (await readdir(outputPath)).includes(bundleCase.entryAsset ?? defaultEntryAsset)
     );
+    if (bundleCase.expectedAssets !== undefined) {
+      assert.deepEqual(
+        stats?.toJson().assets.map((asset) => asset.name).sort(),
+        [...bundleCase.expectedAssets].sort()
+      );
+    }
 
     const result = await executeEntryExpression(
       outputPath,
@@ -198,6 +226,21 @@ function parseCaseManifest(id: string, source: string): BundleExecutionCaseManif
       typeof manifest.entryAsset,
       "string",
       `${id}/case.json entryAsset must be a string`
+    );
+  }
+  for (const field of ["expectedErrors", "expectedAssets"] as const) {
+    if (manifest[field] !== undefined) {
+      assert.ok(
+        Array.isArray(manifest[field]) && manifest[field].every((value) => typeof value === "string"),
+        `${id}/case.json ${field} must be an array of strings`
+      );
+    }
+  }
+  if (manifest.expectedErrorCount !== undefined) {
+    assert.equal(
+      Number.isInteger(manifest.expectedErrorCount) && manifest.expectedErrorCount >= 0,
+      true,
+      `${id}/case.json expectedErrorCount must be a non-negative integer`
     );
   }
 

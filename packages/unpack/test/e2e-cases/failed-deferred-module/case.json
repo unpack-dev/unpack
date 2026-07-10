@@ -1,0 +1,7 @@
+{
+  "runtimeExpression": "entry.load().then(() => [entry.safe, false, false], error => [entry.safe, /failed to parse/.test(error.message), /broken\\.js/.test(error.message)])",
+  "expected": ["safe", true, true],
+  "expectedErrors": ["failed to parse", "broken.js"],
+  "expectedErrorCount": 1,
+  "expectedAssets": ["main.js", "src_broken_js.js"]
+}

@@ -34,6 +34,11 @@ pub(crate) struct CodeGenerationResults {
     results: HashMap<ModuleId, CodeGenerationResult>,
 }
 
+pub(crate) struct CodeGenerationOutcome {
+    pub(crate) results: CodeGenerationResults,
+    pub(crate) errors: Vec<Error>,
+}
+
 impl CodeGenerationResults {
     pub(crate) fn runtime_requirements(
         &self,
@@ -132,15 +137,17 @@ enum InitFragmentStage {
 pub(crate) fn generate_code(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
-) -> CodeGenerationResults {
+) -> CodeGenerationOutcome {
     generate_code_with(module_graph, chunk_graph, generate_module_code)
 }
 
 fn generate_code_with(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
-    mut generate_module: impl FnMut(CodeGenerationInput<'_>) -> CodeGenerationResult,
-) -> CodeGenerationResults {
+    mut generate_module: impl FnMut(
+        CodeGenerationInput<'_>,
+    ) -> std::result::Result<CodeGenerationResult, Error>,
+) -> CodeGenerationOutcome {
     let module_render_ids = module_graph
         .modules()
         .iter()
@@ -159,6 +166,7 @@ fn generate_code_with(
         })
         .collect::<HashMap<_, _>>();
     let mut results = HashMap::new();
+    let mut errors = Vec::new();
     for module in module_graph
         .modules()
         .iter()
@@ -170,7 +178,13 @@ fn generate_code_with(
             chunk_graph,
             module_render_ids: &module_render_ids,
         };
-        let previous = results.insert(module.id(), generate_module(input));
+        let result = generate_module(input).unwrap_or_else(|error| {
+            errors.push(error.clone());
+            CodeGenerationResult::new(CodeGenerationSource::Raw {
+                source: render_failed_module_content(&error),
+            })
+        });
+        let previous = results.insert(module.id(), result);
         assert!(
             previous.is_none(),
             "module {:?} must be generated exactly once per Compilation",
@@ -178,9 +192,12 @@ fn generate_code_with(
         );
     }
 
-    CodeGenerationResults {
-        module_render_ids,
-        results,
+    CodeGenerationOutcome {
+        results: CodeGenerationResults {
+            module_render_ids,
+            results,
+        },
+        errors,
     }
 }
 
@@ -606,7 +623,9 @@ fn render_module_table(
     source
 }
 
-fn generate_module_code(input: CodeGenerationInput<'_>) -> CodeGenerationResult {
+fn generate_module_code(
+    input: CodeGenerationInput<'_>,
+) -> std::result::Result<CodeGenerationResult, Error> {
     let CodeGenerationInput {
         module,
         module_graph,
@@ -614,9 +633,9 @@ fn generate_module_code(input: CodeGenerationInput<'_>) -> CodeGenerationResult 
         module_render_ids,
     } = input;
     if let Some(error) = module.build_error() {
-        return CodeGenerationResult::new(CodeGenerationSource::Raw {
+        return Ok(CodeGenerationResult::new(CodeGenerationSource::Raw {
             source: render_failed_module_content(error),
-        });
+        }));
     }
 
     let module_id = module.id();
@@ -645,7 +664,7 @@ fn generate_module_code(input: CodeGenerationInput<'_>) -> CodeGenerationResult 
             &mut runtime_requirements,
             &mut source,
             &mut init_fragments,
-        );
+        )?;
     }
     for (dependency_id, dependency) in module.dependencies().iter().enumerate() {
         apply_dependency_template(
@@ -660,7 +679,7 @@ fn generate_module_code(input: CodeGenerationInput<'_>) -> CodeGenerationResult 
             &mut runtime_requirements,
             &mut source,
             &mut init_fragments,
-        );
+        )?;
     }
     for (block_index, block) in module.blocks().iter().enumerate() {
         for (dependency_id, dependency) in block.dependencies().iter().enumerate() {
@@ -676,23 +695,25 @@ fn generate_module_code(input: CodeGenerationInput<'_>) -> CodeGenerationResult 
                 &mut runtime_requirements,
                 &mut source,
                 &mut init_fragments,
-            );
+            )?;
         }
     }
 
     let init = render_init_fragments(init_fragments);
-    CodeGenerationResult::new(CodeGenerationSource::OriginalWithReplacements {
-        prefix: init,
-        original_source: module.source().to_string(),
-        original_name: module_render_name,
-        replacements: source
-            .replacements()
-            .iter()
-            .map(CodeGenerationReplacement::from)
-            .collect(),
-        suffix: String::new(),
-    })
-    .with_runtime_requirements(runtime_requirements)
+    Ok(
+        CodeGenerationResult::new(CodeGenerationSource::OriginalWithReplacements {
+            prefix: init,
+            original_source: module.source().to_string(),
+            original_name: module_render_name,
+            replacements: source
+                .replacements()
+                .iter()
+                .map(CodeGenerationReplacement::from)
+                .collect(),
+            suffix: String::new(),
+        })
+        .with_runtime_requirements(runtime_requirements),
+    )
 }
 
 fn render_failed_module_content(error: &Error) -> String {
@@ -744,7 +765,24 @@ fn apply_dependency_template(
     runtime_requirements: &mut RuntimeRequirements,
     source: &mut ReplaceSource,
     init_fragments: &mut Vec<InitFragment>,
-) {
+) -> std::result::Result<(), Error> {
+    let module = module_graph
+        .module(module_id)
+        .expect("Dependency Template origin Module must exist in the Module Graph");
+    for range in dependency.source_ranges() {
+        if range.start > range.end || range.end as usize > module.source_len() {
+            return Err(Error::CodeGeneration {
+                module: module_id,
+                path: module.identity().resource.clone(),
+                message: format!(
+                    "dependency source range {}..{} exceeds module source length {}",
+                    range.start,
+                    range.end,
+                    module.source_len()
+                ),
+            });
+        }
+    }
     match dependency {
         Dependency::Const(dep) => apply_const_dependency(dep, source),
         Dependency::Null(_) => {}
@@ -804,6 +842,7 @@ fn apply_dependency_template(
         }
         Dependency::Entry(_) => {}
     }
+    Ok(())
 }
 
 fn apply_const_dependency(dep: &ConstDependency, source: &mut ReplaceSource) {
@@ -1092,12 +1131,7 @@ fn is_identifier(value: &str) -> bool {
 }
 
 fn json_string(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    format!("\"{escaped}\"")
+    simd_json::to_string(value).expect("JavaScript string input must serialize as JSON")
 }
 
 fn json_render_id(render_id: &RenderId) -> String {
@@ -1114,9 +1148,10 @@ mod tests {
     use rspack_sources::{ConcatSource, OriginalSource, Source};
 
     use crate::{
-        CacheOptions, Compiler, CompilerOptions, Entry, ModuleId, SnapshotOptions,
+        CacheOptions, Compiler, CompilerOptions, ConstDependency, Dependency, Entry, Error,
+        ModuleGraph, ModuleId, ModuleIdentity, SnapshotOptions, SourceRange,
         build_cache::{BuildCache, CacheIdentifier, CacheKey, CacheNamespace},
-        id_assignment::RenderId,
+        id_assignment::{RenderId, assign_chunk_render_ids, assign_module_render_ids},
         runtime::RuntimeModule,
     };
 
@@ -1212,6 +1247,48 @@ mod tests {
         })
     }
 
+    #[test]
+    fn module_attributable_generation_errors_become_throwing_results() {
+        let options = CompilerOptions::new("/project", vec![Entry::new("main", "./index")]);
+        let mut module_graph = ModuleGraph::default();
+        let module = module_graph.add_module(ModuleIdentity::new("/project/index.js"));
+        module_graph
+            .module_mut(module)
+            .expect("fixture Module should exist")
+            .finish_build(
+                Vec::new(),
+                Vec::new(),
+                vec![Dependency::Const(ConstDependency::new(
+                    "replacement",
+                    SourceRange::new(0, 99),
+                ))],
+                "value".to_string(),
+                1,
+            );
+        let mut chunk_graph = crate::ChunkGraph::build(&options, &module_graph, &[module]);
+        assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
+        assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
+
+        let outcome = super::generate_code(&module_graph, &chunk_graph);
+
+        assert_eq!(
+            outcome.errors,
+            [Error::CodeGeneration {
+                module,
+                path: "/project/index.js".into(),
+                message: "dependency source range 0..99 exceeds module source length 5".to_string(),
+            }]
+        );
+        assert!(outcome.errors[0].is_compilation_error());
+        assert!(
+            outcome.results.results[&module]
+                .source()
+                .source()
+                .into_string_lossy()
+                .contains("throw new Error")
+        );
+    }
+
     #[tokio::test]
     async fn code_generation_is_module_only_and_leaves_factory_wrapping_to_renderer()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1268,7 +1345,7 @@ mod tests {
             assert!(requirements.contains(RuntimeRequirement::ReturnExportsFromRuntime));
         }
         let mut generation_count = 0;
-        let results = super::generate_code_with(
+        let outcome = super::generate_code_with(
             compilation.module_graph(),
             compilation.chunk_graph(),
             |input| {
@@ -1276,6 +1353,8 @@ mod tests {
                 super::generate_module_code(input)
             },
         );
+        assert!(outcome.errors.is_empty());
+        let results = outcome.results;
 
         assert_eq!(generation_count, compilation.module_graph().modules().len());
         assert_eq!(
@@ -1304,6 +1383,45 @@ mod tests {
                 .runtime_requirements()
                 .contains(RuntimeRequirement::Require)
         }));
+
+        let failed_module = compilation
+            .module_graph()
+            .modules()
+            .iter()
+            .find(|module| module.identity().resource.ends_with("shared.js"))
+            .expect("fixture shared Module should exist");
+        let failed_path = failed_module.identity().resource.clone();
+        let failed_module = failed_module.id();
+        let failed = super::generate_code_with(
+            compilation.module_graph(),
+            compilation.chunk_graph(),
+            |input| {
+                if input.module.id() == failed_module {
+                    Err(Error::CodeGeneration {
+                        module: failed_module,
+                        path: input.module.identity().resource.clone(),
+                        message: "fixture generation failure".to_string(),
+                    })
+                } else {
+                    super::generate_module_code(input)
+                }
+            },
+        );
+        assert_eq!(
+            failed.errors,
+            [Error::CodeGeneration {
+                module: failed_module,
+                path: failed_path,
+                message: "fixture generation failure".to_string(),
+            }]
+        );
+        assert!(
+            failed.results.results[&failed_module]
+                .source()
+                .source()
+                .into_string_lossy()
+                .contains("fixture generation failure")
+        );
 
         Ok(())
     }

@@ -47,15 +47,21 @@ Necessity:
 
 ## Make phase and errors
 
-Unpack uses `FuturesUnordered` plus a semaphore to factorize, read, parse, and connect modules. It records errors in `Compilation::errors`, but the first make error currently returns `Err` and stops the run.
+Unpack uses `FuturesUnordered` plus a semaphore to factorize, read, parse, and connect modules. Module-attributable make errors are recorded in `Compilation::errors`; infrastructure failures still return `Err` and stop the run.
 
-Webpack uses separate async queues for factorize, add, build, rebuild, and process-dependencies. It can keep a failed module in the graph, collect module errors on the compilation, and continue sealing/emitting where the compilation itself completed.
+Webpack uses separate async queues for factorize, add, build, rebuild, and
+process-dependencies. Unpack uses Rust-native tasks but now follows the same
+completed-compilation boundary: a module-attributable build or code-generation
+failure remains in the Module Graph, is reported through Stats, and renders as a
+throwing module factory. Unaffected entry code and deferred paths remain usable
+until execution reaches that factory.
 
 Necessity:
 
 - Rust-native queues are fine; copying webpack's `AsyncQueue` API is not needed.
-- The current stop-on-first module-processing error is a real parity gap against Unpack's own ADRs `0037`, `0042`, and `0052`.
-- Keeping failed modules in the graph and generating throwing module factories is necessary if the JavaScript API is expected to mirror webpack-like completed-compilation error semantics.
+- Missing Render IDs and malformed graph connections remain infrastructure
+  invariants and terminate compilation instead of being converted into module
+  failures.
 
 ## Dependency model and parser
 
@@ -150,7 +156,6 @@ Current staged scope limits:
 
 Implementation gaps to resolve for current stated semantics:
 
-- Completed-compilation error behavior: failed modules should remain in the graph and emitted code should throw only if executed.
 - Nested dynamic imports: async blocks discovered inside async chunks must create further async chunk groups.
 - Runtime requirements should either drive helper emission or be kept clearly internal until needed.
 

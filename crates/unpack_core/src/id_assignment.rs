@@ -364,7 +364,7 @@ mod tests {
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-        let results = generate_code(&module_graph, &chunk_graph);
+        let results = generate_code(&module_graph, &chunk_graph).results;
         chunk_graph.process_runtime_requirements(
             results
                 .runtime_requirements()
@@ -410,7 +410,7 @@ mod tests {
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-        let results = generate_code(&module_graph, &chunk_graph);
+        let results = generate_code(&module_graph, &chunk_graph).results;
         chunk_graph.process_runtime_requirements(
             results
                 .runtime_requirements()

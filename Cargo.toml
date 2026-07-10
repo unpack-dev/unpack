@@ -8,7 +8,6 @@ license = "MIT"
 repository = "https://github.com/unpack-dev/unpack"
 
 [workspace.dependencies]
-cbor4ii = { version = "1.2.2", features = ["serde1"] }
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 futures = "0.3.31"
 filetime = "0.2.26"
@@ -20,7 +19,7 @@ regex = "1.12.2"
 rspack_resolver = { version = "0.9.3", default-features = false }
 rspack_sources = "0.101.1"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+simd-json = "0.17.0"
 swc_experimental_allocator = "0.11.0"
 swc_experimental_ecma_ast = "0.11.0"
 swc_experimental_ecma_parser = "0.11.0"

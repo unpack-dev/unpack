@@ -80,15 +80,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cbor4ii"
-version = "1.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faed1a83001dc2c9201451030cc317e35bef36c84d3781d7c5bb9f343c397da8"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "cc"
 version = "1.2.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1311,7 +1302,6 @@ checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 name = "unpack_core"
 version = "0.1.0"
 dependencies = [
- "cbor4ii",
  "codspeed-divan-compat",
  "filetime",
  "futures",
@@ -1319,7 +1309,7 @@ dependencies = [
  "rspack_resolver",
  "rspack_sources",
  "serde",
- "serde_json",
+ "simd-json",
  "swc_experimental_allocator",
  "swc_experimental_ecma_ast",
  "swc_experimental_ecma_parser",

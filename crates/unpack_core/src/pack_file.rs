@@ -1,9 +1,8 @@
-#![allow(dead_code)]
-
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, fs, path::Path};
 
+    use crate::cache_hash::stable_hash;
     use tempfile::tempdir;
 
     use super::*;
@@ -163,6 +162,229 @@ mod tests {
             pack_file.get::<DummyItem>(&address, None).as_deref(),
             Some(&DummyItem(b"payload".to_vec()))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn module_build_records_round_trip_every_parsed_module_variant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let address = PackFileAddress::new("unpack/module-build", b"module-identity");
+        let record = module_build_record();
+        let registry =
+            CodecRegistry::new().with_module_build_record(ModuleBuildRecordCodec::current());
+
+        PackFile::publish_module_build_records(
+            temp.path(),
+            &registry,
+            [(address.clone(), None, record.clone())],
+        )?;
+
+        assert_eq!(MODULE_BUILD_RECORD_TYPE_ID.as_bytes(), b"unpack.moduleb.1");
+        let mut pack_file = PackFile::open(temp.path(), registry);
+        assert_eq!(
+            pack_file.get_module_build_record(&address, None).as_deref(),
+            Some(&record)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn module_build_codec_rejects_unknown_tags_hash_mismatches_and_invalid_numeric_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let codec = ModuleBuildRecordCodec::current();
+        let record = module_build_record();
+
+        let mut unknown_tag = codec.encode(&record)?;
+        let first_dependency_tag = 4 + record.source.len() + 8 + 4;
+        unknown_tag[first_dependency_tag] = 0xff;
+        assert!(codec.decode(&unknown_tag).is_none());
+
+        let mut wrong_hash = record.clone();
+        wrong_hash.source_hash ^= 1;
+        assert!(codec.encode(&wrong_hash).is_err());
+
+        let mut invalid_range = record.clone();
+        if let DependencyDto::Entry { module } = &mut invalid_range.parsed.dependencies[0] {
+            module.range = Some(SourceRangeDto { start: 2, end: 1 });
+        }
+        assert!(codec.encode(&invalid_range).is_err());
+
+        let mut overflow = record;
+        if let DependencyDto::Entry { module } = &mut overflow.parsed.dependencies[0] {
+            module.source_order = Some(u64::MAX);
+        }
+        assert!(codec.encode(&overflow).is_err());
+
+        let mut missing_import_range = module_build_record();
+        if let DependencyDto::Import { module } = missing_import_range
+            .parsed
+            .dependencies
+            .last_mut()
+            .expect("fixture should contain Import")
+        {
+            module.range = None;
+        }
+        assert!(codec.encode(&missing_import_range).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn heterogeneous_batch_publishes_one_guarded_revision_and_honors_its_explicit_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let resolve_address = PackFileAddress::new("unpack/resolve", b"request");
+        let module_address = PackFileAddress::new("unpack/module-build", b"identity");
+        let registry = CodecRegistry::new()
+            .with_resolve_record(ResolveRecordCodec::current())
+            .with_module_build_record(ModuleBuildRecordCodec::current());
+        let guard_v1 = PackFileGuardDto {
+            version: b"v1".to_vec(),
+            build_dependencies: resolve_record("build-dependency.js").snapshot,
+            resolve_build_dependencies: resolve_record("resolve-build-dependency.js").snapshot,
+        };
+        let mut initial = PackFileWriteBatch::new();
+        initial.insert(
+            &registry,
+            resolve_address.clone(),
+            None,
+            resolve_record("resolved.js"),
+        )?;
+        initial.insert(
+            &registry,
+            module_address.clone(),
+            None,
+            module_build_record(),
+        )?;
+        PackFile::publish_batch(
+            temp.path(),
+            Some(guard_v1.clone()),
+            PublicationBase::ReplaceAll,
+            initial,
+        )?;
+
+        let first_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode first heterogeneous index");
+        assert_eq!(first_index.revision, 1);
+        assert_eq!(first_index.guard.as_ref(), Some(&guard_v1));
+        assert_eq!(first_index.entries.len(), 2);
+        assert_eq!(
+            first_index
+                .entries
+                .values()
+                .map(|entry| &entry.content.file)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1
+        );
+
+        let guard_v2 = PackFileGuardDto {
+            version: b"v2".to_vec(),
+            ..guard_v1
+        };
+        let mut update = PackFileWriteBatch::new();
+        update.insert(
+            &registry,
+            resolve_address.clone(),
+            None,
+            resolve_record("resolved-v2.js"),
+        )?;
+        PackFile::publish_batch(
+            temp.path(),
+            Some(guard_v2.clone()),
+            PublicationBase::PreserveEntries {
+                expected_revision: 1,
+            },
+            update,
+        )?;
+
+        let mut reopened = PackFile::open(temp.path(), registry.clone());
+        assert_eq!(reopened.revision(), 2);
+        assert_eq!(reopened.guard(), Some(&guard_v2));
+        assert_eq!(
+            reopened
+                .get_resolve_record(&resolve_address, None)
+                .as_deref(),
+            Some(&resolve_record("resolved-v2.js"))
+        );
+        assert_eq!(
+            reopened
+                .get_module_build_record(&module_address, None)
+                .as_deref(),
+            Some(&module_build_record())
+        );
+
+        let committed_index = fs::read(PackFile::index_path(temp.path()))?;
+        let mut stale = PackFileWriteBatch::new();
+        stale.insert(
+            &registry,
+            resolve_address.clone(),
+            None,
+            resolve_record("must-not-publish.js"),
+        )?;
+        assert!(
+            PackFile::publish_batch(
+                temp.path(),
+                Some(guard_v2.clone()),
+                PublicationBase::PreserveEntries {
+                    expected_revision: 1,
+                },
+                stale,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(PackFile::index_path(temp.path()))?,
+            committed_index
+        );
+
+        let mut cold = PackFileWriteBatch::new();
+        cold.insert(
+            &registry,
+            module_address.clone(),
+            None,
+            module_build_record(),
+        )?;
+        PackFile::publish_batch(
+            temp.path(),
+            Some(guard_v2),
+            PublicationBase::ReplaceAll,
+            cold,
+        )?;
+        let mut replaced = PackFile::open(temp.path(), registry);
+        assert_eq!(replaced.revision(), 3);
+        assert!(
+            replaced
+                .get_resolve_record(&resolve_address, None)
+                .is_none()
+        );
+        assert!(
+            replaced
+                .get_module_build_record(&module_address, None)
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_records_convert_to_and_from_their_persistent_dtos()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut resolve_dto = resolve_record("conversion.js");
+        if let SnapshotEntryDto::File { modified, .. } = &mut resolve_dto.snapshot.entries[0] {
+            *modified = Some(TimestampDto {
+                seconds: -1,
+                nanoseconds: 999_999_999,
+            });
+        }
+        resolve_dto
+            .file_dependencies
+            .sort_by(|left, right| left.0.cmp(&right.0));
+        let resolve_record = ResolveRecord::try_from(resolve_dto.clone())?;
+        assert_eq!(ResolveRecordDto::try_from(&resolve_record)?, resolve_dto);
+
+        let module_dto = module_build_record();
+        let module_record = ModuleBuildRecord::try_from(module_dto.clone())?;
+        assert_eq!(ModuleBuildRecordDto::try_from(&module_record)?, module_dto);
         Ok(())
     }
 
@@ -508,6 +730,76 @@ mod tests {
         }
     }
 
+    fn module_build_record() -> ModuleBuildRecordDto {
+        let source =
+            "export default 1;                                                              "
+                .to_string();
+        let module = ModuleDependencyDto {
+            request: "./dep".to_string(),
+            user_request: "./dep".to_string(),
+            source_order: Some(1),
+            range: Some(SourceRangeDto { start: 0, end: 1 }),
+            weak: false,
+        };
+        let dependencies = vec![
+            DependencyDto::Entry {
+                module: module.clone(),
+            },
+            DependencyDto::HarmonyImportSideEffect {
+                module: module.clone(),
+                import_var: Some("__dep__".to_string()),
+            },
+            DependencyDto::HarmonyImportSpecifier {
+                module: module.clone(),
+                ids: vec!["value".to_string()],
+                name: "local".to_string(),
+                usage_range: SourceRangeDto { start: 1, end: 2 },
+                shorthand: true,
+            },
+            DependencyDto::HarmonyExportHeader {
+                declaration_range: Some(SourceRangeDto { start: 2, end: 3 }),
+                statement_range: SourceRangeDto { start: 2, end: 4 },
+            },
+            DependencyDto::HarmonyExportSpecifier {
+                id: "local".to_string(),
+                name: "public".to_string(),
+            },
+            DependencyDto::HarmonyExportExpression {
+                range: SourceRangeDto { start: 4, end: 5 },
+                statement_range: SourceRangeDto { start: 4, end: 6 },
+                declaration_id: Some("default".to_string()),
+            },
+            DependencyDto::HarmonyExportImportedSpecifier {
+                module: module.clone(),
+                ids: vec!["value".to_string()],
+                name: Some("renamed".to_string()),
+                is_star: false,
+            },
+            DependencyDto::Null,
+            DependencyDto::Const {
+                expression: "void 0".to_string(),
+                range: SourceRangeDto { start: 6, end: 7 },
+            },
+            DependencyDto::Import {
+                module: module.clone(),
+            },
+        ];
+        ModuleBuildRecordDto {
+            parsed: ParsedModuleDto {
+                dependencies: dependencies.clone(),
+                blocks: vec![AsyncDependenciesBlockDto {
+                    dependencies: vec![DependencyDto::Import {
+                        module: module.clone(),
+                    }],
+                }],
+                presentational_dependencies: dependencies,
+            },
+            source_hash: stable_hash(&source),
+            source,
+            snapshot: resolve_record("module.js").snapshot,
+        }
+    }
+
     fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         haystack
             .windows(needle.len())
@@ -555,17 +847,26 @@ mod tests {
     }
 }
 // Private PackFile storage primitives.
-//
-// This module is intentionally not selected by the production cache options yet. Its module
-// boundary exists so the storage contract can be exercised before the backend cutover.
 
 use std::{
     any::Any,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt, fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
+};
+
+use crate::{
+    AsyncDependenciesBlock, ConstDependency, Dependency, EntryDependency,
+    HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
+    HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
+    HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency,
+    ModuleDependency, ModuleIdentity, ModuleType, NullDependency, SourceRange,
+    build_cache::{ModuleBuildRecord, ResolveRecord},
+    cache_hash::stable_hash,
+    parser::ParsedModule,
+    snapshot::Snapshot,
 };
 
 #[cfg(unix)]
@@ -582,8 +883,11 @@ const MAX_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FIELD_BYTES: usize = 1024 * 1024;
 const MAX_COLLECTION_ENTRIES: usize = 100_000;
-const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId(*b"unpack.rslv.c001");
-pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId(*b"unpack.resolve.1");
+const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
+const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c001");
+pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.resolve.1");
+pub(crate) const MODULE_BUILD_RECORD_TYPE_ID: StableTypeId =
+    StableTypeId::new(*b"unpack.moduleb.1");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct StableTypeId([u8; 16]);
@@ -748,12 +1052,543 @@ pub(crate) enum ManagedItemStateDto {
     Package { name: String, version: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModuleBuildRecordDto {
+    pub(crate) parsed: ParsedModuleDto,
+    pub(crate) source: String,
+    pub(crate) source_hash: u64,
+    pub(crate) snapshot: SnapshotDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedModuleDto {
+    pub(crate) dependencies: Vec<DependencyDto>,
+    pub(crate) blocks: Vec<AsyncDependenciesBlockDto>,
+    pub(crate) presentational_dependencies: Vec<DependencyDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AsyncDependenciesBlockDto {
+    pub(crate) dependencies: Vec<DependencyDto>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceRangeDto {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModuleDependencyDto {
+    pub(crate) request: String,
+    pub(crate) user_request: String,
+    pub(crate) source_order: Option<u64>,
+    pub(crate) range: Option<SourceRangeDto>,
+    pub(crate) weak: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DependencyDto {
+    Entry {
+        module: ModuleDependencyDto,
+    },
+    HarmonyImportSideEffect {
+        module: ModuleDependencyDto,
+        import_var: Option<String>,
+    },
+    HarmonyImportSpecifier {
+        module: ModuleDependencyDto,
+        ids: Vec<String>,
+        name: String,
+        usage_range: SourceRangeDto,
+        shorthand: bool,
+    },
+    HarmonyExportHeader {
+        declaration_range: Option<SourceRangeDto>,
+        statement_range: SourceRangeDto,
+    },
+    HarmonyExportSpecifier {
+        id: String,
+        name: String,
+    },
+    HarmonyExportExpression {
+        range: SourceRangeDto,
+        statement_range: SourceRangeDto,
+        declaration_id: Option<String>,
+    },
+    HarmonyExportImportedSpecifier {
+        module: ModuleDependencyDto,
+        ids: Vec<String>,
+        name: Option<String>,
+        is_star: bool,
+    },
+    Null,
+    Const {
+        expression: String,
+        range: SourceRangeDto,
+    },
+    Import {
+        module: ModuleDependencyDto,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackFileGuardDto {
+    pub(crate) version: Vec<u8>,
+    pub(crate) build_dependencies: SnapshotDto,
+    pub(crate) resolve_build_dependencies: SnapshotDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationBase {
+    PreserveEntries { expected_revision: u64 },
+    ReplaceAll,
+}
+
+#[derive(Debug)]
+struct PendingPackFileItem {
+    etag: Option<PackFileETag>,
+    type_id: StableTypeId,
+    codec_id: StableCodecId,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PackFileWriteBatch {
+    items: BTreeMap<PackFileAddress, PendingPackFileItem>,
+}
+
+impl PackFileWriteBatch {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn insert<T: PackFileItem>(
+        &mut self,
+        registry: &CodecRegistry,
+        address: PackFileAddress,
+        etag: Option<PackFileETag>,
+        value: T,
+    ) -> io::Result<()> {
+        let (codec_id, payload) = registry.encode(&value)?;
+        self.items.insert(
+            address,
+            PendingPackFileItem {
+                etag,
+                type_id: T::TYPE_ID,
+                codec_id,
+                payload,
+            },
+        );
+        Ok(())
+    }
+}
+
+impl From<&ModuleIdentity> for ModuleIdentityDto {
+    fn from(identity: &ModuleIdentity) -> Self {
+        Self {
+            module_type: match identity.module_type {
+                ModuleType::JavaScriptAuto => ModuleTypeDto::JavaScriptAuto,
+            },
+            resource: PathBytes::from_path(&identity.resource),
+            query: identity.query.clone(),
+            fragment: identity.fragment.clone(),
+            layer: identity.layer.clone(),
+            loaders: identity.loaders.clone(),
+        }
+    }
+}
+
+impl TryFrom<ModuleIdentityDto> for ModuleIdentity {
+    type Error = io::Error;
+
+    fn try_from(identity: ModuleIdentityDto) -> io::Result<Self> {
+        Ok(Self {
+            module_type: match identity.module_type {
+                ModuleTypeDto::JavaScriptAuto => ModuleType::JavaScriptAuto,
+            },
+            resource: path_from_bytes(identity.resource)?,
+            query: identity.query,
+            fragment: identity.fragment,
+            layer: identity.layer,
+            loaders: identity.loaders,
+        })
+    }
+}
+
+impl TryFrom<&Snapshot> for SnapshotDto {
+    type Error = io::Error;
+
+    fn try_from(snapshot: &Snapshot) -> io::Result<Self> {
+        Ok(snapshot.to_pack_file_dto())
+    }
+}
+
+impl TryFrom<SnapshotDto> for Snapshot {
+    type Error = io::Error;
+
+    fn try_from(snapshot: SnapshotDto) -> io::Result<Self> {
+        Snapshot::from_pack_file_dto(snapshot).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PackFile Snapshot contains inconsistent or duplicate entries",
+            )
+        })
+    }
+}
+
+impl TryFrom<&ResolveRecord> for ResolveRecordDto {
+    type Error = io::Error;
+
+    fn try_from(record: &ResolveRecord) -> io::Result<Self> {
+        Ok(Self {
+            identity: ModuleIdentityDto::from(record.identity()),
+            resource: PathBytes::from_path(record.resource()),
+            file_dependencies: record
+                .file_dependencies()
+                .iter()
+                .map(|path| PathBytes::from_path(path))
+                .collect(),
+            context_dependencies: record
+                .context_dependencies()
+                .iter()
+                .map(|path| PathBytes::from_path(path))
+                .collect(),
+            missing_dependencies: record
+                .missing_dependencies()
+                .iter()
+                .map(|path| PathBytes::from_path(path))
+                .collect(),
+            snapshot: SnapshotDto::try_from(record.snapshot())?,
+        })
+    }
+}
+
+impl TryFrom<ResolveRecordDto> for ResolveRecord {
+    type Error = io::Error;
+
+    fn try_from(record: ResolveRecordDto) -> io::Result<Self> {
+        Ok(ResolveRecord::from_persistent_parts(
+            ModuleIdentity::try_from(record.identity)?,
+            path_from_bytes(record.resource)?,
+            paths_from_bytes(record.file_dependencies)?,
+            paths_from_bytes(record.context_dependencies)?,
+            paths_from_bytes(record.missing_dependencies)?,
+            Snapshot::try_from(record.snapshot)?,
+        ))
+    }
+}
+
+impl TryFrom<&ModuleBuildRecord> for ModuleBuildRecordDto {
+    type Error = io::Error;
+
+    fn try_from(record: &ModuleBuildRecord) -> io::Result<Self> {
+        let (parsed, source, source_hash) = record.cloned_parts();
+        let source_hash = source_hash.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Module Build Record is missing its required source hash",
+            )
+        })?;
+        let dto = Self {
+            parsed: ParsedModuleDto::try_from(&parsed)?,
+            source,
+            source_hash,
+            snapshot: SnapshotDto::try_from(record.snapshot())?,
+        };
+        validate_module_build_record(&dto)?;
+        Ok(dto)
+    }
+}
+
+impl TryFrom<ModuleBuildRecordDto> for ModuleBuildRecord {
+    type Error = io::Error;
+
+    fn try_from(record: ModuleBuildRecordDto) -> io::Result<Self> {
+        validate_module_build_record(&record)?;
+        Ok(ModuleBuildRecord::new(
+            ParsedModule::try_from(&record.parsed)?,
+            record.source,
+            Snapshot::try_from(record.snapshot)?,
+        ))
+    }
+}
+
+fn validate_module_build_record(record: &ModuleBuildRecordDto) -> io::Result<()> {
+    if record.source_hash != stable_hash(&record.source) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Module Build Record source hash does not match its source",
+        ));
+    }
+    if !parsed_module_ranges_are_valid(&record.parsed, &record.source) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Module Build Record contains an invalid source range",
+        ));
+    }
+    Ok(())
+}
+
+fn path_from_bytes(path: PathBytes) -> io::Result<PathBuf> {
+    path.to_path_buf().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PackFile path bytes are invalid on this platform",
+        )
+    })
+}
+
+fn paths_from_bytes(paths: Vec<PathBytes>) -> io::Result<BTreeSet<PathBuf>> {
+    paths
+        .into_iter()
+        .map(path_from_bytes)
+        .collect::<io::Result<BTreeSet<_>>>()
+}
+
+impl TryFrom<&ParsedModule> for ParsedModuleDto {
+    type Error = io::Error;
+
+    fn try_from(parsed: &ParsedModule) -> io::Result<Self> {
+        Ok(Self {
+            dependencies: parsed
+                .dependencies
+                .iter()
+                .map(dependency_to_dto)
+                .collect::<io::Result<_>>()?,
+            blocks: parsed
+                .blocks
+                .iter()
+                .map(|block| {
+                    Ok(AsyncDependenciesBlockDto {
+                        dependencies: block
+                            .dependencies()
+                            .iter()
+                            .map(dependency_to_dto)
+                            .collect::<io::Result<_>>()?,
+                    })
+                })
+                .collect::<io::Result<_>>()?,
+            presentational_dependencies: parsed
+                .presentational_dependencies
+                .iter()
+                .map(dependency_to_dto)
+                .collect::<io::Result<_>>()?,
+        })
+    }
+}
+
+impl TryFrom<&ParsedModuleDto> for ParsedModule {
+    type Error = io::Error;
+
+    fn try_from(parsed: &ParsedModuleDto) -> io::Result<Self> {
+        Ok(Self {
+            dependencies: parsed
+                .dependencies
+                .iter()
+                .map(dependency_from_dto)
+                .collect::<io::Result<_>>()?,
+            blocks: parsed
+                .blocks
+                .iter()
+                .map(|block| {
+                    Ok(AsyncDependenciesBlock::new(
+                        block
+                            .dependencies
+                            .iter()
+                            .map(dependency_from_dto)
+                            .collect::<io::Result<_>>()?,
+                    ))
+                })
+                .collect::<io::Result<_>>()?,
+            presentational_dependencies: parsed
+                .presentational_dependencies
+                .iter()
+                .map(dependency_from_dto)
+                .collect::<io::Result<_>>()?,
+        })
+    }
+}
+
+fn dependency_to_dto(dependency: &Dependency) -> io::Result<DependencyDto> {
+    Ok(match dependency {
+        Dependency::Entry(dependency) => DependencyDto::Entry {
+            module: module_dependency_to_dto(&dependency.module)?,
+        },
+        Dependency::HarmonyImportSideEffect(dependency) => DependencyDto::HarmonyImportSideEffect {
+            module: module_dependency_to_dto(&dependency.module)?,
+            import_var: dependency.import_var.clone(),
+        },
+        Dependency::HarmonyImportSpecifier(dependency) => DependencyDto::HarmonyImportSpecifier {
+            module: module_dependency_to_dto(&dependency.module)?,
+            ids: dependency.ids.clone(),
+            name: dependency.name.clone(),
+            usage_range: dependency.usage_range.into(),
+            shorthand: dependency.shorthand,
+        },
+        Dependency::HarmonyExportHeader(dependency) => DependencyDto::HarmonyExportHeader {
+            declaration_range: dependency.declaration_range.map(Into::into),
+            statement_range: dependency.statement_range.into(),
+        },
+        Dependency::HarmonyExportSpecifier(dependency) => DependencyDto::HarmonyExportSpecifier {
+            id: dependency.id.clone(),
+            name: dependency.name.clone(),
+        },
+        Dependency::HarmonyExportExpression(dependency) => DependencyDto::HarmonyExportExpression {
+            range: dependency.range.into(),
+            statement_range: dependency.statement_range.into(),
+            declaration_id: dependency.declaration_id.clone(),
+        },
+        Dependency::HarmonyExportImportedSpecifier(dependency) => {
+            DependencyDto::HarmonyExportImportedSpecifier {
+                module: module_dependency_to_dto(&dependency.module)?,
+                ids: dependency.ids.clone(),
+                name: dependency.name.clone(),
+                is_star: dependency.is_star,
+            }
+        }
+        Dependency::Null(_) => DependencyDto::Null,
+        Dependency::Const(dependency) => DependencyDto::Const {
+            expression: dependency.expression.clone(),
+            range: dependency.range.into(),
+        },
+        Dependency::Import(dependency) => DependencyDto::Import {
+            module: module_dependency_to_dto(&dependency.module)?,
+        },
+    })
+}
+
+fn dependency_from_dto(dependency: &DependencyDto) -> io::Result<Dependency> {
+    Ok(match dependency {
+        DependencyDto::Entry { module } => Dependency::Entry(EntryDependency {
+            module: module_dependency_from_dto(module)?,
+        }),
+        DependencyDto::HarmonyImportSideEffect { module, import_var } => {
+            Dependency::HarmonyImportSideEffect(HarmonyImportSideEffectDependency {
+                module: module_dependency_from_dto(module)?,
+                import_var: import_var.clone(),
+            })
+        }
+        DependencyDto::HarmonyImportSpecifier {
+            module,
+            ids,
+            name,
+            usage_range,
+            shorthand,
+        } => Dependency::HarmonyImportSpecifier(HarmonyImportSpecifierDependency {
+            module: module_dependency_from_dto(module)?,
+            ids: ids.clone(),
+            name: name.clone(),
+            usage_range: (*usage_range).into(),
+            shorthand: *shorthand,
+        }),
+        DependencyDto::HarmonyExportHeader {
+            declaration_range,
+            statement_range,
+        } => Dependency::HarmonyExportHeader(HarmonyExportHeaderDependency {
+            declaration_range: declaration_range.map(Into::into),
+            statement_range: (*statement_range).into(),
+        }),
+        DependencyDto::HarmonyExportSpecifier { id, name } => {
+            Dependency::HarmonyExportSpecifier(HarmonyExportSpecifierDependency {
+                id: id.clone(),
+                name: name.clone(),
+            })
+        }
+        DependencyDto::HarmonyExportExpression {
+            range,
+            statement_range,
+            declaration_id,
+        } => Dependency::HarmonyExportExpression(HarmonyExportExpressionDependency {
+            range: (*range).into(),
+            statement_range: (*statement_range).into(),
+            declaration_id: declaration_id.clone(),
+        }),
+        DependencyDto::HarmonyExportImportedSpecifier {
+            module,
+            ids,
+            name,
+            is_star,
+        } => Dependency::HarmonyExportImportedSpecifier(HarmonyExportImportedSpecifierDependency {
+            module: module_dependency_from_dto(module)?,
+            ids: ids.clone(),
+            name: name.clone(),
+            is_star: *is_star,
+        }),
+        DependencyDto::Null => Dependency::Null(NullDependency),
+        DependencyDto::Const { expression, range } => Dependency::Const(ConstDependency {
+            expression: expression.clone(),
+            range: (*range).into(),
+        }),
+        DependencyDto::Import { module } => Dependency::Import(ImportDependency {
+            module: module_dependency_from_dto(module)?,
+        }),
+    })
+}
+
+fn module_dependency_to_dto(dependency: &ModuleDependency) -> io::Result<ModuleDependencyDto> {
+    Ok(ModuleDependencyDto {
+        request: dependency.request.clone(),
+        user_request: dependency.user_request.clone(),
+        source_order: dependency
+            .source_order
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Module dependency source order is too large",
+                )
+            })?,
+        range: dependency.range.map(Into::into),
+        weak: dependency.weak,
+    })
+}
+
+fn module_dependency_from_dto(dependency: &ModuleDependencyDto) -> io::Result<ModuleDependency> {
+    Ok(ModuleDependency {
+        request: dependency.request.clone(),
+        user_request: dependency.user_request.clone(),
+        source_order: dependency
+            .source_order
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Module dependency source order overflows this platform",
+                )
+            })?,
+        range: dependency.range.map(Into::into),
+        weak: dependency.weak,
+    })
+}
+
+impl From<SourceRange> for SourceRangeDto {
+    fn from(range: SourceRange) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+}
+
+impl From<SourceRangeDto> for SourceRange {
+    fn from(range: SourceRangeDto) -> Self {
+        Self::new(range.start, range.end)
+    }
+}
+
 pub(crate) trait PackFileItem: Clone + Send + Sync + 'static {
     const TYPE_ID: StableTypeId;
 }
 
 impl PackFileItem for ResolveRecordDto {
     const TYPE_ID: StableTypeId = RESOLVE_RECORD_TYPE_ID;
+}
+
+impl PackFileItem for ModuleBuildRecordDto {
+    const TYPE_ID: StableTypeId = MODULE_BUILD_RECORD_TYPE_ID;
 }
 
 pub(crate) trait ItemCodec<T: PackFileItem>: fmt::Debug + Send + Sync + 'static {
@@ -805,7 +1640,7 @@ where
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct CodecRegistry {
     codecs: HashMap<StableTypeId, Arc<dyn ErasedItemCodec>>,
 }
@@ -820,6 +1655,12 @@ impl CodecRegistry {
         self
     }
 
+    pub(crate) fn with_module_build_record(mut self, codec: ModuleBuildRecordCodec) -> Self {
+        self.register::<ModuleBuildRecordDto, _>(codec);
+        self
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn with_codec<T, C>(mut self, codec: C) -> Self
     where
         T: PackFileItem,
@@ -889,10 +1730,12 @@ impl ResolveRecordCodec {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn to_dto(self, record: &crate::build_cache::ResolveRecord) -> ResolveRecordDto {
         record.to_pack_file_dto()
     }
 
+    #[cfg(test)]
     pub(crate) fn from_dto(
         self,
         dto: ResolveRecordDto,
@@ -920,6 +1763,350 @@ impl ItemCodec<ResolveRecordDto> for ResolveRecordCodec {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ModuleBuildRecordCodec {
+    codec_id: StableCodecId,
+}
+
+impl ModuleBuildRecordCodec {
+    pub(crate) const fn current() -> Self {
+        Self {
+            codec_id: MODULE_BUILD_RECORD_CODEC_ID,
+        }
+    }
+}
+
+impl ItemCodec<ModuleBuildRecordDto> for ModuleBuildRecordCodec {
+    fn codec_id(&self) -> StableCodecId {
+        self.codec_id
+    }
+
+    fn encode(&self, value: &ModuleBuildRecordDto) -> io::Result<Vec<u8>> {
+        encode_module_build_record(value)
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Option<ModuleBuildRecordDto> {
+        decode_module_build_record(bytes)
+    }
+}
+
+fn encode_module_build_record(record: &ModuleBuildRecordDto) -> io::Result<Vec<u8>> {
+    validate_module_build_record(record)?;
+
+    let mut encoder = Encoder::default();
+    encoder.write_string(&record.source)?;
+    encoder.write_u64(record.source_hash);
+    encode_parsed_module(&mut encoder, &record.parsed)?;
+    encode_snapshot(&mut encoder, &record.snapshot)?;
+    Ok(encoder.finish())
+}
+
+fn decode_module_build_record(bytes: &[u8]) -> Option<ModuleBuildRecordDto> {
+    let mut decoder = Decoder::new(bytes);
+    let source = decoder.read_string()?;
+    let source_hash = decoder.read_u64()?;
+    let parsed = decode_parsed_module(&mut decoder)?;
+    let snapshot = decode_snapshot(&mut decoder)?;
+    decoder.finish()?;
+    let record = ModuleBuildRecordDto {
+        parsed,
+        source,
+        source_hash,
+        snapshot,
+    };
+    validate_module_build_record(&record).ok()?;
+    Some(record)
+}
+
+fn encode_parsed_module(encoder: &mut Encoder, parsed: &ParsedModuleDto) -> io::Result<()> {
+    encode_dependencies(encoder, &parsed.dependencies)?;
+    encoder.write_count(parsed.blocks.len())?;
+    for block in &parsed.blocks {
+        encode_dependencies(encoder, &block.dependencies)?;
+    }
+    encode_dependencies(encoder, &parsed.presentational_dependencies)
+}
+
+fn decode_parsed_module(decoder: &mut Decoder<'_>) -> Option<ParsedModuleDto> {
+    let dependencies = decode_dependencies(decoder)?;
+    let block_count = decoder.read_count()?;
+    let mut blocks = Vec::with_capacity(block_count);
+    for _ in 0..block_count {
+        blocks.push(AsyncDependenciesBlockDto {
+            dependencies: decode_dependencies(decoder)?,
+        });
+    }
+    Some(ParsedModuleDto {
+        dependencies,
+        blocks,
+        presentational_dependencies: decode_dependencies(decoder)?,
+    })
+}
+
+fn encode_dependencies(encoder: &mut Encoder, dependencies: &[DependencyDto]) -> io::Result<()> {
+    encoder.write_count(dependencies.len())?;
+    for dependency in dependencies {
+        encode_dependency(encoder, dependency)?;
+    }
+    Ok(())
+}
+
+fn decode_dependencies(decoder: &mut Decoder<'_>) -> Option<Vec<DependencyDto>> {
+    let count = decoder.read_count()?;
+    let mut dependencies = Vec::with_capacity(count);
+    for _ in 0..count {
+        dependencies.push(decode_dependency(decoder)?);
+    }
+    Some(dependencies)
+}
+
+fn encode_dependency(encoder: &mut Encoder, dependency: &DependencyDto) -> io::Result<()> {
+    match dependency {
+        DependencyDto::Entry { module } => {
+            encoder.write_u8(0);
+            encode_module_dependency(encoder, module)
+        }
+        DependencyDto::HarmonyImportSideEffect { module, import_var } => {
+            encoder.write_u8(1);
+            encode_module_dependency(encoder, module)?;
+            encoder.write_optional_string(import_var.as_deref())
+        }
+        DependencyDto::HarmonyImportSpecifier {
+            module,
+            ids,
+            name,
+            usage_range,
+            shorthand,
+        } => {
+            encoder.write_u8(2);
+            encode_module_dependency(encoder, module)?;
+            encoder.write_strings(ids)?;
+            encoder.write_string(name)?;
+            encode_source_range(encoder, *usage_range);
+            encoder.write_bool(*shorthand);
+            Ok(())
+        }
+        DependencyDto::HarmonyExportHeader {
+            declaration_range,
+            statement_range,
+        } => {
+            encoder.write_u8(3);
+            encode_optional_source_range(encoder, *declaration_range);
+            encode_source_range(encoder, *statement_range);
+            Ok(())
+        }
+        DependencyDto::HarmonyExportSpecifier { id, name } => {
+            encoder.write_u8(4);
+            encoder.write_string(id)?;
+            encoder.write_string(name)
+        }
+        DependencyDto::HarmonyExportExpression {
+            range,
+            statement_range,
+            declaration_id,
+        } => {
+            encoder.write_u8(5);
+            encode_source_range(encoder, *range);
+            encode_source_range(encoder, *statement_range);
+            encoder.write_optional_string(declaration_id.as_deref())
+        }
+        DependencyDto::HarmonyExportImportedSpecifier {
+            module,
+            ids,
+            name,
+            is_star,
+        } => {
+            encoder.write_u8(6);
+            encode_module_dependency(encoder, module)?;
+            encoder.write_strings(ids)?;
+            encoder.write_optional_string(name.as_deref())?;
+            encoder.write_bool(*is_star);
+            Ok(())
+        }
+        DependencyDto::Null => {
+            encoder.write_u8(7);
+            Ok(())
+        }
+        DependencyDto::Const { expression, range } => {
+            encoder.write_u8(8);
+            encoder.write_string(expression)?;
+            encode_source_range(encoder, *range);
+            Ok(())
+        }
+        DependencyDto::Import { module } => {
+            encoder.write_u8(9);
+            encode_module_dependency(encoder, module)
+        }
+    }
+}
+
+fn decode_dependency(decoder: &mut Decoder<'_>) -> Option<DependencyDto> {
+    Some(match decoder.read_u8()? {
+        0 => DependencyDto::Entry {
+            module: decode_module_dependency(decoder)?,
+        },
+        1 => DependencyDto::HarmonyImportSideEffect {
+            module: decode_module_dependency(decoder)?,
+            import_var: decoder.read_optional_string()?,
+        },
+        2 => DependencyDto::HarmonyImportSpecifier {
+            module: decode_module_dependency(decoder)?,
+            ids: decoder.read_strings()?,
+            name: decoder.read_string()?,
+            usage_range: decode_source_range(decoder)?,
+            shorthand: decoder.read_bool()?,
+        },
+        3 => DependencyDto::HarmonyExportHeader {
+            declaration_range: decode_optional_source_range(decoder)?,
+            statement_range: decode_source_range(decoder)?,
+        },
+        4 => DependencyDto::HarmonyExportSpecifier {
+            id: decoder.read_string()?,
+            name: decoder.read_string()?,
+        },
+        5 => DependencyDto::HarmonyExportExpression {
+            range: decode_source_range(decoder)?,
+            statement_range: decode_source_range(decoder)?,
+            declaration_id: decoder.read_optional_string()?,
+        },
+        6 => DependencyDto::HarmonyExportImportedSpecifier {
+            module: decode_module_dependency(decoder)?,
+            ids: decoder.read_strings()?,
+            name: decoder.read_optional_string()?,
+            is_star: decoder.read_bool()?,
+        },
+        7 => DependencyDto::Null,
+        8 => DependencyDto::Const {
+            expression: decoder.read_string()?,
+            range: decode_source_range(decoder)?,
+        },
+        9 => DependencyDto::Import {
+            module: decode_module_dependency(decoder)?,
+        },
+        _ => return None,
+    })
+}
+
+fn encode_module_dependency(
+    encoder: &mut Encoder,
+    dependency: &ModuleDependencyDto,
+) -> io::Result<()> {
+    encoder.write_string(&dependency.request)?;
+    encoder.write_string(&dependency.user_request)?;
+    encoder.write_optional_u64(dependency.source_order);
+    encode_optional_source_range(encoder, dependency.range);
+    encoder.write_bool(dependency.weak);
+    Ok(())
+}
+
+fn decode_module_dependency(decoder: &mut Decoder<'_>) -> Option<ModuleDependencyDto> {
+    Some(ModuleDependencyDto {
+        request: decoder.read_string()?,
+        user_request: decoder.read_string()?,
+        source_order: decoder.read_optional_u64()?,
+        range: decode_optional_source_range(decoder)?,
+        weak: decoder.read_bool()?,
+    })
+}
+
+fn encode_source_range(encoder: &mut Encoder, range: SourceRangeDto) {
+    encoder.write_u32(range.start);
+    encoder.write_u32(range.end);
+}
+
+fn decode_source_range(decoder: &mut Decoder<'_>) -> Option<SourceRangeDto> {
+    Some(SourceRangeDto {
+        start: decoder.read_u32()?,
+        end: decoder.read_u32()?,
+    })
+}
+
+fn encode_optional_source_range(encoder: &mut Encoder, range: Option<SourceRangeDto>) {
+    match range {
+        Some(range) => {
+            encoder.write_u8(1);
+            encode_source_range(encoder, range);
+        }
+        None => encoder.write_u8(0),
+    }
+}
+
+fn decode_optional_source_range(decoder: &mut Decoder<'_>) -> Option<Option<SourceRangeDto>> {
+    match decoder.read_u8()? {
+        0 => Some(None),
+        1 => Some(Some(decode_source_range(decoder)?)),
+        _ => None,
+    }
+}
+
+fn parsed_module_ranges_are_valid(parsed: &ParsedModuleDto, source: &str) -> bool {
+    parsed
+        .dependencies
+        .iter()
+        .chain(
+            parsed
+                .blocks
+                .iter()
+                .flat_map(|block| block.dependencies.iter()),
+        )
+        .chain(parsed.presentational_dependencies.iter())
+        .all(|dependency| dependency_ranges_are_valid(dependency, source))
+}
+
+fn dependency_ranges_are_valid(dependency: &DependencyDto, source: &str) -> bool {
+    let module_range_is_valid = |module: &ModuleDependencyDto| {
+        module.source_order.is_none_or(|source_order| {
+            usize::try_from(source_order)
+                .is_ok_and(|source_order| source_order <= MAX_COLLECTION_ENTRIES)
+        }) && module
+            .range
+            .is_none_or(|range| source_range_is_valid(range, source))
+    };
+    match dependency {
+        DependencyDto::Entry { module }
+        | DependencyDto::HarmonyImportSideEffect { module, .. }
+        | DependencyDto::HarmonyExportImportedSpecifier { module, .. } => {
+            module_range_is_valid(module)
+        }
+        DependencyDto::Import { module } => module.range.is_some() && module_range_is_valid(module),
+        DependencyDto::HarmonyImportSpecifier {
+            module,
+            usage_range,
+            ..
+        } => module_range_is_valid(module) && source_range_is_valid(*usage_range, source),
+        DependencyDto::HarmonyExportHeader {
+            declaration_range,
+            statement_range,
+        } => {
+            declaration_range.is_none_or(|range| source_range_is_valid(range, source))
+                && source_range_is_valid(*statement_range, source)
+        }
+        DependencyDto::HarmonyExportExpression {
+            range,
+            statement_range,
+            ..
+        } => {
+            source_range_is_valid(*range, source) && source_range_is_valid(*statement_range, source)
+        }
+        DependencyDto::Const { range, .. } => source_range_is_valid(*range, source),
+        DependencyDto::HarmonyExportSpecifier { .. } | DependencyDto::Null => true,
+    }
+}
+
+fn source_range_is_valid(range: SourceRangeDto, source: &str) -> bool {
+    let start = usize::try_from(range.start).ok();
+    let end = usize::try_from(range.end).ok();
+    match (start, end) {
+        (Some(start), Some(end)) => {
+            start <= end
+                && end <= source.len()
+                && source.is_char_boundary(start)
+                && source.is_char_boundary(end)
+        }
+        _ => false,
+    }
+}
+
 fn encode_resolve_record(record: &ResolveRecordDto) -> io::Result<Vec<u8>> {
     let mut encoder = Encoder::default();
     encoder.write_u8(match record.identity.module_type {
@@ -934,8 +2121,13 @@ fn encode_resolve_record(record: &ResolveRecordDto) -> io::Result<Vec<u8>> {
     encoder.write_paths(&record.file_dependencies)?;
     encoder.write_paths(&record.context_dependencies)?;
     encoder.write_paths(&record.missing_dependencies)?;
-    encoder.write_count(record.snapshot.entries.len())?;
-    for entry in &record.snapshot.entries {
+    encode_snapshot(&mut encoder, &record.snapshot)?;
+    Ok(encoder.finish())
+}
+
+fn encode_snapshot(encoder: &mut Encoder, snapshot: &SnapshotDto) -> io::Result<()> {
+    encoder.write_count(snapshot.entries.len())?;
+    for entry in &snapshot.entries {
         match entry {
             SnapshotEntryDto::File {
                 path,
@@ -985,7 +2177,7 @@ fn encode_resolve_record(record: &ResolveRecordDto) -> io::Result<Vec<u8>> {
             }
         }
     }
-    Ok(encoder.finish())
+    Ok(())
 }
 
 fn decode_resolve_record(bytes: &[u8]) -> Option<ResolveRecordDto> {
@@ -1006,6 +2198,19 @@ fn decode_resolve_record(bytes: &[u8]) -> Option<ResolveRecordDto> {
     let file_dependencies = decoder.read_paths()?;
     let context_dependencies = decoder.read_paths()?;
     let missing_dependencies = decoder.read_paths()?;
+    let snapshot = decode_snapshot(&mut decoder)?;
+    decoder.finish()?;
+    Some(ResolveRecordDto {
+        identity,
+        resource,
+        file_dependencies,
+        context_dependencies,
+        missing_dependencies,
+        snapshot,
+    })
+}
+
+fn decode_snapshot(decoder: &mut Decoder<'_>) -> Option<SnapshotDto> {
     let entry_count = decoder.read_count()?;
     let mut entries = Vec::with_capacity(entry_count);
     for _ in 0..entry_count {
@@ -1045,15 +2250,7 @@ fn decode_resolve_record(bytes: &[u8]) -> Option<ResolveRecordDto> {
             _ => return None,
         });
     }
-    decoder.finish()?;
-    Some(ResolveRecordDto {
-        identity,
-        resource,
-        file_dependencies,
-        context_dependencies,
-        missing_dependencies,
-        snapshot: SnapshotDto { entries },
-    })
+    Some(SnapshotDto { entries })
 }
 
 #[derive(Debug, Default)]
@@ -1333,6 +2530,7 @@ impl<'a> Decoder<'a> {
 #[derive(Debug, Clone, Default)]
 struct PackFileIndex {
     revision: u64,
+    guard: Option<PackFileGuardDto>,
     entries: BTreeMap<PackFileAddress, PackFileIndexEntry>,
 }
 
@@ -1371,9 +2569,13 @@ pub(crate) struct PackFile {
 }
 
 impl PackFile {
+    pub(crate) fn index_path(root: impl AsRef<Path>) -> PathBuf {
+        root.as_ref().join(INDEX_FILE)
+    }
+
     pub(crate) fn open(root: impl AsRef<Path>, registry: CodecRegistry) -> Self {
         let root = root.as_ref().to_path_buf();
-        let index_path = root.join(INDEX_FILE);
+        let index_path = Self::index_path(&root);
         let index = read_bounded(&index_path, MAX_INDEX_BYTES)
             .and_then(|bytes| decode_index(&bytes))
             .unwrap_or_default();
@@ -1389,8 +2591,17 @@ impl PackFile {
         }
     }
 
-    pub(crate) fn entry_count(&self) -> usize {
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
         self.index.entries.len()
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.index.revision
+    }
+
+    pub(crate) fn guard(&self) -> Option<&PackFileGuardDto> {
+        self.index.guard.as_ref()
     }
 
     pub(crate) fn get<T: PackFileItem>(
@@ -1440,7 +2651,16 @@ impl PackFile {
         self.get(address, etag)
     }
 
-    pub(crate) fn publish_items<T, I>(
+    pub(crate) fn get_module_build_record(
+        &mut self,
+        address: &PackFileAddress,
+        etag: Option<&PackFileETag>,
+    ) -> Option<Arc<ModuleBuildRecordDto>> {
+        self.get(address, etag)
+    }
+
+    #[cfg(test)]
+    fn publish_items<T, I>(
         root: impl AsRef<Path>,
         registry: &CodecRegistry,
         items: I,
@@ -1452,13 +2672,35 @@ impl PackFile {
         publish_items(root.as_ref(), registry, items, PublishFault::None)
     }
 
-    pub(crate) fn publish_resolve_records<I>(
+    pub(crate) fn publish_batch(
+        root: impl AsRef<Path>,
+        guard: Option<PackFileGuardDto>,
+        base: PublicationBase,
+        batch: PackFileWriteBatch,
+    ) -> io::Result<()> {
+        publish_batch(root.as_ref(), guard, base, batch, PublishFault::None)
+    }
+
+    #[cfg(test)]
+    fn publish_resolve_records<I>(
         root: impl AsRef<Path>,
         registry: &CodecRegistry,
         records: I,
     ) -> io::Result<()>
     where
         I: IntoIterator<Item = (PackFileAddress, Option<PackFileETag>, ResolveRecordDto)>,
+    {
+        Self::publish_items(root, registry, records)
+    }
+
+    #[cfg(test)]
+    fn publish_module_build_records<I>(
+        root: impl AsRef<Path>,
+        registry: &CodecRegistry,
+        records: I,
+    ) -> io::Result<()>
+    where
+        I: IntoIterator<Item = (PackFileAddress, Option<PackFileETag>, ModuleBuildRecordDto)>,
     {
         Self::publish_items(root, registry, records)
     }
@@ -1489,6 +2731,7 @@ enum PublishFault {
     BeforeIndexReplace,
 }
 
+#[cfg(test)]
 fn publish_items<T, I>(
     root: &Path,
     registry: &CodecRegistry,
@@ -1499,13 +2742,47 @@ where
     T: PackFileItem,
     I: IntoIterator<Item = (PackFileAddress, Option<PackFileETag>, T)>,
 {
-    let items = items
-        .into_iter()
-        .map(|(address, etag, value)| (address, (etag, value)))
-        .collect::<BTreeMap<_, _>>();
     let current = read_bounded(&root.join(INDEX_FILE), MAX_INDEX_BYTES)
         .and_then(|bytes| decode_index(&bytes))
         .unwrap_or_default();
+    let mut batch = PackFileWriteBatch::new();
+    for (address, etag, value) in items {
+        batch.insert(registry, address, etag, value)?;
+    }
+    let expected_revision = current.revision;
+    publish_batch(
+        root,
+        current.guard,
+        PublicationBase::PreserveEntries { expected_revision },
+        batch,
+        fault,
+    )
+}
+
+fn publish_batch(
+    root: &Path,
+    guard: Option<PackFileGuardDto>,
+    base: PublicationBase,
+    batch: PackFileWriteBatch,
+    fault: PublishFault,
+) -> io::Result<()> {
+    let current = read_bounded(&root.join(INDEX_FILE), MAX_INDEX_BYTES)
+        .and_then(|bytes| decode_index(&bytes))
+        .unwrap_or_default();
+    let mut entries = match base {
+        PublicationBase::PreserveEntries { expected_revision }
+            if current.revision == expected_revision =>
+        {
+            current.entries
+        }
+        PublicationBase::PreserveEntries { .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "PackFile publication base revision changed",
+            ));
+        }
+        PublicationBase::ReplaceAll => BTreeMap::new(),
+    };
     let revision = current
         .revision
         .checked_add(1)
@@ -1517,10 +2794,8 @@ where
     let filename = format!("pack-{revision:016x}.bin");
     let relative_path = PathBuf::from(CONTENT_DIRECTORY).join(&filename);
     let mut content_pack = Vec::new();
-    let mut entries = current.entries;
-    for (address, (etag, value)) in items {
-        let (codec_id, payload) = registry.encode(&value)?;
-        let frame = encode_content(T::TYPE_ID, codec_id, &payload)?;
+    for (address, item) in batch.items {
+        let frame = encode_content(item.type_id, item.codec_id, &item.payload)?;
         let offset = u64::try_from(content_pack.len()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1541,9 +2816,9 @@ where
         entries.insert(
             address,
             PackFileIndexEntry {
-                etag,
-                type_id: T::TYPE_ID,
-                codec_id,
+                etag: item.etag,
+                type_id: item.type_id,
+                codec_id: item.codec_id,
                 content: ContentReference {
                     file: relative_path.clone(),
                     offset,
@@ -1569,7 +2844,11 @@ where
         return Err(injected_publish_error("after content commit"));
     }
 
-    let index = PackFileIndex { revision, entries };
+    let index = PackFileIndex {
+        revision,
+        guard,
+        entries,
+    };
     let index_bytes = encode_index(&index)?;
     let temporary_index = root.join(format!(".{INDEX_FILE}-{revision:016x}.tmp"));
     write_synced(&temporary_index, &index_bytes)?;
@@ -1631,6 +2910,15 @@ fn read_content_reference(path: &Path, reference: &ContentReference) -> Option<V
 fn encode_index(index: &PackFileIndex) -> io::Result<Vec<u8>> {
     let mut body = Encoder::default();
     body.write_u64(index.revision);
+    match &index.guard {
+        Some(guard) => {
+            body.write_u8(1);
+            body.write_bytes(&guard.version)?;
+            encode_snapshot(&mut body, &guard.build_dependencies)?;
+            encode_snapshot(&mut body, &guard.resolve_build_dependencies)?;
+        }
+        None => body.write_u8(0),
+    }
     body.write_count(index.entries.len())?;
     for (address, entry) in &index.entries {
         body.write_bytes(&address.namespace)?;
@@ -1652,6 +2940,15 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
     let body = decode_frame(bytes, INDEX_MAGIC, MAX_INDEX_BYTES)?;
     let mut decoder = Decoder::new(body);
     let revision = decoder.read_u64()?;
+    let guard = match decoder.read_u8()? {
+        0 => None,
+        1 => Some(PackFileGuardDto {
+            version: decoder.read_bytes()?,
+            build_dependencies: decode_snapshot(&mut decoder)?,
+            resolve_build_dependencies: decode_snapshot(&mut decoder)?,
+        }),
+        _ => return None,
+    };
     let count = decoder.read_count()?;
     let mut entries = BTreeMap::new();
     for _ in 0..count {
@@ -1688,7 +2985,11 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
         );
     }
     decoder.finish()?;
-    Some(PackFileIndex { revision, entries })
+    Some(PackFileIndex {
+        revision,
+        guard,
+        entries,
+    })
 }
 
 fn encode_content(

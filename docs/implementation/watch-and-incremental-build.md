@@ -44,7 +44,7 @@ Add filesystem cache as an opt-in cache layer.
 
 - Store persistent cache items in cache packs under a cache location.
 - Store container metadata for cache version, build-dependency snapshot, and cache item metadata.
-- Store manifest metadata as JSON and pack shards as `cbor4ii`-encoded cache DTOs.
+- Store container guards and Cache Item metadata in an Unpack-private binary index, with explicit codecs and lazily referenced content packs.
 - Queue persistent writes and flush them during compiler idle.
 - Close waits for pending cache flushes or reports infrastructure errors.
 

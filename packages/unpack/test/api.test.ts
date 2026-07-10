@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -519,17 +519,13 @@ test("accepts filesystem cache option shape", async () => {
 
     assert.equal(first.err, null);
     assert.equal(first.stats?.hasErrors(), false);
-    const manifest = JSON.parse(
-      await readFile(join(fixture, ".cache/unpack/test-cache/container.json"), "utf8")
-    ) as {
-      magic?: string;
-      build_dependencies?: { entries?: unknown[] };
-      resolve_build_dependencies?: { entries?: unknown[] };
-    };
-    assert.equal(manifest.magic, "UNPACK_PERSISTENT_CACHE");
-    assert.equal(manifest.build_dependencies?.entries?.length, 1);
-    assert.equal(manifest.resolve_build_dependencies?.entries?.length, 1);
-    assert.ok(await readFile(join(fixture, ".cache/unpack/test-cache/packs/modules.cbor")));
+    assert.ok(await stat(join(fixture, ".cache/unpack/test-cache/index.pack")));
+    await assert.rejects(
+      stat(join(fixture, ".cache/unpack/test-cache/container.json"))
+    );
+    await assert.rejects(
+      stat(join(fixture, ".cache/unpack/test-cache/packs/modules.cbor"))
+    );
 
     const secondCompiler = unpack({
       context: fixture,
@@ -564,13 +560,10 @@ test("filesystem cache flushes after idle timeout", async () => {
   try {
     const result = await runExistingCompiler(compiler);
     assert.equal(result.err, null);
-    await assert.rejects(readFile(join(cacheLocation, "container.json"), "utf8"));
+    await assert.rejects(stat(join(cacheLocation, "index.pack")));
 
     await delay(100);
-    assert.match(
-      await readFile(join(cacheLocation, "container.json"), "utf8"),
-      /UNPACK_PERSISTENT_CACHE/
-    );
+    assert.ok(await stat(join(cacheLocation, "index.pack")));
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
@@ -597,10 +590,7 @@ test("compiler close waits for pending filesystem cache flush", async () => {
     assert.equal(result.err, null);
 
     await closeCompiler(compiler);
-    assert.match(
-      await readFile(join(cacheLocation, "container.json"), "utf8"),
-      /UNPACK_PERSISTENT_CACHE/
-    );
+    assert.ok(await stat(join(cacheLocation, "index.pack")));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -628,8 +618,7 @@ test("filesystem cache readonly skips persistent writes", async () => {
     await delay(50);
 
     await closeCompiler(compiler);
-    await assert.rejects(readFile(join(cacheLocation, "container.json"), "utf8"));
-    await assert.rejects(readFile(join(cacheLocation, "packs/modules.cbor"), "utf8"));
+    await assert.rejects(stat(cacheLocation));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

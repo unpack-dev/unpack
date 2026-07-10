@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -335,49 +335,67 @@ impl Snapshot {
     }
 
     pub(crate) fn from_pack_file_dto(dto: SnapshotDto) -> Option<Self> {
-        let entries = dto
-            .entries
-            .into_iter()
-            .map(|entry| match entry {
+        let mut seen_paths = BTreeSet::new();
+        let mut entries = Vec::with_capacity(dto.entries.len());
+        for entry in dto.entries {
+            let path = match &entry {
+                SnapshotEntryDto::File { path, .. }
+                | SnapshotEntryDto::Context { path, .. }
+                | SnapshotEntryDto::MissingExistence { path }
+                | SnapshotEntryDto::ImmutablePath { path }
+                | SnapshotEntryDto::ManagedPath { path, .. } => path.to_path_buf()?,
+            };
+            if !seen_paths.insert(path.clone()) {
+                return None;
+            }
+            entries.push(match entry {
                 SnapshotEntryDto::File {
                     path,
                     exists,
                     modified,
                     source_hash,
-                } => Some(SnapshotEntry::File(SnapshottedFile {
-                    path: path.to_path_buf()?,
-                    snapshot: FileSnapshot {
-                        exists,
-                        modified: match modified {
-                            Some(value) => Some(system_time_from_dto(value)?),
-                            None => None,
+                } => {
+                    if !exists && (modified.is_some() || source_hash.is_some()) {
+                        return None;
+                    }
+                    SnapshotEntry::File(SnapshottedFile {
+                        path: path.to_path_buf()?,
+                        snapshot: FileSnapshot {
+                            exists,
+                            modified: match modified {
+                                Some(value) => Some(system_time_from_dto(value)?),
+                                None => None,
+                            },
+                            source_hash,
                         },
-                        source_hash,
-                    },
-                })),
+                    })
+                }
                 SnapshotEntryDto::Context {
                     path,
                     exists,
                     timestamp_hash,
                     content_hash,
-                } => Some(SnapshotEntry::Context(SnapshottedContext {
-                    path: path.to_path_buf()?,
-                    snapshot: ContextSnapshot {
-                        exists,
-                        timestamp_hash,
-                        content_hash,
-                    },
-                })),
-                SnapshotEntryDto::MissingExistence { path } => {
-                    Some(SnapshotEntry::MissingExistence {
+                } => {
+                    if !exists && (timestamp_hash.is_some() || content_hash.is_some()) {
+                        return None;
+                    }
+                    SnapshotEntry::Context(SnapshottedContext {
                         path: path.to_path_buf()?,
+                        snapshot: ContextSnapshot {
+                            exists,
+                            timestamp_hash,
+                            content_hash,
+                        },
                     })
                 }
-                SnapshotEntryDto::ImmutablePath { path } => Some(SnapshotEntry::ImmutablePath {
+                SnapshotEntryDto::MissingExistence { path } => SnapshotEntry::MissingExistence {
                     path: path.to_path_buf()?,
-                }),
+                },
+                SnapshotEntryDto::ImmutablePath { path } => SnapshotEntry::ImmutablePath {
+                    path: path.to_path_buf()?,
+                },
                 SnapshotEntryDto::ManagedPath { path, root, state } => {
-                    Some(SnapshotEntry::ManagedPath(ManagedPathSnapshot {
+                    SnapshotEntry::ManagedPath(ManagedPathSnapshot {
                         path: path.to_path_buf()?,
                         root: root.to_path_buf()?,
                         state: match state {
@@ -387,10 +405,10 @@ impl Snapshot {
                                 ManagedItemState::Package { name, version }
                             }
                         },
-                    }))
+                    })
                 }
-            })
-            .collect::<Option<Vec<_>>>()?;
+            });
+        }
         Some(Self { entries })
     }
 
@@ -1042,10 +1060,15 @@ impl ManagedItemState {
         }
 
         let package_json = root.join("package.json");
-        let source = fs::read(&package_json).ok()?;
-        let json = serde_json::from_slice::<serde_json::Value>(&source).ok()?;
-        let name = json.get("name")?.as_str()?.to_string();
-        let version = json.get("version")?.as_str()?.to_string();
+        #[derive(Deserialize)]
+        struct PackageIdentity {
+            name: String,
+            version: String,
+        }
+
+        let mut source = fs::read(&package_json).ok()?;
+        let PackageIdentity { name, version } =
+            simd_json::serde::from_slice::<PackageIdentity>(&mut source).ok()?;
 
         Some(Self::Package { name, version })
     }

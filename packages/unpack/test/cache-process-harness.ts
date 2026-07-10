@@ -30,6 +30,20 @@ export interface CacheProcessObservation {
   hasErrors: boolean | null;
   assets: string[];
   outputPath: string | null;
+  cacheWork: CacheWorkObservation | null;
+}
+
+export interface CacheItemWorkObservation {
+  hits: number;
+  misses: number;
+  stores: number;
+  restores: number;
+  evictions: number;
+}
+
+export interface CacheWorkObservation {
+  resolve: CacheItemWorkObservation;
+  moduleBuild: CacheItemWorkObservation;
 }
 
 export async function runColdWarmBuilds(
@@ -51,12 +65,47 @@ export async function runCacheProcess(
     [driver, JSON.stringify(request)],
     {
       cwd: options.cwd,
-      maxBuffer: 1024 * 1024
+      maxBuffer: 1024 * 1024,
+      env: {
+        ...process.env,
+        UNPACK_INTERNAL_TRACING: "unpack_core::cache_work=info"
+      }
     }
   );
   const output = stdout.trim().split("\n").at(-1);
   if (!output) {
     throw new Error(`cache process produced no observation${stderr ? `: ${stderr}` : ""}`);
   }
-  return JSON.parse(output) as CacheProcessObservation;
+  return {
+    ...(JSON.parse(output) as CacheProcessObservation),
+    cacheWork: parseCacheWork(stderr)
+  };
+}
+
+function parseCacheWork(stderr: string): CacheWorkObservation | null {
+  const line = stderr
+    .trim()
+    .split("\n")
+    .findLast((candidate) => candidate.includes("cache_work"));
+  if (line === undefined) {
+    return null;
+  }
+  const field = (name: string) => {
+    const value = new RegExp(`(?:^|\\s)${name}=(\\d+)`).exec(line)?.[1];
+    if (value === undefined) {
+      throw new Error(`cache work trace is missing ${name}: ${line}`);
+    }
+    return Number(value);
+  };
+  const item = (prefix: "resolve" | "module") => ({
+    hits: field(`${prefix}_hits`),
+    misses: field(`${prefix}_misses`),
+    stores: field(`${prefix}_stores`),
+    restores: field(`${prefix}_restores`),
+    evictions: field(`${prefix}_evictions`)
+  });
+  return {
+    resolve: item("resolve"),
+    moduleBuild: item("module")
+  };
 }

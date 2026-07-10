@@ -228,6 +228,7 @@ pub(crate) fn generate_code(
         .collect::<HashMap<_, _>>();
     let mut results = HashMap::new();
     let cache = build_cache.code_generations::<CodeGenerationKey>();
+    let cache_enabled = options.cache.kind == crate::CacheKind::Filesystem;
 
     for chunk in chunk_graph.chunks() {
         let runtime = RuntimeSpec::for_chunk(chunk_graph, chunk);
@@ -245,13 +246,17 @@ pub(crate) fn generate_code(
                 chunk_graph,
                 module_render_ids: &module_render_ids,
             };
-            let etag = code_generation_etag(&input);
-            let result = if let Some(result) = cache.get(&key, Some(&etag)) {
-                result.as_ref().clone()
+            let result = if cache_enabled {
+                let etag = code_generation_etag(&input);
+                if let Some(result) = cache.get(&key, Some(&etag)) {
+                    result.as_ref().clone()
+                } else {
+                    let result = generate_module_code(input);
+                    cache.store(key.clone(), Some(etag), result.clone());
+                    result
+                }
             } else {
-                let result = generate_module_code(input);
-                cache.store(key.clone(), Some(etag), result.clone());
-                result
+                generate_module_code(input)
             };
             results.insert(key, result);
         }
@@ -411,15 +416,20 @@ pub(crate) fn render_assets(
 ) -> Vec<Asset> {
     let mut assets = Vec::new();
     let cache = build_cache.asset_renders::<AssetRenderKey>();
+    let cache_enabled = options.cache.kind == crate::CacheKind::Filesystem;
     for entry in &manifest.entries {
         let key = entry.render.cache_key();
-        let etag = entry.render.cache_etag(code_generation_results);
-        let rendered_source = if let Some(rendered_source) = cache.get(&key, Some(&etag)) {
-            rendered_source.as_ref().clone()
+        let rendered_source = if cache_enabled {
+            let etag = entry.render.cache_etag(code_generation_results);
+            if let Some(rendered_source) = cache.get(&key, Some(&etag)) {
+                rendered_source.as_ref().clone()
+            } else {
+                let rendered_source = render_asset(&entry.render, code_generation_results);
+                cache.store(key, Some(etag), rendered_source.clone());
+                rendered_source
+            }
         } else {
-            let rendered_source = render_asset(&entry.render, code_generation_results);
-            cache.store(key, Some(etag), rendered_source.clone());
-            rendered_source
+            render_asset(&entry.render, code_generation_results)
         };
         assets.extend(emit_asset(
             entry.filename.clone(),

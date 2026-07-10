@@ -91,12 +91,20 @@ Necessity:
 
 Unpack creates one entrypoint chunk group per entry, assigns statically reachable
 modules to the initial chunk, and creates or reuses async chunk groups by dynamic
-import target. Shared Async Chunk planning is two-phase: it intersects the modules
-available on every parent Entrypoint path, then emits the target's static closure
-minus that intersection. Modules available on only some parents therefore remain
-in the shared payload. Each Entrypoint keeps its own Runtime Modules and installed
-chunk state while requirements from the shared child group propagate to every
-reachable runtime tree.
+import target. A terminating worklist recursively discovers nested blocks. Each
+Async Chunk plan intersects modules available after every parent loading group,
+then emits the target's static closure minus that intersection. Newly discovered
+parents can only shrink the intersection and add required factories. A dynamic
+import back to a module already available after its parent group creates no Chunk
+Group edge and remains a Promise-based require in generated code. When global
+target reuse discovers reciprocal cross-import parents, materialization omits a
+redundant parent edge that would close a Chunk Group cycle while retaining the
+Dependency Block's target mapping. A separate logical runtime-tree adjacency
+retains every loading relationship, including the omitted material edge; runtime
+requirement traversal is cycle-safe and therefore still reaches both sides for
+each Entrypoint. Each Entrypoint keeps its own Runtime Modules and installed chunk
+state while requirements from all logically reachable nested groups propagate to
+its runtime tree.
 
 Webpack's `buildChunkGraph` is much broader. It tracks runtime per chunk group, chunk loading and async chunk flags, named async chunk reuse, async entrypoints, available-module masks, skipped modules, conditional connections, nested blocks, pre/post order indices, child/parent updates, and block-to-chunk-group links.
 
@@ -106,7 +114,8 @@ Necessity:
 - Intersecting parent available-module sets is necessary: excluding a module
   seen on only one path would make the shared payload unusable from another.
 - Split chunks, cache groups, min-size/min-chunks/max-request rules, runtime chunks, and named chunk options are not necessary for the first implementation.
-- Nested async blocks are a current required semantic: Unpack only scans async blocks found in initial modules when creating async groups, while webpack recursively processes nested dependency blocks. A dynamic import reachable from an async chunk must create its own async chunk group; ignoring it is a parity gap against Unpack's chosen dynamic import semantics, not a compatibility luxury.
+- Recursive nested-block processing and available-module back-edge collapse are
+  required parts of Unpack's implemented dynamic-import semantics.
 
 ## Runtime and asset generation
 

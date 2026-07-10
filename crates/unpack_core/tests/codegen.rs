@@ -591,6 +591,10 @@ async fn reused_async_chunk_contains_modules_needed_by_each_entry()
                 const mod = await import("./feature");
                 return [shared, mod.feature, mod.shared];
             }
+
+            export async function loadExtra() {
+                return (await import("./extra")).extra;
+            }
         "#,
     )?;
     write(
@@ -599,6 +603,10 @@ async fn reused_async_chunk_contains_modules_needed_by_each_entry()
             export async function load() {
                 const mod = await import("./feature");
                 return [mod.feature, mod.shared];
+            }
+
+            export async function loadExtra() {
+                return (await import("./extra")).extra;
             }
         "#,
     )?;
@@ -614,12 +622,72 @@ async fn reused_async_chunk_contains_modules_needed_by_each_entry()
         temp.path().join("src/shared.js"),
         r#"export const shared = "shared";"#,
     )?;
+    write(
+        temp.path().join("src/extra.js"),
+        r#"export const extra = "extra";"#,
+    )?;
 
     let compiler = Compiler::new(CompilerOptions::new(
         temp.path(),
         vec![Entry::new("a", "./src/a"), Entry::new("b", "./src/b")],
     ));
     let compilation = compiler.run().await?;
+    let async_asset = compilation
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "src_feature_js.js")
+        .expect("shared Async Chunk asset should exist");
+    assert!(async_asset.source.contains(r#""./src/feature.js": "#));
+    assert!(
+        async_asset.source.contains(r#""./src/shared.js": "#),
+        "a module available on only one parent path must remain in the shared Async Chunk"
+    );
+
+    let one_parent = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("a", "./src/a")],
+    ))
+    .run()
+    .await?;
+    let one_parent_async_asset = one_parent
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "src_feature_js.js")
+        .expect("one parent should emit its Async Chunk");
+    assert!(
+        !one_parent_async_asset
+            .source
+            .contains(r#""./src/shared.js": "#),
+        "a module available on the only parent path should be excluded"
+    );
+
+    let reversed = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("b", "./src/b"), Entry::new("a", "./src/a")],
+    ))
+    .run()
+    .await?;
+    let async_assets = compilation
+        .assets()
+        .iter()
+        .filter(|asset| {
+            asset.filename != "a.js" && asset.filename != "b.js" && asset.filename.ends_with(".js")
+        })
+        .map(|asset| (asset.filename.as_str(), asset.source.as_str()))
+        .collect::<Vec<_>>();
+    let reversed_async_assets = reversed
+        .assets()
+        .iter()
+        .filter(|asset| {
+            asset.filename != "a.js" && asset.filename != "b.js" && asset.filename.ends_with(".js")
+        })
+        .map(|asset| (asset.filename.as_str(), asset.source.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        async_assets, reversed_async_assets,
+        "multiple shared Async targets must be stable across parent discovery order"
+    );
+
     let out_dir = temp.path().join("dist");
     fs::create_dir_all(&out_dir)?;
     write_assets(&out_dir, compilation.assets())?;

@@ -94,8 +94,188 @@ async fn builds_a_render_manifest_before_creating_asset_bookkeeping()
     Ok(())
 }
 
+// Ported from webpack 5.108.1:
+// test/configCases/optimization/named-modules
+//
+// Webpack's case establishes that named IDs remain recognizable. This variant
+// also covers Unpack's named-ID contract for deterministic collision handling.
 #[tokio::test]
-async fn preserves_byte_exact_static_async_and_sourcemap_outputs()
+async fn assigns_unique_readable_names_to_colliding_async_chunks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            export const loadDash = () => import("./a-b");
+            export const loadUnderscore = () => import("./a_b");
+        "#,
+    )?;
+    write(
+        temp.path().join("src/a-b.js"),
+        "export const value = 'dash';",
+    )?;
+    write(
+        temp.path().join("src/a_b.js"),
+        "export const value = 'underscore';",
+    )?;
+
+    let options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./src/index")]);
+    let first = Compiler::new(options.clone()).run().await?;
+    let second = Compiler::new(options).run().await?;
+
+    let first_assets = first
+        .assets()
+        .iter()
+        .map(|asset| (asset.filename.clone(), asset.source.clone()))
+        .collect::<Vec<_>>();
+    let second_assets = second
+        .assets()
+        .iter()
+        .map(|asset| (asset.filename.clone(), asset.source.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(first_assets, second_assets);
+
+    let async_filenames = first
+        .assets()
+        .iter()
+        .filter(|asset| asset.filename.ends_with(".js") && asset.filename != "main.js")
+        .map(|asset| asset.filename.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(async_filenames.len(), 2);
+    assert_ne!(async_filenames[0], async_filenames[1]);
+    assert!(
+        async_filenames
+            .iter()
+            .all(|filename| filename.starts_with("src_a_b_js"))
+    );
+
+    Ok(())
+}
+
+// Ported from webpack 5.108.1:
+// test/statsCases/named-chunks-plugin-async
+// Collision precedence follows lib/ids/NamedChunkIdsPlugin.js.
+#[tokio::test]
+async fn entry_names_take_precedence_over_colliding_async_names()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        "export const load = () => import('./feature');",
+    )?;
+    write(
+        temp.path().join("src/feature.js"),
+        "export const value = 'feature';",
+    )?;
+
+    let compilation = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("src_feature_js", "./src/index")],
+    ))
+    .run()
+    .await?;
+    let entry = compilation
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "src_feature_js.js")
+        .expect("entry asset should keep its configured filename");
+
+    assert!(entry.source.contains("  \"src_feature_js\": 1"));
+    assert!(compilation.assets().iter().any(|asset| {
+        asset.filename.starts_with("src_feature_js-") && asset.filename.ends_with(".js")
+    }));
+
+    Ok(())
+}
+
+// Ported from webpack 5.108.1:
+// test/configCases/module-name/different-issuers-for-same-module
+//
+// Unpack does not expose loaders yet, so the public seam exercises the same
+// identity rule through resource queries and fragments.
+#[tokio::test]
+async fn module_render_ids_distinguish_queries_and_fragments()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            import { value as alpha } from "./shared?one#alpha";
+            import { value as beta } from "./shared?two#beta";
+            export const values = [alpha, beta];
+        "#,
+    )?;
+    write(
+        temp.path().join("src/shared.js"),
+        "export const value = 'shared';",
+    )?;
+
+    let compilation = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ))
+    .run()
+    .await?;
+    let main = compilation
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "main.js")
+        .expect("main asset should exist");
+
+    assert!(
+        main.source.contains(r#""./src/shared.js?one#alpha""#),
+        "main asset did not contain the first assigned ID:\n{}",
+        main.source
+    );
+    assert!(
+        main.source.contains(r#""./src/shared.js?two#beta""#),
+        "main asset did not contain the second assigned ID:\n{}",
+        main.source
+    );
+    assert!(!main.source.contains("??"));
+    assert!(!main.source.contains("##"));
+
+    Ok(())
+}
+
+// Ported from webpack 5.108.1:
+// test/configCases/optimization/named-modules
+#[tokio::test]
+async fn renders_module_factories_in_render_id_order() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write(
+        temp.path().join("src/index.js"),
+        r#"
+            import { z } from "./z";
+            import { a } from "./a";
+            export const value = a + z;
+        "#,
+    )?;
+    write(temp.path().join("src/a.js"), "export const a = 'a';")?;
+    write(temp.path().join("src/z.js"), "export const z = 'z';")?;
+
+    let compilation = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./src/index")],
+    ))
+    .run()
+    .await?;
+    let main = compilation
+        .assets()
+        .iter()
+        .find(|asset| asset.filename == "main.js")
+        .expect("main asset should exist");
+    let a = main.source.find(r#""./src/a.js": "#).unwrap();
+    let index = main.source.find(r#""./src/index.js": "#).unwrap();
+    let z = main.source.find(r#""./src/z.js": "#).unwrap();
+
+    assert!(a < index && index < z);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn produces_stable_static_async_and_sourcemap_outputs()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     write(
@@ -139,8 +319,8 @@ async fn preserves_byte_exact_static_async_and_sourcemap_outputs()
     assert_eq!(
         fingerprints,
         [
-            ("main.js", 3166, 12861121386719719501),
-            ("main.js.map", 480, 10309079247393373181),
+            ("main.js", 3166, 13406043872577102803),
+            ("main.js.map", 480, 5745374754696300241),
             ("src_feature_js.js", 398, 7014656015713497901),
             ("src_feature_js.js.map", 164, 2414748877879059404)
         ]

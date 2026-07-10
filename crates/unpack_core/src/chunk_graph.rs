@@ -1,9 +1,6 @@
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    path::{Path, PathBuf},
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::{CompilerOptions, ModuleGraph, ModuleId};
+use crate::{CompilerOptions, ModuleGraph, ModuleId, id_assignment::RenderId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChunkId(usize);
@@ -34,17 +31,21 @@ impl ChunkGroupId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
     id: ChunkId,
-    render_id: String,
-    filename: String,
+    name: Option<String>,
+    root_modules: Vec<ModuleId>,
+    render_id: Option<RenderId>,
+    filename_override: Option<String>,
     groups: Vec<ChunkGroupId>,
 }
 
 impl Chunk {
-    fn new(id: ChunkId, render_id: String, filename: String) -> Self {
+    fn new(id: ChunkId, name: Option<String>, root_modules: Vec<ModuleId>) -> Self {
         Self {
             id,
-            render_id,
-            filename,
+            name,
+            root_modules,
+            render_id: None,
+            filename_override: None,
             groups: Vec::new(),
         }
     }
@@ -53,12 +54,14 @@ impl Chunk {
         self.id
     }
 
-    pub fn render_id(&self) -> &str {
-        &self.render_id
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
-    pub fn filename(&self) -> &str {
-        &self.filename
+    pub(crate) fn render_id(&self) -> &RenderId {
+        self.render_id
+            .as_ref()
+            .expect("chunk Render ID should be assigned before it is read")
     }
 
     pub fn groups(&self) -> &[ChunkGroupId] {
@@ -69,6 +72,18 @@ impl Chunk {
         if !self.groups.contains(&group) {
             self.groups.push(group);
         }
+    }
+
+    pub(crate) fn root_modules(&self) -> &[ModuleId] {
+        &self.root_modules
+    }
+
+    pub(crate) fn filename_override(&self) -> Option<&str> {
+        self.filename_override.as_deref()
+    }
+
+    fn assign_render_id(&mut self, render_id: RenderId) {
+        self.render_id = Some(render_id);
     }
 
     pub fn split(&self, new_chunk: &mut Chunk, chunk_groups: &mut [ChunkGroup]) {
@@ -163,6 +178,7 @@ pub struct ChunkGraph {
     entrypoints: Vec<ChunkGroupId>,
     chunk_modules: Vec<Vec<ModuleId>>,
     module_chunks: Vec<Vec<ChunkId>>,
+    module_render_ids: Vec<Option<RenderId>>,
     block_chunk_groups: HashMap<AsyncBlockOrigin, ChunkGroupId>,
 }
 
@@ -174,15 +190,13 @@ impl ChunkGraph {
     ) -> Self {
         let mut graph = Self::default();
         let mut async_groups_by_target = HashMap::new();
-        let render_context = RenderPathContext::new(options.context.as_path());
-
         for (entry_index, entry_module) in entries.iter().copied().enumerate() {
             let entry_name = options
                 .entries
                 .get(entry_index)
                 .map(|entry| entry.name.clone())
                 .unwrap_or_else(|| format!("entry{entry_index}"));
-            let entry_chunk = graph.add_chunk(entry_name.clone(), format!("{entry_name}.js"));
+            let entry_chunk = graph.add_chunk(Some(entry_name.clone()), vec![entry_module]);
             let entry_group = graph.add_chunk_group(
                 ChunkGroupKind::Entrypoint {
                     name: entry_name.clone(),
@@ -230,8 +244,7 @@ impl ChunkGraph {
                 {
                     group
                 } else {
-                    let render_id = chunk_render_id(&render_context, module_graph, target);
-                    let chunk = graph.add_chunk(render_id.clone(), format!("{render_id}.js"));
+                    let chunk = graph.add_chunk(None, vec![target]);
                     let group = graph.add_chunk_group(ChunkGroupKind::Async, Some(origin));
                     graph.connect_chunk_and_group(chunk, group);
                     async_groups_by_target.insert(target, group);
@@ -256,9 +269,9 @@ impl ChunkGraph {
         graph
     }
 
-    fn add_chunk(&mut self, render_id: String, filename: String) -> ChunkId {
+    fn add_chunk(&mut self, name: Option<String>, root_modules: Vec<ModuleId>) -> ChunkId {
         let id = ChunkId::new(self.chunks.len());
-        self.chunks.push(Chunk::new(id, render_id, filename));
+        self.chunks.push(Chunk::new(id, name, root_modules));
         self.chunk_modules.push(Vec::new());
         id
     }
@@ -290,7 +303,10 @@ impl ChunkGraph {
         filename: impl Into<String>,
     ) -> Option<ChunkId> {
         let original = self.chunks.get(chunk.index())?.clone();
-        let new_chunk = self.add_chunk(render_id.into(), filename.into());
+        let render_id = RenderId::String(render_id.into());
+        let new_chunk = self.add_chunk(None, Vec::new());
+        self.chunks[new_chunk.index()].assign_render_id(render_id);
+        self.chunks[new_chunk.index()].filename_override = Some(filename.into());
         original.split(&mut self.chunks[new_chunk.index()], &mut self.chunk_groups);
         Some(new_chunk)
     }
@@ -298,6 +314,8 @@ impl ChunkGraph {
     pub(crate) fn connect_chunk_and_module(&mut self, chunk: ChunkId, module: ModuleId) {
         if self.module_chunks.len() <= module.index() {
             self.module_chunks.resize_with(module.index() + 1, Vec::new);
+            self.module_render_ids
+                .resize_with(module.index() + 1, || None);
         }
         if !self.chunk_modules[chunk.index()].contains(&module) {
             self.chunk_modules[chunk.index()].push(module);
@@ -328,6 +346,24 @@ impl ChunkGraph {
             .get(module.index())
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    pub(crate) fn module_render_id(&self, module: ModuleId) -> Option<&RenderId> {
+        self.module_render_ids
+            .get(module.index())
+            .and_then(Option::as_ref)
+    }
+
+    pub(crate) fn set_module_render_id(&mut self, module: ModuleId, render_id: RenderId) {
+        if self.module_render_ids.len() <= module.index() {
+            self.module_render_ids
+                .resize_with(module.index() + 1, || None);
+        }
+        self.module_render_ids[module.index()] = Some(render_id);
+    }
+
+    pub(crate) fn set_chunk_render_id(&mut self, chunk: ChunkId, render_id: RenderId) {
+        self.chunks[chunk.index()].assign_render_id(render_id);
     }
 
     pub fn block_chunk_group(&self, origin: AsyncBlockOrigin) -> Option<ChunkGroupId> {
@@ -377,57 +413,4 @@ fn import_block_target(module_graph: &ModuleGraph, origin: AsyncBlockOrigin) -> 
                 && connection.dependency.is_import_dependency()
         })
         .map(|connection| connection.module)
-}
-
-fn chunk_render_id(
-    context: &RenderPathContext,
-    module_graph: &ModuleGraph,
-    module: ModuleId,
-) -> String {
-    let resource = module_graph
-        .module(module)
-        .map(|module| module.identity().resource.as_path())
-        .unwrap_or_else(|| Path::new("chunk"));
-    let relative = context.make_relative(resource);
-    sanitize_chunk_id(&relative)
-}
-
-#[derive(Debug, Clone)]
-struct RenderPathContext {
-    raw_context: PathBuf,
-    context: PathBuf,
-}
-
-impl RenderPathContext {
-    fn new(context: &Path) -> Self {
-        Self {
-            raw_context: context.to_path_buf(),
-            context: std::fs::canonicalize(context).unwrap_or_else(|_| context.to_path_buf()),
-        }
-    }
-
-    fn make_relative(&self, resource: &Path) -> String {
-        if let Ok(relative) = resource
-            .strip_prefix(&self.context)
-            .or_else(|_| resource.strip_prefix(&self.raw_context))
-        {
-            return normalize_path(relative);
-        }
-
-        let resource = std::fs::canonicalize(resource).unwrap_or_else(|_| PathBuf::from(resource));
-        let relative = resource.strip_prefix(&self.context).unwrap_or(&resource);
-        normalize_path(relative)
-    }
-}
-
-fn normalize_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
-fn sanitize_chunk_id(relative: &str) -> String {
-    relative
-        .trim_start_matches("./")
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect()
 }

@@ -140,6 +140,14 @@ Necessity:
   require Chunk Loading Runtime; the legacy monolithic async path is removed.
 - Browser JSONP, ESM chunk loading, HMR, public path, chunk filename templates, and external chunk installation are future target features, not current requirements.
 
+The Node-runtime closure coordinates with the API-alignment and benchmark
+tracks (#140, #145, and #147). The JavaScript package entry remains ESM-only,
+while emitted entry assets intentionally use CommonJS startup. Render IDs are
+readable and deterministic with controlled churn, but are not a byte-for-byte
+webpack ID contract. Context modules, CommonJS parsing/interop, loaders,
+plugins, tree shaking, module concatenation, browser loading targets, and other
+unimplemented options remain explicit unsupported surfaces.
+
 ## ESM code generation
 
 Unpack preserves source and applies templates for const replacements, import side effects, import specifier reads, export headers, export specifiers, default exports, re-exports, and dynamic imports. It intentionally uses webpack-shaped names and getter-based export bindings.

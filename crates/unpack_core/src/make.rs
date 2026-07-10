@@ -361,22 +361,14 @@ impl BuildTask {
             .to_path_buf();
 
         if let Some(record) = services.module_build_cache.get(&self.identity, None) {
-            let valid = if services.module_snapshot_strategy.hash {
-                record
-                    .is_valid_with_cache(
-                        &services.file_system_info,
-                        services.module_snapshot_strategy,
-                        &services.snapshot_cache,
-                    )
-                    .await
-            } else {
-                services.file_system_info.is_snapshot_valid_sync_with_cache(
-                    record.snapshot(),
+            if record
+                .is_valid_with_cache(
+                    &services.file_system_info,
                     services.module_snapshot_strategy,
                     &services.snapshot_cache,
                 )
-            };
-            if valid {
+                .await
+            {
                 let process_dependencies =
                     process_dependencies_task(self.module_id, &issuer_context, record.parsed());
                 let (parsed, source, source_hash) = record.cloned_parts();

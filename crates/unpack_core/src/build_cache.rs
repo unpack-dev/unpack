@@ -467,7 +467,6 @@ trait CacheLayer: fmt::Debug + Send + Sync {
         _guard: &PackFileGuardDto,
         _build_inputs: &BTreeSet<PathBuf>,
         _resolved_build_inputs: &BTreeSet<PathBuf>,
-        _automatic_build_inputs: &BTreeSet<PathBuf>,
         _file_system_info: &FileSystemInfo,
         _build_dependency_snapshot_strategy: SnapshotStrategy,
         _resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
@@ -940,18 +939,10 @@ impl CacheLayer for PackFileCacheLayer {
         guard: &PackFileGuardDto,
         build_inputs: &BTreeSet<PathBuf>,
         resolved_build_inputs: &BTreeSet<PathBuf>,
-        automatic_build_inputs: &BTreeSet<PathBuf>,
         file_system_info: &FileSystemInfo,
         build_dependency_snapshot_strategy: SnapshotStrategy,
         resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
     ) -> bool {
-        let build_strategy = if !build_inputs.is_empty()
-            && build_inputs.iter().all(|path| automatic_build_inputs.contains(path))
-        {
-            SnapshotStrategy::timestamp()
-        } else {
-            build_dependency_snapshot_strategy
-        };
         let active = self.pack_file.as_ref().is_some_and(|pack_file| {
             pack_file.guard().is_some_and(|candidate| {
                 let build_dependencies =
@@ -963,7 +954,7 @@ impl CacheLayer for PackFileCacheLayer {
                         snapshot.has_exact_paths(build_inputs.iter().cloned())
                             && file_system_info.is_snapshot_valid_sync(
                                 &snapshot,
-                                build_strategy,
+                                build_dependency_snapshot_strategy,
                             )
                     })
                     && resolve_build_dependencies.is_some_and(|snapshot| {
@@ -1181,7 +1172,6 @@ impl Cache {
         guard: &PackFileGuardDto,
         build_inputs: &BTreeSet<PathBuf>,
         resolved_build_inputs: &BTreeSet<PathBuf>,
-        automatic_build_inputs: &BTreeSet<PathBuf>,
         file_system_info: &FileSystemInfo,
         build_dependency_snapshot_strategy: SnapshotStrategy,
         resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
@@ -1194,7 +1184,6 @@ impl Cache {
                     guard,
                     build_inputs,
                     resolved_build_inputs,
-                    automatic_build_inputs,
                     file_system_info,
                     build_dependency_snapshot_strategy,
                     resolve_build_dependency_snapshot_strategy,
@@ -1557,7 +1546,6 @@ impl BuildCache {
             .iter()
             .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
             .collect::<BTreeSet<_>>();
-        let automatic_build_inputs = build_inputs.clone();
         let mut resolved_build_inputs = BTreeSet::new();
         let mut resolution_files = BTreeSet::new();
         let mut resolution_contexts = BTreeSet::new();
@@ -1574,17 +1562,11 @@ impl BuildCache {
             resolution_contexts.extend(resolved.context_dependencies);
             resolution_missing.extend(resolved.missing_dependencies);
         }
-        let automatic_only = resolution_files.is_empty() && build_inputs == automatic_build_inputs;
-        let build_dependency_snapshot_strategy = if automatic_only {
-            SnapshotStrategy::timestamp()
-        } else {
-            self.build_dependency_snapshot_strategy
-        };
         let build_dependencies = self
             .build_dependency_file_system_info
             .create_snapshot_sync(
                 build_inputs.iter().cloned(),
-                build_dependency_snapshot_strategy,
+                self.build_dependency_snapshot_strategy,
             )?;
         let resolve_build_dependencies = self
             .build_dependency_file_system_info
@@ -1607,13 +1589,6 @@ impl BuildCache {
             .inner
             .lock()
             .expect("build cache mutex should not be poisoned");
-        let build_validation_strategy = if !build_inputs.is_empty()
-            && build_inputs.iter().all(|path| automatic_build_inputs.contains(path))
-        {
-            SnapshotStrategy::timestamp()
-        } else {
-            self.build_dependency_snapshot_strategy
-        };
         let previous_build_inputs_are_valid = inner
             .persistent_guard
             .as_ref()
@@ -1622,7 +1597,7 @@ impl BuildCache {
                 snapshot.has_exact_paths(build_inputs.iter().cloned())
                     && self
                         .build_dependency_file_system_info
-                        .is_snapshot_valid_sync(&snapshot, build_validation_strategy)
+                        .is_snapshot_valid_sync(&snapshot, self.build_dependency_snapshot_strategy)
             });
         if inner.persistent_guard.is_some() && !previous_build_inputs_are_valid {
             inner.cache.clear();
@@ -1631,7 +1606,6 @@ impl BuildCache {
             &guard,
             &build_inputs,
             &resolved_build_inputs,
-            &automatic_build_inputs,
             &self.build_dependency_file_system_info,
             self.build_dependency_snapshot_strategy,
             self.resolve_build_dependency_snapshot_strategy,

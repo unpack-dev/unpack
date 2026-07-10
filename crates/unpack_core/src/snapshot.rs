@@ -125,20 +125,6 @@ pub(crate) struct SnapshotCache {
     file_snapshots: Arc<Mutex<HashMap<FileSnapshotCacheKey, FileSnapshot>>>,
     context_timestamp_hashes: Arc<Mutex<HashMap<PathBuf, DirectoryTimestampHash>>>,
     context_content_hashes: Arc<Mutex<HashMap<PathBuf, u64>>>,
-    managed_item_states: Arc<Mutex<HashMap<PathBuf, Option<ManagedItemState>>>>,
-}
-
-impl SnapshotCache {
-    fn managed_path_is_valid(&self, snapshot: &ManagedPathSnapshot) -> bool {
-        let mut states = self
-            .managed_item_states
-            .lock()
-            .expect("snapshot cache mutex should not be poisoned");
-        let state = states
-            .entry(snapshot.root.clone())
-            .or_insert_with(|| ManagedItemState::create(&snapshot.root));
-        state.as_ref() == Some(&snapshot.state)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -240,15 +226,6 @@ impl FileSystemInfo {
         strategy: SnapshotStrategy,
     ) -> bool {
         snapshot.is_valid_sync(strategy, self)
-    }
-
-    pub(crate) fn is_snapshot_valid_sync_with_cache(
-        &self,
-        snapshot: &Snapshot,
-        strategy: SnapshotStrategy,
-        cache: &SnapshotCache,
-    ) -> bool {
-        snapshot.is_valid_sync_with_cache(strategy, self, Some(cache))
     }
 
     #[cfg(test)]
@@ -565,17 +542,8 @@ impl Snapshot {
     }
 
     fn is_valid_sync(&self, strategy: SnapshotStrategy, file_system_info: &FileSystemInfo) -> bool {
-        self.is_valid_sync_with_cache(strategy, file_system_info, None)
-    }
-
-    fn is_valid_sync_with_cache(
-        &self,
-        strategy: SnapshotStrategy,
-        file_system_info: &FileSystemInfo,
-        cache: Option<&SnapshotCache>,
-    ) -> bool {
         for entry in &self.entries {
-            if !entry.is_valid_sync_with_cache(strategy, file_system_info, cache) {
+            if !entry.is_valid_sync(strategy, file_system_info) {
                 return false;
             }
         }
@@ -744,21 +712,12 @@ impl SnapshotEntry {
                 matches!(
                     file_system_info.classify_path(&snapshot.path),
                     SnapshotPathClassification::Managed(_)
-                ) && snapshot.is_valid_with_cache(cache)
+                ) && snapshot.is_valid()
             }
         }
     }
 
     fn is_valid_sync(&self, strategy: SnapshotStrategy, file_system_info: &FileSystemInfo) -> bool {
-        self.is_valid_sync_with_cache(strategy, file_system_info, None)
-    }
-
-    fn is_valid_sync_with_cache(
-        &self,
-        strategy: SnapshotStrategy,
-        file_system_info: &FileSystemInfo,
-        cache: Option<&SnapshotCache>,
-    ) -> bool {
         match self {
             Self::File(file) => {
                 file_system_info.ordinary_snapshot_applies(&file.path)
@@ -770,7 +729,7 @@ impl SnapshotEntry {
                         &context.path,
                         strategy,
                         file_system_info,
-                        cache,
+                        None,
                     )
             }
             Self::MissingExistence { path } => {
@@ -784,7 +743,7 @@ impl SnapshotEntry {
                 matches!(
                     file_system_info.classify_path(&snapshot.path),
                     SnapshotPathClassification::Managed(_)
-                ) && snapshot.is_valid_with_cache(cache)
+                ) && snapshot.is_valid()
             }
         }
     }
@@ -1094,10 +1053,6 @@ impl ManagedPathSnapshot {
 
     fn is_valid(&self) -> bool {
         ManagedItemState::create(&self.root).is_some_and(|state| state == self.state)
-    }
-
-    fn is_valid_with_cache(&self, cache: Option<&SnapshotCache>) -> bool {
-        cache.map_or_else(|| self.is_valid(), |cache| cache.managed_path_is_valid(self))
     }
 }
 

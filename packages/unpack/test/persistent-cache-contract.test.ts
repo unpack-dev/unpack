@@ -388,42 +388,21 @@ function publicBuildOutcome(observation: CacheProcessObservation) {
 }
 
 async function assertOmittedCacheBehavior(mode: Mode, expected: "before" | "after") {
-  const fixture = await createFixture({
-    "src/index.js": "export const value = 'before';"
-  });
-  const entry = join(fixture, "src/index.js");
-  const output = join(fixture, "dist/main.js");
-  const stableTime = new Date("2020-01-01T00:00:00.000Z");
-  await utimes(entry, stableTime, stableTime);
-  const compiler = unpack({
-    context: fixture,
-    mode,
-    entry: "./src/index.js",
-    sourcemap: false,
-    snapshot: {
-      module: { timestamp: false, hash: false }
-    }
-  });
-
-  try {
-    assert.equal((await runCompiler(compiler)).err, null);
-    assert.match(await readFile(output, "utf8"), /before/);
-
-    await writeFile(entry, "export const value = 'after';", "utf8");
-    await utimes(entry, stableTime, stableTime);
-
-    assert.equal((await runCompiler(compiler)).err, null);
-    assert.match(await readFile(output, "utf8"), new RegExp(expected));
-  } finally {
-    await closeCompiler(compiler);
-    await rm(fixture, { recursive: true, force: true });
-  }
+  await assertCacheBehavior(mode, expected);
 }
 
 async function assertCacheOverrideBehavior(
   mode: Mode,
   cache: boolean,
   expected: "before" | "after"
+) {
+  await assertCacheBehavior(mode, expected, cache);
+}
+
+async function assertCacheBehavior(
+  mode: Mode,
+  expected: "before" | "after",
+  cache?: boolean
 ) {
   const fixture = await createFixture({
     "src/index.js": "export const value = 'before';"
@@ -437,7 +416,7 @@ async function assertCacheOverrideBehavior(
     mode,
     entry: "./src/index.js",
     sourcemap: false,
-    cache,
+    ...(cache === undefined ? {} : { cache }),
     snapshot: {
       module: { timestamp: false, hash: false }
     }
@@ -445,6 +424,7 @@ async function assertCacheOverrideBehavior(
 
   try {
     assert.equal((await runCompiler(compiler)).err, null);
+    assert.match(await readFile(output, "utf8"), /before/);
     await writeFile(entry, "export const value = 'after';", "utf8");
     await utimes(entry, stableTime, stableTime);
     assert.equal((await runCompiler(compiler)).err, null);

@@ -15,7 +15,7 @@ void observeBuild(request).then((observation) => {
 });
 
 async function observeBuild(
-  current: CacheProcessRequest
+  buildRequest: CacheProcessRequest
 ): Promise<CacheProcessObservation> {
   const base = {
     pid: process.pid,
@@ -30,9 +30,9 @@ async function observeBuild(
 
   let compiler: ReturnType<typeof unpack> | ReturnType<typeof webpack>;
   try {
-    const { outputPath, ...options } = current.options;
+    const { outputPath, ...options } = buildRequest.options;
     compiler =
-      current.bundler === "webpack"
+      buildRequest.bundler === "webpack"
         ? webpack({
             ...options,
             entry: options.entry ?? "./src/index.js",
@@ -55,7 +55,7 @@ async function observeBuild(
     };
   }
 
-  const run = await runCompiler(compiler, current.bundler);
+  const run = await runCompiler(compiler, buildRequest.bundler);
   const closeError = await closeCompiler(compiler);
   return {
     ...base,

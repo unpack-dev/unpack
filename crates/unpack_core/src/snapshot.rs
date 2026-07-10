@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -285,7 +285,162 @@ pub(crate) struct Snapshot {
     entries: Vec<SnapshotEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PersistentSnapshotEntry {
+    File {
+        path: PathBuf,
+        exists: bool,
+        modified: Option<SystemTime>,
+        source_hash: Option<u64>,
+    },
+    Context {
+        path: PathBuf,
+        exists: bool,
+        timestamp_hash: Option<u64>,
+        content_hash: Option<u64>,
+    },
+    MissingExistence {
+        path: PathBuf,
+    },
+    ImmutablePath {
+        path: PathBuf,
+    },
+    ManagedPath {
+        path: PathBuf,
+        root: PathBuf,
+        state: PersistentManagedItemState,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PersistentManagedItemState {
+    NodeModules,
+    GroupingFolder,
+    Package { name: String, version: String },
+}
+
 impl Snapshot {
+    pub(crate) fn persistent_entries(&self) -> Vec<PersistentSnapshotEntry> {
+        self.entries
+            .iter()
+            .map(|entry| match entry {
+                SnapshotEntry::File(file) => PersistentSnapshotEntry::File {
+                    path: file.path.clone(),
+                    exists: file.snapshot.exists,
+                    modified: file.snapshot.modified,
+                    source_hash: file.snapshot.source_hash,
+                },
+                SnapshotEntry::Context(context) => PersistentSnapshotEntry::Context {
+                    path: context.path.clone(),
+                    exists: context.snapshot.exists,
+                    timestamp_hash: context.snapshot.timestamp_hash,
+                    content_hash: context.snapshot.content_hash,
+                },
+                SnapshotEntry::MissingExistence { path } => {
+                    PersistentSnapshotEntry::MissingExistence { path: path.clone() }
+                }
+                SnapshotEntry::ImmutablePath { path } => {
+                    PersistentSnapshotEntry::ImmutablePath { path: path.clone() }
+                }
+                SnapshotEntry::ManagedPath(managed) => PersistentSnapshotEntry::ManagedPath {
+                    path: managed.path.clone(),
+                    root: managed.root.clone(),
+                    state: match &managed.state {
+                        ManagedItemState::NodeModules => PersistentManagedItemState::NodeModules,
+                        ManagedItemState::GroupingFolder => {
+                            PersistentManagedItemState::GroupingFolder
+                        }
+                        ManagedItemState::Package { name, version } => {
+                            PersistentManagedItemState::Package {
+                                name: name.clone(),
+                                version: version.clone(),
+                            }
+                        }
+                    },
+                },
+            })
+            .collect()
+    }
+
+    pub(crate) fn from_persistent_entries(entries: Vec<PersistentSnapshotEntry>) -> Option<Self> {
+        let mut seen_paths = BTreeSet::new();
+        let mut snapshots = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let path = match &entry {
+                PersistentSnapshotEntry::File { path, .. }
+                | PersistentSnapshotEntry::Context { path, .. }
+                | PersistentSnapshotEntry::MissingExistence { path }
+                | PersistentSnapshotEntry::ImmutablePath { path }
+                | PersistentSnapshotEntry::ManagedPath { path, .. } => path,
+            };
+            if !seen_paths.insert(path.clone()) {
+                return None;
+            }
+            snapshots.push(match entry {
+                PersistentSnapshotEntry::File {
+                    path,
+                    exists,
+                    modified,
+                    source_hash,
+                } => {
+                    if !exists && (modified.is_some() || source_hash.is_some()) {
+                        return None;
+                    }
+                    SnapshotEntry::File(SnapshottedFile {
+                        path,
+                        snapshot: FileSnapshot {
+                            exists,
+                            modified,
+                            source_hash,
+                        },
+                    })
+                }
+                PersistentSnapshotEntry::Context {
+                    path,
+                    exists,
+                    timestamp_hash,
+                    content_hash,
+                } => {
+                    if !exists && (timestamp_hash.is_some() || content_hash.is_some()) {
+                        return None;
+                    }
+                    SnapshotEntry::Context(SnapshottedContext {
+                        path,
+                        snapshot: ContextSnapshot {
+                            exists,
+                            timestamp_hash,
+                            content_hash,
+                        },
+                    })
+                }
+                PersistentSnapshotEntry::MissingExistence { path } => {
+                    SnapshotEntry::MissingExistence { path }
+                }
+                PersistentSnapshotEntry::ImmutablePath { path } => {
+                    SnapshotEntry::ImmutablePath { path }
+                }
+                PersistentSnapshotEntry::ManagedPath { path, root, state } => {
+                    SnapshotEntry::ManagedPath(ManagedPathSnapshot {
+                        path,
+                        root,
+                        state: match state {
+                            PersistentManagedItemState::NodeModules => {
+                                ManagedItemState::NodeModules
+                            }
+                            PersistentManagedItemState::GroupingFolder => {
+                                ManagedItemState::GroupingFolder
+                            }
+                            PersistentManagedItemState::Package { name, version } => {
+                                ManagedItemState::Package { name, version }
+                            }
+                        },
+                    })
+                }
+            });
+        }
+        Some(Self { entries: snapshots })
+    }
+
     async fn create_file(
         path: &Path,
         source: &str,
@@ -892,10 +1047,15 @@ impl ManagedItemState {
         }
 
         let package_json = root.join("package.json");
-        let source = fs::read(&package_json).ok()?;
-        let json = serde_json::from_slice::<serde_json::Value>(&source).ok()?;
-        let name = json.get("name")?.as_str()?.to_string();
-        let version = json.get("version")?.as_str()?.to_string();
+        #[derive(Deserialize)]
+        struct PackageIdentity {
+            name: String,
+            version: String,
+        }
+
+        let mut source = fs::read(&package_json).ok()?;
+        let PackageIdentity { name, version } =
+            simd_json::serde::from_slice::<PackageIdentity>(&mut source).ok()?;
 
         Some(Self::Package { name, version })
     }

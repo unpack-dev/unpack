@@ -78,7 +78,7 @@ impl Compiler {
     }
 
     pub async fn run(&self) -> Result<Compilation> {
-        async {
+        let result = async {
             let mut compilation = self.create_compilation();
             compilation.make().await?;
             compilation.build_chunk_graph();
@@ -87,7 +87,9 @@ impl Compiler {
             Ok(compilation)
         }
         .instrument(tracing::trace_span!("Compiler::run"))
-        .await
+        .await;
+        self.build_cache.trace_work_counters();
+        result
     }
 
     pub fn flush_cache(&self) -> std::result::Result<(), String> {
@@ -123,7 +125,10 @@ mod tests {
     use std::{collections::BTreeMap, fs, path::Path};
 
     use super::*;
-    use crate::build_cache::{CacheItemFamily, CacheItemWork};
+    use crate::{
+        build_cache::{CacheItemFamily, CacheItemWork},
+        pack_file::PackFile,
+    };
 
     #[tokio::test]
     async fn repeated_runs_reuse_memory_module_build_records_without_sharing_compilations()
@@ -247,6 +252,14 @@ mod tests {
                 .expect("main asset should exist")
                 .contains("after")
         );
+        assert_ne!(
+            first.module_graph().modules().as_ptr(),
+            second.module_graph().modules().as_ptr()
+        );
+        assert_ne!(
+            first.chunk_graph().chunks().as_ptr(),
+            second.chunk_graph().chunks().as_ptr()
+        );
 
         Ok(())
     }
@@ -274,18 +287,13 @@ mod tests {
         let first = first_compiler.run().await?;
         first_compiler.flush_cache()?;
         assert_eq!(first.errors(), []);
-        assert!(cache_location.join("container.json").exists());
-        assert!(cache_location.join("packs/modules.cbor").exists());
-        assert!(!cache_location.join("packs/compilation.cbor").exists());
-        let manifest = fs::read_to_string(cache_location.join("container.json"))?;
-        assert!(manifest.contains("UNPACK_PERSISTENT_CACHE"));
-        assert!(manifest.contains("test-version"));
-        let manifest_json: serde_json::Value = serde_json::from_str(&manifest)?;
-        assert!(manifest_json.get("schema_version").is_none());
+        assert!(PackFile::index_path(&cache_location).exists());
+        assert!(!cache_location.join("container.json").exists());
+        assert!(!cache_location.join("packs/modules.cbor").exists());
 
         let second_compiler = Compiler::new(options);
-        assert_eq!(second_compiler.build_cache.stats().resolve_entries, 2);
-        assert_eq!(second_compiler.build_cache.stats().module_entries, 2);
+        assert_eq!(second_compiler.build_cache.stats().resolve_entries, 0);
+        assert_eq!(second_compiler.build_cache.stats().module_entries, 0);
 
         let second = second_compiler.run().await?;
         let second_cache = second_compiler.build_cache.stats();
@@ -350,48 +358,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_cache_readonly_rebuilds_without_module_pack()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        write(
-            temp.path().join("index.js"),
-            r#"
-                import "./dep";
-                export const result = "ok";
-            "#,
-        )?;
-        write(temp.path().join("dep.js"), "export const value = 1;")?;
-        let cache_temp = tempfile::tempdir()?;
-        let cache_location = cache_temp.path().join("default");
-
-        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
-        options.cache = CacheOptions::filesystem();
-        options.cache.cache_location = Some(cache_location.clone());
-
-        let first_compiler = Compiler::new(options.clone());
-        let first = first_compiler.run().await?;
-        first_compiler.flush_cache()?;
-
-        let module_pack = cache_location.join("packs/modules.cbor");
-        assert!(module_pack.exists());
-        assert!(!cache_location.join("packs/compilation.cbor").exists());
-        fs::remove_file(module_pack)?;
-
-        let mut readonly_options = options;
-        readonly_options.cache.readonly = true;
-        let readonly_compiler = Compiler::new(readonly_options);
-        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 0);
-        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 0);
-
-        let second = readonly_compiler.run().await?;
-        assert_eq!(asset_sources(&first), asset_sources(&second));
-        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 2);
-        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 2);
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn filesystem_cache_readonly_restores_but_skips_persistent_updates()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -413,10 +379,7 @@ mod tests {
         let first_compiler = Compiler::new(options.clone());
         first_compiler.run().await?;
         first_compiler.flush_cache()?;
-        let manifest_path = cache_location.join("container.json");
-        let pack_path = cache_location.join("packs/modules.cbor");
-        let manifest_before = fs::read(&manifest_path)?;
-        let pack_before = fs::read(&pack_path)?;
+        let cache_before = directory_snapshot(&cache_location)?;
 
         write(temp.path().join("dep.js"), "export const value = 'after';")?;
 
@@ -437,8 +400,7 @@ mod tests {
                 .expect("main asset should exist")
                 .contains("after")
         );
-        assert_eq!(fs::read(&manifest_path)?, manifest_before);
-        assert_eq!(fs::read(&pack_path)?, pack_before);
+        assert_eq!(directory_snapshot(&cache_location)?, cache_before);
 
         Ok(())
     }
@@ -459,8 +421,7 @@ mod tests {
         compiler.run().await?;
         compiler.flush_cache()?;
 
-        assert!(!cache_location.join("container.json").exists());
-        assert!(!cache_location.join("packs/modules.cbor").exists());
+        assert!(!cache_location.exists());
 
         Ok(())
     }
@@ -485,16 +446,38 @@ mod tests {
         let first_compiler = Compiler::new(options.clone());
         first_compiler.run().await?;
         first_compiler.flush_cache()?;
+        let warm_compiler = Compiler::new(options.clone());
+        warm_compiler.run().await?;
         assert_eq!(
-            Compiler::new(options.clone())
+            warm_compiler
                 .build_cache
-                .stats()
-                .module_entries,
-            1
+                .work_counters()
+                .for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 1,
+                misses: 0,
+                stores: 0,
+                restores: 1,
+                evictions: 0,
+            }
         );
 
         write(&config, "export default 'after';")?;
-        assert_eq!(Compiler::new(options).build_cache.stats().module_entries, 0);
+        let cold_compiler = Compiler::new(options);
+        cold_compiler.run().await?;
+        assert_eq!(
+            cold_compiler
+                .build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 0,
+                misses: 1,
+                stores: 1,
+                restores: 0,
+                evictions: 0,
+            }
+        );
 
         Ok(())
     }
@@ -555,5 +538,31 @@ mod tests {
             .iter()
             .map(|asset| (asset.filename.clone(), asset.source.clone()))
             .collect()
+    }
+
+    fn directory_snapshot(root: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {
+        fn visit(
+            root: &Path,
+            directory: &Path,
+            files: &mut BTreeMap<PathBuf, Vec<u8>>,
+        ) -> std::io::Result<()> {
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(root, &path, files)?;
+                } else {
+                    files.insert(
+                        path.strip_prefix(root).unwrap_or(&path).to_path_buf(),
+                        fs::read(path)?,
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files)?;
+        Ok(files)
     }
 }

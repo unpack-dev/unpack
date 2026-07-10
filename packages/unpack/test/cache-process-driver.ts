@@ -25,7 +25,8 @@ async function observeBuild(
     hasStats: false,
     hasErrors: null,
     assets: [],
-    outputPath: null
+    outputPath: null,
+    cacheWork: null
   } satisfies CacheProcessObservation;
 
   let compiler: ReturnType<typeof unpack> | ReturnType<typeof webpack>;

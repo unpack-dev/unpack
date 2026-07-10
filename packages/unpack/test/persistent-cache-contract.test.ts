@@ -251,6 +251,188 @@ test("selective cold and warm observations run Unpack and pinned webpack in inde
   }
 });
 
+test("unchanged Resolve and Module Build work restores in an independent process", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import './dep.js'; export const result = 'ok';",
+    "src/dep.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/cross-process-hits");
+
+  try {
+    const { cold, warm } = await runColdWarmBuilds({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "development",
+        outputPath: join(fixture, "dist"),
+        cache: { type: "filesystem", cacheLocation }
+      }
+    });
+
+    assertColdWarmPublicOutcome({ cold, warm });
+    assert.deepEqual(cold.cacheWork, {
+      resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 }
+    });
+    assert.deepEqual(warm.cacheWork, {
+      resolve: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 }
+    });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("a source mutation rebuilds only the affected Module Build record", async () => {
+  const fixture = await createFixture({
+    "src/index.js": [
+      "import { changed } from './changed.js';",
+      "import { stable } from './stable.js';",
+      "export const result = `${changed}:${stable}`;"
+    ].join("\n"),
+    "src/changed.js": "export const changed = 'before';",
+    "src/stable.js": "export const stable = 'stable';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/selective-module-build");
+  const request = {
+    bundler: "unpack" as const,
+    options: {
+      context: fixture,
+      mode: "none" as const,
+      outputPath: join(fixture, "dist"),
+      cache: { type: "filesystem", cacheLocation },
+      snapshot: {
+        module: { timestamp: false, hash: true },
+        resolve: { timestamp: false, hash: false }
+      }
+    }
+  };
+
+  try {
+    const cold = await runCacheProcess(request);
+    assert.equal(cold.error, null);
+    assert.deepEqual(cold.cacheWork, {
+      resolve: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 },
+      moduleBuild: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 }
+    });
+
+    await writeFile(
+      join(fixture, "src/changed.js"),
+      "export const changed = 'after';",
+      "utf8"
+    );
+    const changed = await runCacheProcess(request);
+
+    assert.equal(changed.error, null);
+    assert.deepEqual(changed.cacheWork, {
+      resolve: { hits: 3, misses: 0, stores: 0, restores: 3, evictions: 0 },
+      moduleBuild: { hits: 3, misses: 0, stores: 1, restores: 3, evictions: 0 }
+    });
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /stable/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("cache version is an exact container guard at the same location", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import './dep.js'; export const result = 'versioned';",
+    "src/dep.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/version-guard");
+  const build = (version: string) =>
+    runCacheProcess({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "none",
+        outputPath: join(fixture, "dist"),
+        cache: { type: "filesystem", cacheLocation, version }
+      }
+    });
+
+  try {
+    const firstV1 = await build("v1");
+    const firstV2 = await build("v2");
+    const warmV2 = await build("v2");
+
+    for (const cold of [firstV1, firstV2]) {
+      assert.equal(cold.error, null);
+      assert.deepEqual(cold.cacheWork, {
+        resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+        moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 }
+      });
+    }
+    assert.deepEqual(warmV2.cacheWork, {
+      resolve: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 }
+    });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("legacy JSON and CBOR cache files remain untouched and are treated as cold", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import './dep.js'; export const result = 'legacy-cold';",
+    "src/dep.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/legacy");
+  const manifestPath = join(cacheLocation, "container.json");
+  const packPath = join(cacheLocation, "packs/modules.cbor");
+  const manifest = Buffer.from(
+    JSON.stringify({
+      magic: "UNPACK_PERSISTENT_CACHE",
+      cache_version: "",
+      pack_file: "packs/modules.cbor",
+      build_dependencies: { entries: [] },
+      resolve_build_dependencies: { entries: [] }
+    })
+  );
+  // A valid legacy CachePackDto encoded as CBOR with empty record arrays. Keep
+  // these bytes static so the removed legacy serializer never returns as a test dependency.
+  const pack = Buffer.concat([
+    Buffer.from("UNPACK-CACHE-PACK\0"),
+    Buffer.from([0xa4, 0x65]),
+    Buffer.from("magic"),
+    Buffer.from([0x77]),
+    Buffer.from("UNPACK_PERSISTENT_CACHE"),
+    Buffer.from([0x6d]),
+    Buffer.from("cache_version"),
+    Buffer.from([0x60, 0x6f]),
+    Buffer.from("resolve_records"),
+    Buffer.from([0x80, 0x6d]),
+    Buffer.from("module_builds"),
+    Buffer.from([0x80])
+  ]);
+  await mkdir(dirname(packPath), { recursive: true });
+  await writeFile(manifestPath, manifest);
+  await writeFile(packPath, pack);
+
+  try {
+    const observation = await runCacheProcess({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "none",
+        outputPath: join(fixture, "dist"),
+        cache: { type: "filesystem", cacheLocation }
+      }
+    });
+
+    assert.equal(observation.error, null);
+    assert.deepEqual(observation.cacheWork, {
+      resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 }
+    });
+    assert.deepEqual(await readFile(manifestPath), manifest);
+    assert.deepEqual(await readFile(packPath), pack);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("cache validation is synchronous for Unpack and pinned webpack", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"

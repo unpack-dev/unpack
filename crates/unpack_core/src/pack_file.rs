@@ -31,12 +31,13 @@ mod tests {
             SnapshotStrategy::timestamp_and_hash(),
         )
         .await?;
-        let record = actual_record.to_pack_file_dto();
+        let codec = ResolveRecordCodec::current();
+        let record = codec.to_dto(&actual_record);
         assert_eq!(
-            ResolveRecord::from_pack_file_dto(record.clone()).as_ref(),
+            codec.from_dto(record.clone()).as_ref(),
             Some(&actual_record)
         );
-        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let registry = CodecRegistry::new().with_resolve_record(codec);
 
         PackFile::publish_resolve_records(
             temp.path(),
@@ -56,7 +57,7 @@ mod tests {
             .get_resolve_record(&address, Some(&etag))
             .expect("Resolve Record DTO should restore");
         assert_eq!(
-            ResolveRecord::from_pack_file_dto((*restored_dto).clone()).as_ref(),
+            codec.from_dto((*restored_dto).clone()).as_ref(),
             Some(&actual_record)
         );
 
@@ -339,7 +340,13 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let path = PathBytes(vec![b'/', b'p', b'k', b'g', 0xff]);
-        assert_eq!(path.to_path_buf().as_os_str().as_bytes(), path.0);
+        assert_eq!(
+            path.to_path_buf()
+                .expect("Unix path bytes should round-trip")
+                .as_os_str()
+                .as_bytes(),
+            path.0
+        );
     }
 
     #[test]
@@ -563,6 +570,8 @@ use std::{
 
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 const INDEX_FILE: &str = "index.pack";
 const CONTENT_DIRECTORY: &str = "content";
@@ -631,17 +640,39 @@ impl PathBytes {
         Self(path.as_os_str().as_bytes().to_vec())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(unix)]
+    pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
+        Some(PathBuf::from(std::ffi::OsString::from_vec(self.0.clone())))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn from_path(path: &Path) -> Self {
+        Self(
+            path.as_os_str()
+                .encode_wide()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
+        let chunks = self.0.chunks_exact(2);
+        if !chunks.remainder().is_empty() {
+            return None;
+        }
+        let wide = chunks
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub(crate) fn from_path(path: &Path) -> Self {
         Self(path.to_string_lossy().as_bytes().to_vec())
     }
 
-    #[cfg(unix)]
-    pub(crate) fn to_path_buf(&self) -> PathBuf {
-        PathBuf::from(std::ffi::OsString::from_vec(self.0.clone()))
-    }
-
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
         String::from_utf8(self.0.clone()).ok().map(PathBuf::from)
     }
@@ -856,6 +887,17 @@ impl ResolveRecordCodec {
         Self {
             codec_id: RESOLVE_RECORD_CODEC_ID,
         }
+    }
+
+    pub(crate) fn to_dto(self, record: &crate::build_cache::ResolveRecord) -> ResolveRecordDto {
+        record.to_pack_file_dto()
+    }
+
+    pub(crate) fn from_dto(
+        self,
+        dto: ResolveRecordDto,
+    ) -> Option<crate::build_cache::ResolveRecord> {
+        crate::build_cache::ResolveRecord::from_pack_file_dto(dto)
     }
 
     #[cfg(test)]

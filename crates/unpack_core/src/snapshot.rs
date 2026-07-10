@@ -345,7 +345,7 @@ impl Snapshot {
                     modified,
                     source_hash,
                 } => Some(SnapshotEntry::File(SnapshottedFile {
-                    path: path.to_path_buf(),
+                    path: path.to_path_buf()?,
                     snapshot: FileSnapshot {
                         exists,
                         modified: match modified {
@@ -361,7 +361,7 @@ impl Snapshot {
                     timestamp_hash,
                     content_hash,
                 } => Some(SnapshotEntry::Context(SnapshottedContext {
-                    path: path.to_path_buf(),
+                    path: path.to_path_buf()?,
                     snapshot: ContextSnapshot {
                         exists,
                         timestamp_hash,
@@ -370,16 +370,16 @@ impl Snapshot {
                 })),
                 SnapshotEntryDto::MissingExistence { path } => {
                     Some(SnapshotEntry::MissingExistence {
-                        path: path.to_path_buf(),
+                        path: path.to_path_buf()?,
                     })
                 }
                 SnapshotEntryDto::ImmutablePath { path } => Some(SnapshotEntry::ImmutablePath {
-                    path: path.to_path_buf(),
+                    path: path.to_path_buf()?,
                 }),
                 SnapshotEntryDto::ManagedPath { path, root, state } => {
                     Some(SnapshotEntry::ManagedPath(ManagedPathSnapshot {
-                        path: path.to_path_buf(),
-                        root: root.to_path_buf(),
+                        path: path.to_path_buf()?,
+                        root: root.to_path_buf()?,
                         state: match state {
                             ManagedItemStateDto::NodeModules => ManagedItemState::NodeModules,
                             ManagedItemStateDto::GroupingFolder => ManagedItemState::GroupingFolder,

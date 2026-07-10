@@ -603,25 +603,25 @@ impl ResolveRecord {
                 module_type: match identity.module_type {
                     ModuleTypeDto::JavaScriptAuto => crate::ModuleType::JavaScriptAuto,
                 },
-                resource: identity.resource.to_path_buf(),
+                resource: identity.resource.to_path_buf()?,
                 query: identity.query,
                 fragment: identity.fragment,
                 layer: identity.layer,
                 loaders: identity.loaders,
             },
-            resource: resource.to_path_buf(),
+            resource: resource.to_path_buf()?,
             file_dependencies: file_dependencies
                 .into_iter()
                 .map(|path| path.to_path_buf())
-                .collect(),
+                .collect::<Option<_>>()?,
             context_dependencies: context_dependencies
                 .into_iter()
                 .map(|path| path.to_path_buf())
-                .collect(),
+                .collect::<Option<_>>()?,
             missing_dependencies: missing_dependencies
                 .into_iter()
                 .map(|path| path.to_path_buf())
-                .collect(),
+                .collect::<Option<_>>()?,
             snapshot: Snapshot::from_pack_file_dto(snapshot)?,
         })
     }

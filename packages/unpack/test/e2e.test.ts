@@ -62,6 +62,12 @@ async function runBundleExecutionCase(bundleCase: BundleExecutionCase) {
 
     assert.equal(err, null);
     assert.equal(stats?.hasErrors(), false);
+    assert.ok(
+      stats?.toJson().assets.some((asset) => asset.name === (bundleCase.entryAsset ?? defaultEntryAsset))
+    );
+    assert.ok(
+      (await readdir(outputPath)).includes(bundleCase.entryAsset ?? defaultEntryAsset)
+    );
 
     const result = await executeEntryExpression(
       outputPath,

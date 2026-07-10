@@ -1,33 +1,101 @@
 use std::{
     any::Any,
     collections::{BTreeSet, HashMap},
-    fmt, io,
+    fmt, fs, io,
     marker::PhantomData,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
-    ModuleIdentity, SnapshotOptions, SnapshotStrategy,
+    InfrastructureLogEvent, InfrastructureLogLevel, ModuleIdentity, SnapshotOptions,
+    SnapshotStrategy, UnpackResolver,
     cache_hash::stable_hash,
+    code_generation_record::CodeGenerationResult,
     pack_file::{
-        CodecRegistry, ModuleBuildRecordCodec, ModuleBuildRecordDto, PackFile, PackFileAddress,
-        PackFileETag, PackFileGuardDto, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
+        AccessStamp, AssetRenderRecordCodec, AssetRenderRecordDto, CodeGenerationRecordCodec,
+        CodeGenerationRecordDto, CodecRegistry, DEFAULT_MAX_AGE, ModuleBuildRecordCodec,
+        ModuleBuildRecordDto, PackFile, PackFileAddress, PackFileETag, PackFileGuardDto,
+        PackFileRetention, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
         ResolveRecordDto, SnapshotDto,
+        PackFileCompression, PackFileOpenOptions, PackFilePublicationOptions,
+/*
+        PackFileOpenOptions, PackFilePublicationOptions, PackFileRetention, PackFileWriteBatch,
+        PublicationBase, ResolveRecordCodec, ResolveRecordDto, SnapshotDto,
+*/
     },
     parser::ParsedModule,
+    rendered_source::RenderedSource,
     snapshot::{FileSystemInfo, Snapshot, SnapshotCache},
 };
 
 const RESOLVE_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/resolve");
 const MODULE_BUILD_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/module-build");
+const CODE_GENERATION_CACHE_NAMESPACE: CacheNamespace =
+    CacheNamespace::new("unpack/code-generation");
+const ASSET_RENDER_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/asset-render");
+const CACHE_PROFILE_LOGGER: &str = "unpack.Cache.Profile";
+const CACHE_WRITER_LOGGER: &str = "unpack.Cache.Writer";
+
+#[derive(Debug)]
+struct CacheDiagnostics {
+    profile: bool,
+    events: Mutex<Vec<InfrastructureLogEvent>>,
+}
+
+impl CacheDiagnostics {
+    fn new(profile: bool) -> Self {
+        Self {
+            profile,
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn profile(&self, message: impl Into<String>) {
+        if self.profile {
+            self.events
+                .lock()
+                .expect("cache diagnostics mutex should not be poisoned")
+                .push(InfrastructureLogEvent::new(
+                    InfrastructureLogLevel::Log,
+                    CACHE_PROFILE_LOGGER,
+                    message,
+                ));
+        }
+    }
+
+    fn warn(&self, message: impl Into<String>) {
+        self.events
+            .lock()
+            .expect("cache diagnostics mutex should not be poisoned")
+            .push(InfrastructureLogEvent::new(
+                InfrastructureLogLevel::Warn,
+                CACHE_WRITER_LOGGER,
+                message,
+            ));
+    }
+
+    fn drain(&self) -> Vec<InfrastructureLogEvent> {
+        std::mem::take(
+            &mut *self
+                .events
+                .lock()
+                .expect("cache diagnostics mutex should not be poisoned"),
+        )
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct BuildCache {
     options: CacheOptions,
     build_dependency_snapshot_strategy: SnapshotStrategy,
     resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-    file_system_info: FileSystemInfo,
+    build_dependency_file_system_info: FileSystemInfo,
+    diagnostics: Arc<CacheDiagnostics>,
     inner: Arc<Mutex<BuildCacheInner>>,
 }
 
@@ -64,7 +132,7 @@ impl CacheIdentifier {
         Self(value.as_ref().to_vec())
     }
 
-    fn from_parts(parts: impl IntoIterator<Item = Vec<u8>>) -> Self {
+    pub(crate) fn from_parts(parts: impl IntoIterator<Item = Vec<u8>>) -> Self {
         let mut bytes = Vec::new();
         for part in parts {
             bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
@@ -73,7 +141,7 @@ impl CacheIdentifier {
         Self(bytes)
     }
 
-    fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
@@ -100,9 +168,7 @@ pub(crate) trait CacheKey: Clone + Send + Sync + 'static {
 pub(crate) enum CacheItemFamily {
     Resolve,
     ModuleBuild,
-    #[allow(dead_code)]
     CodeGeneration,
-    #[allow(dead_code)]
     AssetRender,
 }
 
@@ -149,8 +215,15 @@ pub struct CacheOptions {
     pub name: Option<String>,
     pub version: Option<String>,
     pub build_dependencies: Vec<BuildDependency>,
-    pub max_memory_generations: Option<u32>,
+    pub automatic_build_dependencies: Vec<PathBuf>,
+    pub max_age: Duration,
+    pub max_memory_generations: Option<u64>,
+    pub compression: CacheCompression,
+    pub allow_collecting_memory: bool,
     pub idle_timeout: Option<u32>,
+    pub idle_timeout_for_initial_store: Option<u32>,
+    pub idle_timeout_after_large_changes: Option<u32>,
+    pub profile: bool,
     pub readonly: bool,
 }
 
@@ -169,8 +242,15 @@ impl CacheOptions {
             name: None,
             version: None,
             build_dependencies: Vec::new(),
+            automatic_build_dependencies: Vec::new(),
+            max_age: DEFAULT_MAX_AGE,
+            compression: CacheCompression::None,
+            allow_collecting_memory: false,
             max_memory_generations: None,
             idle_timeout: None,
+            idle_timeout_for_initial_store: None,
+            idle_timeout_after_large_changes: None,
+            profile: false,
             readonly: false,
         }
     }
@@ -183,8 +263,15 @@ impl CacheOptions {
             name: None,
             version: None,
             build_dependencies: Vec::new(),
+            automatic_build_dependencies: Vec::new(),
+            max_age: DEFAULT_MAX_AGE,
+            compression: CacheCompression::None,
+            allow_collecting_memory: false,
             max_memory_generations: None,
             idle_timeout: None,
+            idle_timeout_for_initial_store: None,
+            idle_timeout_after_large_changes: None,
+            profile: false,
             readonly: false,
         }
     }
@@ -197,8 +284,15 @@ impl CacheOptions {
             name: None,
             version: None,
             build_dependencies: Vec::new(),
+            automatic_build_dependencies: Vec::new(),
+            max_age: DEFAULT_MAX_AGE,
+            compression: CacheCompression::None,
+            allow_collecting_memory: false,
             max_memory_generations: None,
-            idle_timeout: None,
+            idle_timeout: Some(60_000),
+            idle_timeout_for_initial_store: Some(5_000),
+            idle_timeout_after_large_changes: Some(1_000),
+            profile: false,
             readonly: false,
         }
     }
@@ -211,33 +305,106 @@ pub enum CacheKind {
     Filesystem,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheCompression {
+    None,
+    Gzip,
+    Brotli,
+}
+
+impl From<CacheCompression> for PackFileCompression {
+    fn from(compression: CacheCompression) -> Self {
+        match compression {
+            CacheCompression::None => Self::None,
+            CacheCompression::Gzip => Self::Gzip,
+            CacheCompression::Brotli => Self::Brotli,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildDependency {
     pub name: String,
-    pub files: Vec<PathBuf>,
+    pub requests: Vec<String>,
 }
 
 #[derive(Debug)]
 struct BuildCacheInner {
     cache: Cache,
-    dirty: bool,
+    dirty_generation: u64,
+    published_generation: u64,
+    initial_store_pending: bool,
+    persistent_guard: Option<PackFileGuardDto>,
+    persistent_guard_error: Option<String>,
+    #[cfg(test)]
+    publish_barrier: Option<PublishBarrier>,
+    clock: Arc<dyn CacheClock>,
+}
+
+trait CacheClock: fmt::Debug + Send + Sync {
+    fn now(&self) -> AccessStamp;
+}
+
+#[derive(Debug)]
+struct SystemCacheClock;
+
+impl CacheClock for SystemCacheClock {
+    fn now(&self) -> AccessStamp {
+        AccessStamp::now()
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct PublishBarrier {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ManualCacheClock {
+    now_millis: AtomicU64,
+}
+
+#[cfg(test)]
+impl ManualCacheClock {
+    fn at_millis(now_millis: u64) -> Self {
+        Self {
+            now_millis: AtomicU64::new(now_millis),
+        }
+    }
+
+    fn set_millis(&self, now_millis: u64) {
+        self.now_millis.store(now_millis, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+impl CacheClock for ManualCacheClock {
+    fn now(&self) -> AccessStamp {
+        AccessStamp::from_millis(self.now_millis.load(Ordering::SeqCst))
+    }
 }
 
 impl BuildCacheInner {
     fn new(
         options: &CacheOptions,
-        file_system_info: &FileSystemInfo,
-        build_dependency_snapshot_strategy: SnapshotStrategy,
-        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+        clock: Arc<dyn CacheClock>,
+        diagnostics: Arc<CacheDiagnostics>,
     ) -> Self {
+        let cache = Cache::from_options(options, diagnostics);
+        let initial_store_pending = !cache.has_persistent_publication();
         Self {
-            cache: Cache::from_options(
-                options,
-                file_system_info,
-                build_dependency_snapshot_strategy,
-                resolve_build_dependency_snapshot_strategy,
-            ),
-            dirty: false,
+            cache,
+            dirty_generation: 0,
+            published_generation: 0,
+            initial_store_pending,
+            persistent_guard: None,
+            persistent_guard_error: None,
+            #[cfg(test)]
+            publish_barrier: None,
+            clock,
         }
     }
 }
@@ -297,8 +464,39 @@ impl fmt::Debug for CacheEntry {
 trait CacheLayer: fmt::Debug + Send + Sync {
     fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry>;
     fn store(&mut self, address: CacheAddress, entry: CacheEntry);
-    fn publish(&mut self, _guard: &PackFileGuardDto) -> io::Result<()> {
+    fn clear(&mut self) {}
+    fn prepare_persistent(
+        &mut self,
+        _guard: &PackFileGuardDto,
+        _build_inputs: &BTreeSet<PathBuf>,
+        _resolved_build_inputs: &BTreeSet<PathBuf>,
+        _file_system_info: &FileSystemInfo,
+        _build_dependency_snapshot_strategy: SnapshotStrategy,
+        _resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    ) -> bool {
+        false
+    }
+    fn touch(
+        &mut self,
+        _address: &CacheAddress,
+        _etag: Option<&CacheETag>,
+        _stamp: AccessStamp,
+    ) -> bool {
+        false
+    }
+    fn on_compilation_completed(&mut self) -> Vec<CacheItemFamily> {
+        Vec::new()
+    }
+    fn publish(
+        &mut self,
+        _guard: &PackFileGuardDto,
+        _stamp: AccessStamp,
+        _max_age: Duration,
+    ) -> io::Result<()> {
         Ok(())
+    }
+    fn has_publication(&self) -> bool {
+        false
     }
     #[allow(dead_code)]
     fn evict(&mut self, address: &CacheAddress) -> bool;
@@ -306,21 +504,94 @@ trait CacheLayer: fmt::Debug + Send + Sync {
     fn entry_count(&self, family: CacheItemFamily) -> usize;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryRetention {
+    Disabled,
+    Generations(u64),
+    Unbounded,
+}
+
+impl MemoryRetention {
+    fn from_options(options: &CacheOptions) -> Self {
+        match options.kind {
+            CacheKind::Disabled => Self::Disabled,
+            CacheKind::Memory | CacheKind::Filesystem => match options.max_memory_generations {
+                Some(0) => Self::Disabled,
+                Some(generations) => Self::Generations(generations),
+                None => Self::Unbounded,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MemoryCacheEntry {
+    entry: CacheEntry,
+    last_used_generation: u64,
+}
+
+#[derive(Debug)]
 struct MemoryCacheLayer {
-    entries: HashMap<CacheAddress, CacheEntry>,
+    entries: HashMap<CacheAddress, MemoryCacheEntry>,
+    retention: MemoryRetention,
+    completed_generation: u64,
+}
+
+impl MemoryCacheLayer {
+    fn new(retention: MemoryRetention) -> Self {
+        Self {
+            entries: HashMap::new(),
+            retention,
+            completed_generation: 0,
+        }
+    }
+
+    fn active_generation(&self) -> u64 {
+        self.completed_generation.saturating_add(1)
+    }
 }
 
 impl CacheLayer for MemoryCacheLayer {
     fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry> {
-        self.entries
-            .get(address)
-            .filter(|entry| entry.etag.as_ref() == etag)
-            .cloned()
+        let active_generation = self.active_generation();
+        let entry = self
+            .entries
+            .get_mut(address)
+            .filter(|entry| entry.entry.etag.as_ref() == etag)?;
+        entry.last_used_generation = active_generation;
+        Some(entry.entry.clone())
     }
 
     fn store(&mut self, address: CacheAddress, entry: CacheEntry) {
-        self.entries.insert(address, entry);
+        self.entries.insert(
+            address,
+            MemoryCacheEntry {
+                entry,
+                last_used_generation: self.active_generation(),
+            },
+        );
+    }
+
+    fn on_compilation_completed(&mut self) -> Vec<CacheItemFamily> {
+        self.completed_generation = self.completed_generation.saturating_add(1);
+        let MemoryRetention::Generations(limit) = self.retention else {
+            return Vec::new();
+        };
+        let completed_generation = self.completed_generation;
+        let mut evicted = Vec::new();
+        self.entries.retain(|_, entry| {
+            let should_retain =
+                completed_generation.saturating_sub(entry.last_used_generation) < limit;
+            if !should_retain {
+                evicted.push(entry.entry.family);
+            }
+            should_retain
+        });
+        evicted
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
     }
 
     fn evict(&mut self, address: &CacheAddress) -> bool {
@@ -331,7 +602,7 @@ impl CacheLayer for MemoryCacheLayer {
     fn entry_count(&self, family: CacheItemFamily) -> usize {
         self.entries
             .values()
-            .filter(|entry| entry.family == family)
+            .filter(|entry| entry.entry.family == family)
             .count()
     }
 }
@@ -341,60 +612,186 @@ struct PackFileCacheLayer {
     root: Option<PathBuf>,
     registry: CodecRegistry,
     pack_file: Option<PackFile>,
+    compression: PackFileCompression,
+    open_options: PackFileOpenOptions,
     publication_base: PublicationBase,
     active: bool,
     pending: HashMap<CacheAddress, CacheEntry>,
+    diagnostics: Arc<CacheDiagnostics>,
+    _writer_marker: Option<CacheWriterMarker>,
+}
+
+#[derive(Debug)]
+struct CacheWriterMarker {
+    path: PathBuf,
+    contents: String,
+}
+
+static NEXT_WRITER_TOKEN: AtomicU64 = AtomicU64::new(1);
+static PROCESS_START_ID: OnceLock<String> = OnceLock::new();
+
+impl CacheWriterMarker {
+    fn acquire(root: &Path, diagnostics: &CacheDiagnostics) -> Option<Self> {
+        if let Err(error) = fs::create_dir_all(root) {
+            diagnostics.warn(format!(
+                "single-writer diagnostic unavailable at {}: {error}; continuing best-effort",
+                root.display()
+            ));
+            return None;
+        }
+        let path = root.join(".unpack-writer");
+        let pid = std::process::id();
+        let start = current_process_start_id();
+        let token = NEXT_WRITER_TOKEN.fetch_add(1, Ordering::Relaxed);
+        let contents = format!("UNPACK-WRITER-1\npid={pid}\nstart={start}\ntoken={token}\n");
+        for _ in 0..2 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if file.write_all(contents.as_bytes()).is_ok() {
+                        return Some(Self { path, contents });
+                    }
+                    let _ = fs::remove_file(&path);
+                    return None;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let existing = fs::read_to_string(&path).unwrap_or_default();
+                    if writer_marker_is_live(&existing) {
+                        diagnostics.warn(format!(
+                            "detected another live writer for Persistent Cache location {}; continuing best-effort without a cross-process lock or merge protocol; contract=trusted-local,linux-supported,single-writer",
+                            root.display()
+                        ));
+                        return None;
+                    }
+                    let _ = fs::remove_file(&path);
+                }
+                Err(error) => {
+                    diagnostics.warn(format!(
+                        "single-writer diagnostic unavailable at {}: {error}; continuing best-effort",
+                        root.display()
+                    ));
+                    return None;
+                }
+            }
+        }
+        None
+    }
+}
+
+impl Drop for CacheWriterMarker {
+    fn drop(&mut self) {
+        if fs::read_to_string(&self.path).ok().as_deref() == Some(self.contents.as_str()) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn current_process_start_id() -> &'static str {
+    PROCESS_START_ID.get_or_init(|| {
+        linux_process_start_id(std::process::id()).unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_string()
+        })
+    })
+}
+
+fn linux_process_start_id(pid: u32) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    fields.get(19).map(|value| (*value).to_string())
+}
+
+fn writer_marker_is_live(contents: &str) -> bool {
+    let value = |prefix: &str| contents.lines().find_map(|line| line.strip_prefix(prefix));
+    let Some(pid) = value("pid=").and_then(|pid| pid.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(start) = value("start=") else {
+        return false;
+    };
+    if pid == std::process::id() {
+        return start == current_process_start_id();
+    }
+    linux_process_start_id(pid).is_some_and(|candidate| candidate == start)
+        || !cfg!(target_os = "linux")
 }
 
 impl PackFileCacheLayer {
-    fn open(
-        options: &CacheOptions,
-        file_system_info: &FileSystemInfo,
-        build_dependency_snapshot_strategy: SnapshotStrategy,
-        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-    ) -> Self {
+    fn open(options: &CacheOptions, diagnostics: Arc<CacheDiagnostics>) -> Self {
         let registry = persistent_codec_registry();
         let root = options.cache_location.clone();
+        let compression = options.compression.into();
+        let open_options = PackFileOpenOptions::new(options.allow_collecting_memory);
         let pack_file = root
             .as_ref()
-            .map(|root| PackFile::open(root, registry.clone()));
-        let active = pack_file.as_ref().is_some_and(|pack_file| {
+            .map(|root| PackFile::open_with_options(root, registry.clone(), open_options));
+        let has_standalone_guard = pack_file.as_ref().is_some_and(|pack_file| {
             pack_file.guard().is_some_and(|guard| {
-                persistent_guard_is_valid(
-                    guard,
-                    options,
-                    file_system_info,
-                    build_dependency_snapshot_strategy,
-                    resolve_build_dependency_snapshot_strategy,
-                )
+                guard.build_dependencies.entries.is_empty()
+                    && guard.resolve_build_dependencies.entries.is_empty()
             })
         });
-        let publication_base = if active {
+        let publication_base = if has_standalone_guard {
             PublicationBase::PreserveEntries {
                 expected_revision: pack_file
                     .as_ref()
-                    .expect("active PackFile should be open")
+                    .expect("standalone PackFile should be open")
                     .revision(),
             }
         } else {
             PublicationBase::ReplaceAll
         };
+        let writer_marker = if options.readonly {
+            None
+        } else {
+            root.as_deref()
+                .and_then(|root| CacheWriterMarker::acquire(root, &diagnostics))
+        };
         Self {
             root,
             registry,
             pack_file,
+            compression,
+            open_options,
             publication_base,
-            active,
+            // Compiler preparation validates non-empty Build Dependency guards before
+            // work starts.  Standalone cache users have no such guard, and may safely
+            // restore the legacy empty-guard PackFile directly.
+            active: true,
             pending: HashMap::new(),
+            diagnostics,
+            _writer_marker: writer_marker,
         }
     }
 
-    fn publish(&mut self, guard: PackFileGuardDto) -> io::Result<()> {
+    fn publish(
+        &mut self,
+        guard: PackFileGuardDto,
+        stamp: AccessStamp,
+        max_age: Duration,
+    ) -> io::Result<()> {
         let Some(root) = self.root.as_ref() else {
             self.pending.clear();
             return Ok(());
         };
+        let before_entries = self.pack_file.as_ref().map_or(0, PackFile::entry_count);
+        let queued_items = self.pending.len();
+        let serialization_started = Instant::now();
         let mut batch = PackFileWriteBatch::new();
+        if let Some(pack_file) = &self.pack_file {
+            pack_file.copy_access_updates_to(&mut batch);
+        }
         for (address, entry) in &self.pending {
             let pack_address = address.to_pack_file_address();
             let pack_etag = entry.etag.as_ref().map(CacheETag::to_pack_file_etag);
@@ -419,12 +816,51 @@ impl PackFileCacheLayer {
                     let dto = ModuleBuildRecordDto::try_from(record.as_ref())?;
                     batch.insert(&self.registry, pack_address, pack_etag, dto)?;
                 }
-                CacheItemFamily::CodeGeneration | CacheItemFamily::AssetRender => continue,
+                CacheItemFamily::CodeGeneration => {
+                    let record = entry.value::<CodeGenerationResult>().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Code Generation Cache Item contains an unexpected value",
+                        )
+                    })?;
+                    let dto = CodeGenerationRecordDto::from(record.as_ref());
+                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                }
+                CacheItemFamily::AssetRender => {
+                    let record = entry.value::<RenderedSource>().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Asset Render Cache Item contains an unexpected value",
+                        )
+                    })?;
+                    let dto = AssetRenderRecordDto::from(record.as_ref());
+                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                }
             }
         }
-        PackFile::publish_batch(root, Some(guard), self.publication_base, batch)?;
+        self.diagnostics.profile(format!(
+            "serialization items={queued_items} duration_us={}",
+            serialization_started.elapsed().as_micros()
+        ));
+        let store_started = Instant::now();
+        PackFile::publish_batch_with_options(
+            root,
+            Some(guard),
+            self.publication_base,
+            batch,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(stamp, max_age),
+                self.compression,
+            ),
+        )?;
         self.pending.clear();
-        let pack_file = PackFile::open(root, self.registry.clone());
+        let pack_file = PackFile::open_with_options(root, self.registry.clone(), self.open_options);
+        let after_entries = pack_file.entry_count();
+        self.diagnostics.profile(format!(
+            "store items={queued_items} duration_us={}; garbage collection removed_items={}; merge packs=0; split packs=0; compaction packs=0",
+            store_started.elapsed().as_micros(),
+            before_entries.saturating_sub(after_entries)
+        ));
         self.publication_base = PublicationBase::PreserveEntries {
             expected_revision: pack_file.revision(),
         };
@@ -446,10 +882,11 @@ impl CacheLayer for PackFileCacheLayer {
         if !self.active {
             return None;
         }
+        let started = Instant::now();
         let pack_file = self.pack_file.as_mut()?;
         let pack_address = address.to_pack_file_address();
         let pack_etag = etag.map(CacheETag::to_pack_file_etag);
-        match address.namespace {
+        let restored = match address.namespace {
             RESOLVE_CACHE_NAMESPACE => {
                 let dto = pack_file.get_resolve_record(&pack_address, pack_etag.as_ref())?;
                 let record = ResolveRecord::try_from((*dto).clone()).ok()?;
@@ -468,16 +905,125 @@ impl CacheLayer for PackFileCacheLayer {
                     record,
                 ))
             }
+            CODE_GENERATION_CACHE_NAMESPACE => {
+                let dto =
+                    pack_file.get::<CodeGenerationRecordDto>(&pack_address, pack_etag.as_ref())?;
+                let record = CodeGenerationResult::try_from((*dto).clone()).ok()?;
+                Some(CacheEntry::new(
+                    CacheItemFamily::CodeGeneration,
+                    etag.cloned(),
+                    record,
+                ))
+            }
+            ASSET_RENDER_CACHE_NAMESPACE => {
+                let dto =
+                    pack_file.get::<AssetRenderRecordDto>(&pack_address, pack_etag.as_ref())?;
+                let record = RenderedSource::try_from((*dto).clone()).ok()?;
+                Some(CacheEntry::new(
+                    CacheItemFamily::AssetRender,
+                    etag.cloned(),
+                    record,
+                ))
+            }
             _ => None,
+        };
+        if restored.is_some() {
+            self.diagnostics.profile(format!(
+                "restore items=1; deserialization items=1 duration_us={}",
+                started.elapsed().as_micros()
+            ));
         }
+        restored
     }
 
     fn store(&mut self, address: CacheAddress, entry: CacheEntry) {
+        self.diagnostics.profile("store queued_items=1");
         self.pending.insert(address, entry);
     }
 
-    fn publish(&mut self, guard: &PackFileGuardDto) -> io::Result<()> {
-        PackFileCacheLayer::publish(self, guard.clone())
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.active = false;
+        self.publication_base = PublicationBase::ReplaceAll;
+    }
+
+    fn prepare_persistent(
+        &mut self,
+        guard: &PackFileGuardDto,
+        build_inputs: &BTreeSet<PathBuf>,
+        resolved_build_inputs: &BTreeSet<PathBuf>,
+        file_system_info: &FileSystemInfo,
+        build_dependency_snapshot_strategy: SnapshotStrategy,
+        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    ) -> bool {
+        let active = self.pack_file.as_ref().is_some_and(|pack_file| {
+            pack_file.guard().is_some_and(|candidate| {
+                let build_dependencies =
+                    Snapshot::try_from(candidate.build_dependencies.clone()).ok();
+                let resolve_build_dependencies =
+                    Snapshot::try_from(candidate.resolve_build_dependencies.clone()).ok();
+                candidate.version == guard.version
+                    && build_dependencies.is_some_and(|snapshot| {
+                        snapshot.has_exact_paths(build_inputs.iter().cloned())
+                            && file_system_info.is_snapshot_valid_sync(
+                                &snapshot,
+                                build_dependency_snapshot_strategy,
+                            )
+                    })
+                    && resolve_build_dependencies.is_some_and(|snapshot| {
+                        file_system_info.is_snapshot_valid_sync(
+                            &snapshot,
+                            resolve_build_dependency_snapshot_strategy,
+                        ) || snapshot.has_valid_paths_sync(
+                            resolved_build_inputs.iter().cloned(),
+                            resolve_build_dependency_snapshot_strategy,
+                            file_system_info,
+                        )
+                    })
+            })
+        });
+        self.active = active;
+        self.publication_base = if active {
+            PublicationBase::PreserveEntries {
+                expected_revision: self
+                    .pack_file
+                    .as_ref()
+                    .expect("active PackFile should be open")
+                    .revision(),
+            }
+        } else {
+            PublicationBase::ReplaceAll
+        };
+        self.pack_file.as_ref().and_then(PackFile::guard) != Some(guard)
+    }
+
+    fn touch(
+        &mut self,
+        address: &CacheAddress,
+        etag: Option<&CacheETag>,
+        stamp: AccessStamp,
+    ) -> bool {
+        if !self.active {
+            return false;
+        }
+        let pack_address = address.to_pack_file_address();
+        let pack_etag = etag.map(CacheETag::to_pack_file_etag);
+        self.pack_file
+            .as_mut()
+            .is_some_and(|pack_file| pack_file.touch(&pack_address, pack_etag.as_ref(), stamp))
+    }
+
+    fn publish(
+        &mut self,
+        guard: &PackFileGuardDto,
+        stamp: AccessStamp,
+        max_age: Duration,
+    ) -> io::Result<()> {
+        PackFileCacheLayer::publish(self, guard.clone(), stamp, max_age)
+    }
+
+    fn has_publication(&self) -> bool {
+        self.active
     }
 
     fn evict(&mut self, address: &CacheAddress) -> bool {
@@ -513,30 +1059,21 @@ struct Cache {
 }
 
 impl Cache {
-    fn from_options(
-        options: &CacheOptions,
-        file_system_info: &FileSystemInfo,
-        build_dependency_snapshot_strategy: SnapshotStrategy,
-        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-    ) -> Self {
+    fn from_options(options: &CacheOptions, diagnostics: Arc<CacheDiagnostics>) -> Self {
         let mut layers = Vec::new();
-        if options.kind != CacheKind::Disabled {
+        let memory_retention = MemoryRetention::from_options(options);
+        if memory_retention != MemoryRetention::Disabled {
             layers.push(CacheLayerSlot {
                 kind: CacheLayerKind::Memory,
                 writable: true,
-                layer: Box::<MemoryCacheLayer>::default(),
+                layer: Box::new(MemoryCacheLayer::new(memory_retention)),
             });
         }
         if options.kind == CacheKind::Filesystem {
             layers.push(CacheLayerSlot {
                 kind: CacheLayerKind::Persistent,
                 writable: !options.readonly,
-                layer: Box::new(PackFileCacheLayer::open(
-                    options,
-                    file_system_info,
-                    build_dependency_snapshot_strategy,
-                    resolve_build_dependency_snapshot_strategy,
-                )),
+                layer: Box::new(PackFileCacheLayer::open(options, diagnostics)),
             });
         }
         Self {
@@ -550,7 +1087,8 @@ impl Cache {
         family: CacheItemFamily,
         address: &CacheAddress,
         etag: Option<&CacheETag>,
-    ) -> Option<Arc<V>>
+        stamp: AccessStamp,
+    ) -> (Option<Arc<V>>, bool)
     where
         V: Send + Sync + 'static,
     {
@@ -572,11 +1110,20 @@ impl Cache {
                 self.work.for_family_mut(family).restores += 1;
             }
             self.work.for_family_mut(family).hits += 1;
-            return Some(value);
+            let mut persistent_access_changed = false;
+            for slot in self
+                .layers
+                .iter_mut()
+                .filter(|slot| slot.kind == CacheLayerKind::Persistent)
+            {
+                let touched = slot.layer.touch(address, etag, stamp);
+                persistent_access_changed |= touched && slot.writable;
+            }
+            return (Some(value), persistent_access_changed);
         }
 
         self.work.for_family_mut(family).misses += 1;
-        None
+        (None, false)
     }
 
     fn store<V>(
@@ -627,7 +1174,50 @@ impl Cache {
         self.work
     }
 
-    fn publish_persistent(&mut self, guard: PackFileGuardDto) -> io::Result<()> {
+    fn clear(&mut self) {
+        for slot in &mut self.layers {
+            slot.layer.clear();
+        }
+    }
+
+    fn prepare_persistent(
+        &mut self,
+        guard: &PackFileGuardDto,
+        build_inputs: &BTreeSet<PathBuf>,
+        resolved_build_inputs: &BTreeSet<PathBuf>,
+        file_system_info: &FileSystemInfo,
+        build_dependency_snapshot_strategy: SnapshotStrategy,
+        resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
+    ) -> bool {
+        self.layers
+            .iter_mut()
+            .find(|slot| slot.kind == CacheLayerKind::Persistent)
+            .is_some_and(|slot| {
+                slot.layer.prepare_persistent(
+                    guard,
+                    build_inputs,
+                    resolved_build_inputs,
+                    file_system_info,
+                    build_dependency_snapshot_strategy,
+                    resolve_build_dependency_snapshot_strategy,
+                )
+            })
+    }
+
+    fn on_compilation_completed(&mut self) {
+        for slot in &mut self.layers {
+            for family in slot.layer.on_compilation_completed() {
+                self.work.for_family_mut(family).evictions += 1;
+            }
+        }
+    }
+
+    fn publish_persistent(
+        &mut self,
+        guard: PackFileGuardDto,
+        stamp: AccessStamp,
+        max_age: Duration,
+    ) -> io::Result<()> {
         let Some(slot) = self
             .layers
             .iter_mut()
@@ -635,7 +1225,14 @@ impl Cache {
         else {
             return Ok(());
         };
-        slot.layer.publish(&guard)
+        slot.layer.publish(&guard, stamp, max_age)
+    }
+
+    fn has_persistent_publication(&self) -> bool {
+        self.layers
+            .iter()
+            .find(|slot| slot.kind == CacheLayerKind::Persistent)
+            .is_some_and(|slot| slot.layer.has_publication())
     }
 }
 
@@ -703,81 +1300,6 @@ pub(crate) struct ResolveRecord {
 }
 
 impl ResolveRecord {
-    #[cfg(test)]
-    pub(crate) fn to_pack_file_dto(&self) -> crate::pack_file::ResolveRecordDto {
-        use crate::pack_file::{ModuleIdentityDto, ModuleTypeDto, PathBytes, ResolveRecordDto};
-
-        ResolveRecordDto {
-            identity: ModuleIdentityDto {
-                module_type: match self.identity.module_type {
-                    crate::ModuleType::JavaScriptAuto => ModuleTypeDto::JavaScriptAuto,
-                },
-                resource: PathBytes::from_path(&self.identity.resource),
-                query: self.identity.query.clone(),
-                fragment: self.identity.fragment.clone(),
-                layer: self.identity.layer.clone(),
-                loaders: self.identity.loaders.clone(),
-            },
-            resource: PathBytes::from_path(&self.resource),
-            file_dependencies: self
-                .file_dependencies
-                .iter()
-                .map(|path| PathBytes::from_path(path))
-                .collect(),
-            context_dependencies: self
-                .context_dependencies
-                .iter()
-                .map(|path| PathBytes::from_path(path))
-                .collect(),
-            missing_dependencies: self
-                .missing_dependencies
-                .iter()
-                .map(|path| PathBytes::from_path(path))
-                .collect(),
-            snapshot: self.snapshot.to_pack_file_dto(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_pack_file_dto(dto: crate::pack_file::ResolveRecordDto) -> Option<Self> {
-        use crate::pack_file::{ModuleTypeDto, ResolveRecordDto};
-
-        let ResolveRecordDto {
-            identity,
-            resource,
-            file_dependencies,
-            context_dependencies,
-            missing_dependencies,
-            snapshot,
-        } = dto;
-        Some(Self {
-            identity: ModuleIdentity {
-                module_type: match identity.module_type {
-                    ModuleTypeDto::JavaScriptAuto => crate::ModuleType::JavaScriptAuto,
-                },
-                resource: identity.resource.to_path_buf()?,
-                query: identity.query,
-                fragment: identity.fragment,
-                layer: identity.layer,
-                loaders: identity.loaders,
-            },
-            resource: resource.to_path_buf()?,
-            file_dependencies: file_dependencies
-                .into_iter()
-                .map(|path| path.to_path_buf())
-                .collect::<Option<_>>()?,
-            context_dependencies: context_dependencies
-                .into_iter()
-                .map(|path| path.to_path_buf())
-                .collect::<Option<_>>()?,
-            missing_dependencies: missing_dependencies
-                .into_iter()
-                .map(|path| path.to_path_buf())
-                .collect::<Option<_>>()?,
-            snapshot: Snapshot::from_pack_file_dto(snapshot)?,
-        })
-    }
-
     #[cfg(test)]
     pub(crate) async fn new(
         identity: ModuleIdentity,
@@ -949,21 +1471,41 @@ impl ModuleBuildRecord {
 
 impl BuildCache {
     pub(crate) fn new(options: CacheOptions, snapshot_options: SnapshotOptions) -> Self {
+        Self::new_with_clock_inner(options, snapshot_options, Arc::new(SystemCacheClock))
+    }
+
+    #[cfg(test)]
+    fn new_with_clock<C>(
+        options: CacheOptions,
+        snapshot_options: SnapshotOptions,
+        clock: Arc<C>,
+    ) -> Self
+    where
+        C: CacheClock + 'static,
+    {
+        Self::new_with_clock_inner(options, snapshot_options, clock)
+    }
+
+    fn new_with_clock_inner(
+        options: CacheOptions,
+        snapshot_options: SnapshotOptions,
+        clock: Arc<dyn CacheClock>,
+    ) -> Self {
         let build_dependency_snapshot_strategy = snapshot_options.build_dependencies;
         let resolve_build_dependency_snapshot_strategy =
             snapshot_options.resolve_build_dependencies;
-        let file_system_info = FileSystemInfo::from_snapshot_options(&snapshot_options);
-        let inner = BuildCacheInner::new(
-            &options,
-            &file_system_info,
-            build_dependency_snapshot_strategy,
-            resolve_build_dependency_snapshot_strategy,
+        let build_dependency_file_system_info = FileSystemInfo::for_build_dependencies();
+        let diagnostics = Arc::new(CacheDiagnostics::new(options.profile));
+        diagnostics.profile(
+            "restore items=0; deserialization items=0; contract=trusted-local,linux-supported,single-writer coordination=none",
         );
+        let inner = BuildCacheInner::new(&options, clock, diagnostics.clone());
         Self {
             options,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
-            file_system_info,
+            build_dependency_file_system_info,
+            diagnostics,
             inner: Arc::new(Mutex::new(inner)),
         }
     }
@@ -972,8 +1514,23 @@ impl BuildCache {
         self.facade(RESOLVE_CACHE_NAMESPACE, CacheItemFamily::Resolve)
     }
 
+    pub(crate) fn take_infrastructure_log_events(&self) -> Vec<InfrastructureLogEvent> {
+        self.diagnostics.drain()
+    }
+
     pub(crate) fn module_builds(&self) -> ModuleBuildCache {
         self.facade(MODULE_BUILD_CACHE_NAMESPACE, CacheItemFamily::ModuleBuild)
+    }
+
+    pub(crate) fn code_generations<K>(&self) -> CacheFacade<K, CodeGenerationResult> {
+        self.facade(
+            CODE_GENERATION_CACHE_NAMESPACE,
+            CacheItemFamily::CodeGeneration,
+        )
+    }
+
+    pub(crate) fn asset_renders<K>(&self) -> CacheFacade<K, RenderedSource> {
+        self.facade(ASSET_RENDER_CACHE_NAMESPACE, CacheItemFamily::AssetRender)
     }
 
     fn facade<K, V>(
@@ -989,27 +1546,170 @@ impl BuildCache {
         }
     }
 
-    pub(crate) fn flush_to_filesystem(&self) -> io::Result<()> {
-        if self.options.kind != CacheKind::Filesystem || self.options.readonly {
+    pub(crate) async fn prepare_for_compilation(
+        &self,
+        context: &Path,
+        resolver: &UnpackResolver,
+    ) -> crate::Result<()> {
+        if self.options.kind != CacheKind::Filesystem {
             return Ok(());
         }
-
-        if !self
-            .inner
-            .lock()
-            .expect("build cache mutex should not be poisoned")
-            .dirty
-        {
-            return Ok(());
+        let requests = self
+            .options
+            .build_dependencies
+            .iter()
+            .flat_map(|dependency| dependency.requests.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut build_inputs = self
+            .options
+            .automatic_build_dependencies
+            .iter()
+            .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .collect::<BTreeSet<_>>();
+        let mut resolved_build_inputs = BTreeSet::new();
+        let mut resolution_files = BTreeSet::new();
+        let mut resolution_contexts = BTreeSet::new();
+        let mut resolution_missing = BTreeSet::new();
+        for request in requests {
+            let resolved = resolver
+                .resolve_with_dependencies(context, &request)
+                .await?;
+            let resource = resolved.resource.path;
+            build_inputs.insert(resource.clone());
+            resolved_build_inputs.insert(resource.clone());
+            resolution_files.insert(resource);
+            resolution_files.extend(resolved.file_dependencies);
+            resolution_contexts.extend(resolved.context_dependencies);
+            resolution_missing.extend(resolved.missing_dependencies);
         }
-        let guard = self.current_persistent_guard()?;
+        let build_dependencies = self
+            .build_dependency_file_system_info
+            .create_snapshot_sync(
+                build_inputs.iter().cloned(),
+                self.build_dependency_snapshot_strategy,
+            )?;
+        let resolve_build_dependencies = self
+            .build_dependency_file_system_info
+            .create_resolve_snapshot_with_cache(
+                resolution_files,
+                resolution_contexts,
+                resolution_missing,
+                self.resolve_build_dependency_snapshot_strategy,
+                &SnapshotCache::default(),
+            )
+            .await?;
+        let guard = PackFileGuardDto {
+            version: self.cache_version().into_bytes(),
+            build_dependencies: SnapshotDto::try_from(&build_dependencies)
+                .expect("fresh Build Dependency Snapshot should encode"),
+            resolve_build_dependencies: SnapshotDto::try_from(&resolve_build_dependencies)
+                .expect("fresh Resolve Build Dependency Snapshot should encode"),
+        };
         let mut inner = self
             .inner
             .lock()
             .expect("build cache mutex should not be poisoned");
-        inner.cache.publish_persistent(guard)?;
-        inner.dirty = false;
+        let previous_build_inputs_are_valid = inner
+            .persistent_guard
+            .as_ref()
+            .and_then(|previous| Snapshot::try_from(previous.build_dependencies.clone()).ok())
+            .is_some_and(|snapshot| {
+                snapshot.has_exact_paths(build_inputs.iter().cloned())
+                    && self
+                        .build_dependency_file_system_info
+                        .is_snapshot_valid_sync(&snapshot, self.build_dependency_snapshot_strategy)
+            });
+        if inner.persistent_guard.is_some() && !previous_build_inputs_are_valid {
+            inner.cache.clear();
+        }
+        let guard_changed = inner.cache.prepare_persistent(
+            &guard,
+            &build_inputs,
+            &resolved_build_inputs,
+            &self.build_dependency_file_system_info,
+            self.build_dependency_snapshot_strategy,
+            self.resolve_build_dependency_snapshot_strategy,
+        );
+        inner.persistent_guard = Some(guard);
+        if guard_changed {
+            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+        }
         Ok(())
+    }
+
+    pub(crate) fn store_build_dependencies(&self) {
+        if self.options.kind != CacheKind::Filesystem || self.options.readonly {
+            return;
+        }
+        // `prepare_for_compilation` records the resolved Build Dependency guard before work begins.
+    }
+
+    pub(crate) fn pending_generation(&self) -> Option<u64> {
+        let inner = self
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        (inner.dirty_generation > inner.published_generation).then_some(inner.dirty_generation)
+    }
+
+    pub(crate) fn initial_store_pending(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .initial_store_pending
+    }
+
+    pub(crate) fn publish_generation(&self, target_generation: u64) -> io::Result<()> {
+        if self.options.kind != CacheKind::Filesystem || self.options.readonly {
+            return Ok(());
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("build cache mutex should not be poisoned");
+        if target_generation <= inner.published_generation {
+            return Ok(());
+        }
+        #[cfg(test)]
+        if let Some(barrier) = inner.publish_barrier.take() {
+            barrier.entered.wait();
+            barrier.release.wait();
+        }
+        if let Some(error) = &inner.persistent_guard_error {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, error.clone()));
+        }
+        let guard = inner.persistent_guard.clone().unwrap_or_else(|| PackFileGuardDto {
+            version: self.cache_version().into_bytes(),
+            build_dependencies: SnapshotDto { entries: Vec::new() },
+            resolve_build_dependencies: SnapshotDto { entries: Vec::new() },
+        });
+        let stamp = inner.clock.now();
+        inner
+            .cache
+            .publish_persistent(guard, stamp, self.options.max_age)?;
+        inner.published_generation = inner.published_generation.max(target_generation);
+        inner.initial_store_pending = false;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_publish_barrier(
+        &self,
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .publish_barrier = Some(PublishBarrier { entered, release });
+    }
+
+    pub(crate) fn flush_to_filesystem(&self) -> io::Result<()> {
+        self.store_build_dependencies();
+        let Some(target_generation) = self.pending_generation() else {
+            return Ok(());
+        };
+        self.publish_generation(target_generation)
     }
 
     #[cfg(test)]
@@ -1043,6 +1743,8 @@ impl BuildCache {
         let work = self.work_counters();
         let resolve = work.for_family(CacheItemFamily::Resolve);
         let module = work.for_family(CacheItemFamily::ModuleBuild);
+        let code_generation = work.for_family(CacheItemFamily::CodeGeneration);
+        let asset_render = work.for_family(CacheItemFamily::AssetRender);
         tracing::info!(
             target: "unpack_core::cache_work",
             resolve_hits = resolve.hits,
@@ -1055,20 +1757,26 @@ impl BuildCache {
             module_stores = module.stores,
             module_restores = module.restores,
             module_evictions = module.evictions,
+            code_generation_hits = code_generation.hits,
+            code_generation_misses = code_generation.misses,
+            code_generation_stores = code_generation.stores,
+            code_generation_restores = code_generation.restores,
+            code_generation_evictions = code_generation.evictions,
+            asset_render_hits = asset_render.hits,
+            asset_render_misses = asset_render.misses,
+            asset_render_stores = asset_render.stores,
+            asset_render_restores = asset_render.restores,
+            asset_render_evictions = asset_render.evictions,
             "cache_work"
         );
     }
 
-    fn current_persistent_guard(&self) -> io::Result<PackFileGuardDto> {
-        Ok(PackFileGuardDto {
-            version: self.cache_version().into_bytes(),
-            build_dependencies: SnapshotDto::try_from(
-                &self.build_dependency_snapshot(self.build_dependency_snapshot_strategy)?,
-            )?,
-            resolve_build_dependencies: SnapshotDto::try_from(
-                &self.build_dependency_snapshot(self.resolve_build_dependency_snapshot_strategy)?,
-            )?,
-        })
+    pub(crate) fn on_compilation_completed(&self) {
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .cache
+            .on_compilation_completed();
     }
 }
 
@@ -1100,7 +1808,13 @@ where
             namespace: self.namespace,
             identifier: key.cache_identifier(),
         };
-        inner.cache.get(self.family, &address, etag)
+        let stamp = inner.clock.now();
+        let (value, persistent_access_changed) =
+            inner.cache.get(self.family, &address, etag, stamp);
+        if persistent_access_changed {
+            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+        }
+        value
     }
 
     pub(crate) fn store(&self, key: K, etag: Option<CacheETag>, value: V) {
@@ -1118,7 +1832,7 @@ where
             identifier: key.cache_identifier(),
         };
         if inner.cache.store(self.family, address, etag, value) {
-            inner.dirty = true;
+            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
         }
     }
 
@@ -1141,60 +1855,14 @@ impl BuildCache {
     fn cache_version(&self) -> String {
         self.options.version.clone().unwrap_or_default()
     }
-
-    fn build_dependency_snapshot(&self, strategy: SnapshotStrategy) -> io::Result<Snapshot> {
-        let snapshots = self
-            .options
-            .build_dependencies
-            .iter()
-            .map(|dependency| {
-                self.file_system_info
-                    .create_snapshot_sync(dependency.files.clone(), strategy)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-
-        Ok(self.file_system_info.merge_snapshots(snapshots.iter()))
-    }
 }
 
 fn persistent_codec_registry() -> CodecRegistry {
     CodecRegistry::new()
         .with_resolve_record(ResolveRecordCodec::current())
         .with_module_build_record(ModuleBuildRecordCodec::current())
-}
-
-fn persistent_guard_is_valid(
-    guard: &PackFileGuardDto,
-    options: &CacheOptions,
-    file_system_info: &FileSystemInfo,
-    build_dependency_snapshot_strategy: SnapshotStrategy,
-    resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
-) -> bool {
-    if guard.version != options.version.clone().unwrap_or_default().as_bytes() {
-        return false;
-    }
-    let Ok(build_dependencies) = Snapshot::try_from(guard.build_dependencies.clone()) else {
-        return false;
-    };
-    let Ok(resolve_build_dependencies) =
-        Snapshot::try_from(guard.resolve_build_dependencies.clone())
-    else {
-        return false;
-    };
-    let paths = options
-        .build_dependencies
-        .iter()
-        .flat_map(|dependency| dependency.files.iter().cloned())
-        .collect::<Vec<_>>();
-    build_dependencies.has_exact_paths(paths.clone())
-        && file_system_info
-            .is_snapshot_valid_sync(&build_dependencies, build_dependency_snapshot_strategy)
-        && resolve_build_dependencies.has_exact_paths(paths)
-        && file_system_info.is_snapshot_valid_sync(
-            &resolve_build_dependencies,
-            resolve_build_dependency_snapshot_strategy,
-        )
+        .with_code_generation_record(CodeGenerationRecordCodec::current())
+        .with_asset_render_record(AssetRenderRecordCodec::current())
 }
 
 #[cfg(test)]
@@ -1225,6 +1893,52 @@ mod tests {
         fn cache_identifier(&self) -> CacheIdentifier {
             CacheIdentifier::new(self.0)
         }
+    }
+
+    #[test]
+    fn filesystem_cache_uses_pinned_idle_timeout_defaults() {
+        let options = CacheOptions::filesystem();
+        assert_eq!(options.idle_timeout, Some(60_000));
+        assert_eq!(options.idle_timeout_for_initial_store, Some(5_000));
+        assert_eq!(options.idle_timeout_after_large_changes, Some(1_000));
+    }
+
+    #[test]
+    fn filesystem_max_age_defaults_to_sixty_days_and_exceeds_u32_milliseconds() {
+        let options = CacheOptions::filesystem();
+        assert_eq!(options.max_age, Duration::from_secs(60 * 24 * 60 * 60));
+        assert!(options.max_age.as_millis() > u128::from(u32::MAX));
+
+        let mut overridden = options;
+        overridden.max_age = Duration::from_millis(u64::from(u32::MAX) + 1);
+        assert_eq!(
+            overridden.max_age,
+            Duration::from_millis(u64::from(u32::MAX) + 1)
+        );
+    }
+
+    #[test]
+    fn shared_persistent_location_warns_without_locking_the_second_writer() {
+        let temp = tempdir().expect("create shared cache location");
+        let mut options = CacheOptions::filesystem();
+        options.cache_location = Some(temp.path().join("cache"));
+        let first = BuildCache::new(options.clone(), SnapshotOptions::default());
+        let second = BuildCache::new(options, SnapshotOptions::default());
+
+        let warnings = second.take_infrastructure_log_events();
+        assert!(warnings.iter().any(|event| {
+            event.level == InfrastructureLogLevel::Warn
+                && event.name == CACHE_WRITER_LOGGER
+                && event.message.contains("another live writer")
+                && event
+                    .message
+                    .contains("without a cross-process lock or merge protocol")
+                && event
+                    .message
+                    .contains("trusted-local,linux-supported,single-writer")
+        }));
+        assert!(first.normal_module_factory().is_enabled());
+        assert!(second.normal_module_factory().is_enabled());
     }
 
     #[test]
@@ -1367,6 +2081,196 @@ mod tests {
         );
     }
 
+    #[test]
+    fn finite_memory_generations_evict_only_entries_left_unused_for_the_limit() {
+        let mut options = CacheOptions::memory();
+        options.max_memory_generations = Some(1);
+        let build_cache = BuildCache::new(options, SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let unused = TestCacheKey("unused");
+        let kept = TestCacheKey("kept");
+
+        code_generation.store(unused.clone(), None, "unused source".to_string());
+        code_generation.store(kept.clone(), None, "kept source".to_string());
+        build_cache.on_compilation_completed();
+
+        assert_eq!(
+            code_generation
+                .get(&kept, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("kept source")
+        );
+        build_cache.on_compilation_completed();
+
+        assert!(code_generation.get(&unused, None).is_none());
+        assert_eq!(
+            code_generation
+                .get(&kept, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("kept source")
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration)
+                .evictions,
+            1
+        );
+    }
+
+    #[test]
+    fn finite_memory_generations_keep_entries_until_the_completed_generation_boundary() {
+        let mut options = CacheOptions::memory();
+        options.max_memory_generations = Some(2);
+        let build_cache = BuildCache::new(options, SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("generation-boundary");
+
+        code_generation.store(identifier.clone(), None, "source".to_string());
+        build_cache.on_compilation_completed();
+        build_cache.on_compilation_completed();
+
+        assert_eq!(
+            code_generation
+                .get(&identifier, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("source")
+        );
+        build_cache.on_compilation_completed();
+        build_cache.on_compilation_completed();
+        build_cache.on_compilation_completed();
+
+        assert!(code_generation.get(&identifier, None).is_none());
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration)
+                .evictions,
+            1
+        );
+    }
+
+    #[test]
+    fn etag_mismatch_does_not_refresh_an_entrys_generation() {
+        let mut options = CacheOptions::memory();
+        options.max_memory_generations = Some(2);
+        let build_cache = BuildCache::new(options, SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("etag-mismatch");
+
+        code_generation.store(
+            identifier.clone(),
+            Some(CacheETag::new("expected")),
+            "source".to_string(),
+        );
+        build_cache.on_compilation_completed();
+        assert!(
+            code_generation
+                .get(&identifier, Some(&CacheETag::new("different")))
+                .is_none()
+        );
+        build_cache.on_compilation_completed();
+        build_cache.on_compilation_completed();
+
+        assert!(
+            code_generation
+                .get(&identifier, Some(&CacheETag::new("expected")))
+                .is_none()
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration)
+                .evictions,
+            1
+        );
+    }
+
+    #[test]
+    fn unbounded_memory_generations_never_age_entries() {
+        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("unbounded");
+
+        code_generation.store(identifier.clone(), None, "source".to_string());
+        for _ in 0..100 {
+            build_cache.on_compilation_completed();
+        }
+
+        assert_eq!(
+            code_generation
+                .get(&identifier, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("source")
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration)
+                .evictions,
+            0
+        );
+    }
+
+    #[test]
+    fn zero_filesystem_memory_generations_keep_no_memory_layer() {
+        let mut options = CacheOptions::filesystem();
+        options.max_memory_generations = Some(0);
+        let build_cache = BuildCache::new(options, SnapshotOptions::default());
+        let code_generation = build_cache.facade::<TestCacheKey, String>(
+            CacheNamespace::new("unpack/code-generation"),
+            CacheItemFamily::CodeGeneration,
+        );
+        let identifier = TestCacheKey("persistent-only");
+
+        code_generation.store(identifier.clone(), None, "source".to_string());
+
+        assert_eq!(
+            build_cache
+                .inner
+                .lock()
+                .expect("build cache mutex should not be poisoned")
+                .cache
+                .entry_count(CacheItemFamily::CodeGeneration),
+            0
+        );
+        assert_eq!(
+            code_generation
+                .get(&identifier, None)
+                .as_deref()
+                .map(String::as_str),
+            Some("source")
+        );
+        assert_eq!(
+            build_cache
+                .work_counters()
+                .for_family(CacheItemFamily::CodeGeneration),
+            CacheItemWork {
+                hits: 1,
+                misses: 0,
+                stores: 1,
+                restores: 0,
+                evictions: 0,
+            }
+        );
+    }
+
     #[tokio::test]
     async fn resolve_record_context_snapshot_invalidates_directory_entry_changes()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -1397,6 +2301,79 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_hits_refresh_persistent_access_before_max_age_gc()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let resource = temp.path().join("src/dep.js");
+        write(&resource, "export const value = 1;")?;
+        let file_system_info = FileSystemInfo::new();
+        let record = ResolveRecord::new(
+            ModuleIdentity::new(resource.clone()),
+            resource.clone(),
+            BTreeSet::from([resource]),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            &file_system_info,
+            SnapshotStrategy::timestamp(),
+        )
+        .await?;
+        let first_key = ResolveRequest::new(temp.path(), "./first");
+        let recent_key = ResolveRequest::new(temp.path(), "./recent");
+        let clock = Arc::new(ManualCacheClock::at_millis(1_000));
+        let mut options = CacheOptions::filesystem();
+        options.cache_location = Some(temp.path().join("cache"));
+        options.max_age = Duration::from_millis(100);
+
+        let first =
+            BuildCache::new_with_clock(options.clone(), SnapshotOptions::default(), clock.clone());
+        first
+            .normal_module_factory()
+            .store(first_key.clone(), None, record.clone());
+        first.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 1);
+
+        clock.set_millis(1_050);
+        let second =
+            BuildCache::new_with_clock(options.clone(), SnapshotOptions::default(), clock.clone());
+        let facade = second.normal_module_factory();
+        assert!(facade.get(&first_key, None).is_some());
+        second.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 2);
+
+        clock.set_millis(1_120);
+        assert!(facade.get(&first_key, None).is_some());
+        second.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 3);
+
+        clock.set_millis(1_221);
+        facade.store(recent_key.clone(), None, record.clone());
+        second.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 4);
+
+        clock.set_millis(1_222);
+        facade.store(recent_key.clone(), None, record);
+        second.flush_to_filesystem()?;
+        assert_eq!(pack_revision(&options), 5);
+
+        let third = BuildCache::new_with_clock(options, SnapshotOptions::default(), clock);
+        let facade = third.normal_module_factory();
+        assert!(facade.get(&first_key, None).is_none());
+        assert!(facade.get(&recent_key, None).is_some());
+        Ok(())
+    }
+
+    fn pack_revision(options: &CacheOptions) -> u64 {
+        PackFile::open(
+            options
+                .cache_location
+                .as_ref()
+                .expect("filesystem cache should have a location"),
+            persistent_codec_registry(),
+        )
+        .revision()
     }
 
     fn write(path: impl AsRef<Path>, source: &str) -> io::Result<()> {

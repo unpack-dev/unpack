@@ -6,7 +6,7 @@ use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleId, Result, UnpackResolver,
     build_cache::BuildCache,
-    code_generation::{self, AssetRenderPlan, CodeGenerationResults, RenderedAssetSource},
+    code_generation::{self, CodeGenerationResults, RenderManifest},
     make::{self, MakeState},
     snapshot::FileSystemInfo,
 };
@@ -20,8 +20,7 @@ pub struct Compilation {
     module_graph: ModuleGraph,
     chunk_graph: ChunkGraph,
     code_generation_results: Option<CodeGenerationResults>,
-    asset_render_plan: Option<AssetRenderPlan>,
-    rendered_asset_sources: Option<Vec<RenderedAssetSource>>,
+    asset_render_manifest: Option<RenderManifest>,
     assets: Vec<Asset>,
     entries: Vec<ModuleId>,
     errors: Vec<Error>,
@@ -44,8 +43,7 @@ impl Compilation {
             module_graph: ModuleGraph::default(),
             chunk_graph: ChunkGraph::default(),
             code_generation_results: None,
-            asset_render_plan: None,
-            rendered_asset_sources: None,
+            asset_render_manifest: None,
             assets: Vec::new(),
             entries: Vec::new(),
             errors: Vec::new(),
@@ -87,6 +85,13 @@ impl Compilation {
         &self.infrastructure_log_events
     }
 
+    pub(crate) fn extend_infrastructure_log_events(
+        &mut self,
+        events: impl IntoIterator<Item = InfrastructureLogEvent>,
+    ) {
+        self.infrastructure_log_events.extend(events);
+    }
+
     pub async fn make(&mut self) -> Result<()> {
         async {
             self.log_infrastructure(
@@ -119,7 +124,6 @@ impl Compilation {
                     .into_iter()
                     .collect(),
             };
-            self.invalidate_generated_work();
 
             if result.is_ok() {
                 self.log_infrastructure(
@@ -144,7 +148,6 @@ impl Compilation {
             "chunk graph build started",
         );
         self.chunk_graph = ChunkGraph::build(&self.options, &self.module_graph, &self.entries);
-        self.invalidate_generated_work();
         self.log_infrastructure(
             InfrastructureLogLevel::Verbose,
             "unpack.Compilation",
@@ -161,8 +164,7 @@ impl Compilation {
             "asset creation started",
         );
         self.create_asset_render_manifest();
-        self.render_asset_sources();
-        self.emit_assets();
+        self.render_assets();
         self.log_infrastructure(
             InfrastructureLogLevel::Verbose,
             "unpack.Compilation",
@@ -174,7 +176,7 @@ impl Compilation {
         if self.code_generation_results.is_none() {
             self.code_generation();
         }
-        self.asset_render_plan = Some(code_generation::create_render_manifest(
+        self.asset_render_manifest = Some(code_generation::create_render_manifest(
             &self.chunk_graph,
             &self.entries,
             self.code_generation_results
@@ -183,32 +185,19 @@ impl Compilation {
         ));
     }
 
-    pub fn render_asset_sources(&mut self) {
-        if self.asset_render_plan.is_none() {
+    pub fn render_assets(&mut self) {
+        if self.asset_render_manifest.is_none() {
             self.create_asset_render_manifest();
         }
-        self.rendered_asset_sources = Some(code_generation::render_asset_sources(
-            self.asset_render_plan
+        self.assets = code_generation::render_assets(
+            &self.options,
+            &self.build_cache,
+            self.asset_render_manifest
                 .as_ref()
-                .expect("render plan should exist before Asset rendering"),
+                .expect("render manifest should exist before Asset rendering"),
             self.code_generation_results
                 .as_ref()
                 .expect("code generation results should exist before Asset rendering"),
-        ));
-    }
-
-    pub fn emit_assets(&mut self) {
-        if self.rendered_asset_sources.is_none() {
-            self.render_asset_sources();
-        }
-        self.assets = code_generation::create_assets(
-            &self.options,
-            self.asset_render_plan
-                .as_ref()
-                .expect("render plan should exist before Asset emission"),
-            self.rendered_asset_sources
-                .as_ref()
-                .expect("rendered sources should exist before Asset emission"),
         );
     }
 
@@ -217,18 +206,11 @@ impl Compilation {
         let _enter = span.enter();
         self.code_generation_results = Some(code_generation::generate_code(
             &self.options,
+            &self.build_cache,
             &self.module_graph,
             &self.chunk_graph,
         ));
-        self.asset_render_plan = None;
-        self.rendered_asset_sources = None;
-    }
-
-    fn invalidate_generated_work(&mut self) {
-        self.code_generation_results = None;
-        self.asset_render_plan = None;
-        self.rendered_asset_sources = None;
-        self.assets.clear();
+        self.asset_render_manifest = None;
     }
 
     fn log_infrastructure(

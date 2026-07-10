@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
@@ -9,6 +9,7 @@ import type { CacheOptions, Compiler, Mode, Stats } from "@unpack-js/core";
 
 import {
   runCacheProcess,
+  runCacheProcessExpectTermination,
   runColdWarmBuilds
 } from "./cache-process-harness.js";
 import type { CacheProcessObservation } from "./cache-process-harness.js";
@@ -24,6 +25,46 @@ test("cache booleans override mode-dependent defaults", async () => {
   await assertCacheOverrideBehavior("development", false, "after");
 });
 
+test("Linux process termination during PackFile publication never exposes a partial revision", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("Persistent Cache crash recovery is a Linux-only contract");
+    return;
+  }
+
+  for (const point of ["after-content-commit", "before-index-replace"] as const) {
+    const fixture = await createFixture({
+      "src/index.js": "import { value } from './dep.js'; export { value };",
+      "src/dep.js": "export const value = 'before';"
+    });
+    const cacheLocation = join(fixture, `.cache/unpack/crash-${point}`);
+    const request = {
+      bundler: "unpack" as const,
+      options: {
+        context: fixture,
+        mode: "none" as const,
+        outputPath: join(fixture, "dist"),
+        cache: { type: "filesystem" as const, cacheLocation }
+      }
+    };
+    try {
+      const initial = await runCacheProcess(request);
+      assert.equal(initial.error, null);
+      await writeFile(join(fixture, "src/dep.js"), "export const value = 'after';", "utf8");
+      const termination = await runCacheProcessExpectTermination(request, {
+        env: { UNPACK_TEST_PERSISTENT_CACHE_CRASH_AT: point }
+      });
+      assert.ok(termination.signal === "SIGABRT" || termination.code !== 0);
+      const recovered = await runCacheProcess(request);
+      assert.equal(recovered.error, null);
+      assert.deepEqual(recovered.assets, ["main.js"]);
+      assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+      assert.ok((recovered.cacheWork?.moduleBuild.stores ?? 0) >= 1);
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  }
+});
+
 test("cache objects require a type and reject fields outside the selected cache type synchronously", () => {
   const createCompiler = (cache: unknown) => () =>
     unpack({
@@ -37,18 +78,66 @@ test("cache objects require a type and reject fields outside the selected cache 
     /options\.cache\.cacheLocation is only valid for filesystem cache/
   );
   assert.throws(
-    createCompiler({ type: "filesystem", maxMemoryGenerations: 2 }),
-    /options\.cache contains unsupported option 'maxMemoryGenerations'/
-  );
-  assert.throws(
     createCompiler({ type: "memory", cacheUnaffected: true }),
     /options\.cache contains unsupported option 'cacheUnaffected'/
+  );
+  assert.throws(
+    createCompiler({
+      type: "filesystem",
+      buildDependencies: { config: [""] }
+    }),
+    /options\.cache\.buildDependencies\.config\[0\] must not be empty/
   );
   assert.throws(
     createCompiler({ type: "filesystem", memoryCacheUnaffected: true }),
     /options\.cache contains unsupported option 'memoryCacheUnaffected'/
   );
   assert.doesNotThrow(createCompiler({ type: "memory" }));
+});
+
+test("memory generation limits follow webpack's zero, finite, and unbounded contract", () => {
+  const createCompiler = (cache: CacheOptions) => () =>
+    unpack({ entry: "./src/index.js", cache });
+
+  assert.throws(
+    createCompiler({ type: "memory", maxGenerations: 0 }),
+    /options\.cache\.maxGenerations must be at least 1/
+  );
+  assert.throws(
+    createCompiler({ type: "memory", maxGenerations: Number.NaN }),
+    /options\.cache\.maxGenerations must be at least 1/
+  );
+  assert.throws(
+    createCompiler({ type: "memory", maxGenerations: 0.25 }),
+    /options\.cache\.maxGenerations must be at least 1/
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "memory", maxGenerations: 1.25 })
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "memory", maxGenerations: Number.POSITIVE_INFINITY })
+  );
+
+  assert.throws(
+    createCompiler({ type: "filesystem", maxMemoryGenerations: -1 }),
+    /options\.cache\.maxMemoryGenerations must be non-negative/
+  );
+  assert.throws(
+    createCompiler({ type: "filesystem", maxMemoryGenerations: Number.NaN }),
+    /options\.cache\.maxMemoryGenerations must be non-negative/
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "filesystem", maxMemoryGenerations: 0 })
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "filesystem", maxMemoryGenerations: 0.25 })
+  );
+  assert.doesNotThrow(
+    createCompiler({
+      type: "filesystem",
+      maxMemoryGenerations: Number.POSITIVE_INFINITY
+    })
+  );
 });
 
 test("filesystem cache derives its name and directory from the top-level contract across processes", async () => {
@@ -141,7 +230,7 @@ test("explicit filesystem cache paths must be absolute and cacheLocation takes p
   }
 });
 
-test("only the approved webpack cache fields are accepted as inert", async () => {
+test("validates inert fields and active persistent cache controls", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 'inert-options';"
   });
@@ -167,9 +256,58 @@ test("only the approved webpack cache fields are accepted as inert", async () =>
       /options\.cache\.immutablePaths\[0\] must be an absolute path/
     );
     assert.throws(
-      createCompiler({ type: "filesystem", maxAge: 1 }),
-      /options\.cache contains unknown option 'maxAge'/
+      createCompiler({ type: "filesystem", maxAge: -1 }),
+      /options\.cache\.maxAge must be a non-negative number/
     );
+    assert.throws(
+      createCompiler({ type: "filesystem", maxAge: Number.NaN }),
+      /options\.cache\.maxAge must be a non-negative number/
+    );
+    assert.throws(
+      createCompiler({ type: "filesystem", compression: true }),
+      /options\.cache\.compression must be false, 'gzip', or 'brotli'/
+    );
+    assert.throws(
+      createCompiler({ type: "filesystem", allowCollectingMemory: "yes" }),
+      /options\.cache\.allowCollectingMemory must be a boolean/
+    );
+    for (const [label, maxAge] of [
+      ["fractional", 1.5],
+      ["beyond-safe-integer", Number.MAX_SAFE_INTEGER + 1]
+    ] as const) {
+      const accepted = createCompiler({
+        type: "filesystem",
+        cacheLocation: join(cacheLocation, label),
+        maxAge
+      })();
+      await closeCompiler(accepted);
+    }
+    for (const [label, compression] of [
+      ["uncompressed", false],
+      ["gzip", "gzip"],
+      ["brotli", "brotli"]
+    ] as const) {
+      const compressedLocation = join(cacheLocation, label);
+      const accepted = createCompiler({
+        type: "filesystem",
+        cacheLocation: compressedLocation,
+        compression,
+        allowCollectingMemory: false
+      })();
+      assert.equal((await runCompiler(accepted)).err, null);
+      await closeCompiler(accepted);
+      const suffix =
+        compression === "gzip"
+          ? ".bin.gz"
+          : compression === "brotli"
+            ? ".bin.br"
+            : ".bin";
+      assert.ok(
+        (await readdir(join(compressedLocation, "content"))).every((file) =>
+          file.endsWith(suffix)
+        )
+      );
+    }
 
     const compiler = unpack({
       context: fixture,
@@ -178,6 +316,9 @@ test("only the approved webpack cache fields are accepted as inert", async () =>
       cache: {
         type: "filesystem",
         cacheLocation,
+        maxAge: Number.POSITIVE_INFINITY,
+        compression: "gzip",
+        allowCollectingMemory: true,
         hashAlgorithm: "not-a-runtime-hash",
         managedPaths: [fixture, /node_modules/g],
         immutablePaths: [/immutable/y]
@@ -188,6 +329,11 @@ test("only the approved webpack cache fields are accepted as inert", async () =>
 
     assert.equal(result.err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /inert-options/);
+    assert.ok(
+      (await readdir(join(cacheLocation, "content"))).every((file) =>
+        file.endsWith(".bin.gz")
+      )
+    );
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -272,12 +418,381 @@ test("unchanged Resolve and Module Build work restores in an independent process
     assertColdWarmPublicOutcome({ cold, warm });
     assert.deepEqual(cold.cacheWork, {
       resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
-      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 }
+      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      codeGeneration: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.deepEqual(warm.cacheWork, {
       resolve: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
-      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 }
+      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      codeGeneration: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      assetRender: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 }
     });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Code Generation records restore module-runtime work without restoring Compilation graphs", async () => {
+  const fixture = await createFixture({
+    "src/index.js": [
+      "export async function load() {",
+      "  return import('./feature.js');",
+      "}"
+    ].join("\n"),
+    "src/feature.js": "export const value = 'before';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/code-generation");
+  const request = (outputPath: string) => ({
+    bundler: "unpack" as const,
+    options: {
+      context: fixture,
+      mode: "none" as const,
+      outputPath,
+      sourcemap: true,
+      cache: { type: "filesystem", cacheLocation },
+      snapshot: {
+        module: { timestamp: false, hash: true },
+        resolve: { timestamp: false, hash: false }
+      }
+    }
+  });
+  const coldOutput = join(fixture, "dist-codegen-cold");
+  const warmOutput = join(fixture, "dist-codegen-warm");
+  const changedOutput = join(fixture, "dist-codegen-changed");
+  const graphOutput = join(fixture, "dist-codegen-graph");
+
+  try {
+    const cold = await runCacheProcess(request(coldOutput));
+    assert.equal(cold.error, null);
+    assert.deepEqual(cold.cacheWork?.codeGeneration, {
+      hits: 0,
+      misses: 2,
+      stores: 2,
+      restores: 0,
+      evictions: 0
+    });
+    const coldFiles = await readAssetRenderFixture(coldOutput);
+
+    const warm = await runCacheProcess(request(warmOutput));
+    assert.equal(warm.error, null);
+    assert.notEqual(cold.pid, warm.pid);
+    assert.notEqual(cold.instanceId, warm.instanceId);
+    assert.deepEqual(warm.cacheWork?.codeGeneration, {
+      hits: 2,
+      misses: 0,
+      stores: 0,
+      restores: 2,
+      evictions: 0
+    });
+    assert.deepEqual(await readAssetRenderFixture(warmOutput), coldFiles);
+    assert.deepEqual(warm.assetDetails, cold.assetDetails);
+
+    await writeFile(
+      join(fixture, "src/feature.js"),
+      "export const value = 'after';",
+      "utf8"
+    );
+    const changed = await runCacheProcess(request(changedOutput));
+    assert.equal(changed.error, null);
+    assert.deepEqual(changed.cacheWork?.codeGeneration, {
+      hits: 1,
+      misses: 1,
+      stores: 1,
+      restores: 1,
+      evictions: 0
+    });
+    assert.match(
+      await readFile(join(changedOutput, "src_feature_js.js"), "utf8"),
+      /after/
+    );
+
+    await writeFile(
+      join(fixture, "src/index.js"),
+      [
+        "import { value } from './feature.js';",
+        "export async function load() {",
+        "  return [value, await import('./extra.js')];",
+        "}"
+      ].join("\n"),
+      "utf8"
+    );
+    await writeFile(
+      join(fixture, "src/extra.js"),
+      "export const extra = 'new async chunk';",
+      "utf8"
+    );
+    const graphChanged = await runCacheProcess(request(graphOutput));
+    assert.equal(graphChanged.error, null);
+    assert.deepEqual(graphChanged.cacheWork?.codeGeneration, {
+      hits: 1,
+      misses: 2,
+      stores: 2,
+      restores: 1,
+      evictions: 0
+    });
+    assert.deepEqual(graphChanged.assets, [
+      "main.js",
+      "main.js.map",
+      "src_extra_js.js",
+      "src_extra_js.js.map"
+    ]);
+    assert.match(await readFile(join(graphOutput, "main.js"), "utf8"), /after/);
+    assert.match(
+      await readFile(join(graphOutput, "src_extra_js.js"), "utf8"),
+      /new async chunk/
+    );
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Asset Render records restore source while each process finalizes and emits fresh Assets", async () => {
+  const fixture = await createFixture({
+    "src/index.js": [
+      "export async function load() {",
+      "  return import('./feature.js');",
+      "}"
+    ].join("\n"),
+    "src/feature.js": "export const value = 'before';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/asset-render");
+  const request = (outputPath: string, sourcemap: boolean) => ({
+    bundler: "unpack" as const,
+    options: {
+      context: fixture,
+      mode: "none" as const,
+      outputPath,
+      sourcemap,
+      cache: { type: "filesystem", cacheLocation },
+      snapshot: {
+        module: { timestamp: false, hash: true },
+        resolve: { timestamp: false, hash: false }
+      }
+    }
+  });
+  const coldOutput = join(fixture, "dist-cold");
+  const warmOutput = join(fixture, "dist-warm");
+  const noMapOutput = join(fixture, "dist-no-map");
+  const changedOutput = join(fixture, "dist-changed");
+
+  try {
+    const cold = await runCacheProcess(request(coldOutput, true));
+    assert.equal(cold.error, null);
+    assert.deepEqual(cold.cacheWork?.assetRender, {
+      hits: 0,
+      misses: 2,
+      stores: 2,
+      restores: 0,
+      evictions: 0
+    });
+    const coldFiles = await readAssetRenderFixture(coldOutput);
+
+    const warm = await runCacheProcess(request(warmOutput, true));
+    assert.equal(warm.error, null);
+    assert.notEqual(cold.pid, warm.pid);
+    assert.notEqual(cold.instanceId, warm.instanceId);
+    assert.deepEqual(warm.cacheWork?.assetRender, {
+      hits: 2,
+      misses: 0,
+      stores: 0,
+      restores: 2,
+      evictions: 0
+    });
+    assert.deepEqual(await readAssetRenderFixture(warmOutput), coldFiles);
+    assert.deepEqual(warm.assetDetails, cold.assetDetails);
+    assert.match(coldFiles.mainMap, /"file":"main\.js"/);
+    assert.match(coldFiles.asyncMap, /"file":"src_feature_js\.js"/);
+    assert.match(coldFiles.mainMap, /src\/index\.js/);
+    assert.match(coldFiles.asyncMap, /src\/feature\.js/);
+
+    const noMap = await runCacheProcess(request(noMapOutput, false));
+    assert.equal(noMap.error, null);
+    assert.deepEqual(noMap.cacheWork?.assetRender, {
+      hits: 2,
+      misses: 0,
+      stores: 0,
+      restores: 2,
+      evictions: 0
+    });
+    assert.deepEqual(noMap.assets, ["main.js", "src_feature_js.js"]);
+    await assert.rejects(stat(join(noMapOutput, "main.js.map")));
+    assert.doesNotMatch(await readFile(join(noMapOutput, "main.js"), "utf8"), /sourceMappingURL/);
+
+    await writeFile(
+      join(fixture, "src/feature.js"),
+      "export const value = 'after';",
+      "utf8"
+    );
+    const changed = await runCacheProcess(request(changedOutput, true));
+    assert.equal(changed.error, null);
+    assert.deepEqual(changed.cacheWork?.assetRender, {
+      hits: 1,
+      misses: 1,
+      stores: 1,
+      restores: 1,
+      evictions: 0
+    });
+    assert.match(
+      await readFile(join(changedOutput, "src_feature_js.js"), "utf8"),
+      /after/
+    );
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("resolved Build Dependency requests guard PackFile entries across processes", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const result = 'ok';",
+    "config/tool.js": "export default 'before';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/resolved-build-dependencies");
+  const build = (label: string) =>
+    runCacheProcess({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "none",
+        outputPath: join(fixture, "dist"),
+        cache: {
+          type: "filesystem",
+          cacheLocation,
+          buildDependencies: {
+            [label]: ["./config/tool"]
+          }
+        }
+      }
+    });
+
+  try {
+    const cold = await build("config");
+    const relabeledWarm = await build("label-is-nonsemantic");
+    await writeFile(
+      join(fixture, "config/tool.js"),
+      "export default 'after';",
+      "utf8"
+    );
+    const changed = await build("config");
+
+    assert.equal(cold.error, null);
+    assert.equal(relabeledWarm.error, null);
+    assert.equal(changed.error, null);
+    assert.deepEqual(cold.cacheWork, {
+      resolve: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 },
+      moduleBuild: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 },
+      codeGeneration: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
+    });
+    assert.deepEqual(relabeledWarm.cacheWork, {
+      resolve: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 },
+      moduleBuild: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 },
+      codeGeneration: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 },
+      assetRender: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 }
+    });
+    assert.deepEqual(changed.cacheWork, cold.cacheWork);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Build Dependency re-resolution preserves PackFile when package metadata selects the same input", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const result = 'ok';",
+    "node_modules/config-pkg/package.json": JSON.stringify({
+      name: "config-pkg",
+      version: "1.0.0",
+      main: "config.js",
+      exports: { ".": "./config.js" }
+    }),
+    "node_modules/config-pkg/config.js": "export default 'config';",
+    "node_modules/config-pkg/alternate.js": "export default 'alternate';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/package-build-dependency");
+  const build = () =>
+    runCacheProcess({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "none",
+        outputPath: join(fixture, "dist"),
+        cache: {
+          type: "filesystem",
+          cacheLocation,
+          buildDependencies: { config: ["config-pkg"] }
+        }
+      }
+    });
+
+  try {
+    const cold = await build();
+    await writeFile(
+      join(fixture, "node_modules/config-pkg/package.json"),
+      JSON.stringify({
+        name: "config-pkg",
+        version: "1.0.0",
+        main: "config.js",
+        exports: { ".": "./config.js" },
+        description: "resolution transcript changed"
+      }),
+      "utf8"
+    );
+    const sameSelection = await build();
+    await writeFile(
+      join(fixture, "node_modules/config-pkg/package.json"),
+      JSON.stringify({
+        name: "config-pkg",
+        version: "1.0.0",
+        main: "alternate.js",
+        exports: { ".": "./alternate.js" }
+      }),
+      "utf8"
+    );
+    const differentSelection = await build();
+
+    assert.deepEqual(cold.cacheWork, singleModuleCacheWork("cold"));
+    assert.deepEqual(sameSelection.cacheWork, singleModuleCacheWork("warm"));
+    assert.deepEqual(differentSelection.cacheWork, singleModuleCacheWork("cold"));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Build Dependency re-resolution goes cold when Context candidates appear or disappear", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const result = 'ok';",
+    "config.js": "export default 'javascript';"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/context-build-dependency");
+  const build = () =>
+    runCacheProcess({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "none",
+        outputPath: join(fixture, "dist"),
+        cache: {
+          type: "filesystem",
+          cacheLocation,
+          buildDependencies: { config: ["./config"] }
+        }
+      }
+    });
+
+  try {
+    const javascriptSelection = await build();
+    await writeFile(
+      join(fixture, "config.ts"),
+      "export default 'typescript';",
+      "utf8"
+    );
+    const higherPriorityCandidate = await build();
+    await rm(join(fixture, "config.ts"));
+    const candidateRemoved = await build();
+
+    assert.deepEqual(javascriptSelection.cacheWork, singleModuleCacheWork("cold"));
+    assert.deepEqual(higherPriorityCandidate.cacheWork, singleModuleCacheWork("cold"));
+    assert.deepEqual(candidateRemoved.cacheWork, singleModuleCacheWork("cold"));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -313,7 +828,9 @@ test("a source mutation rebuilds only the affected Module Build record", async (
     assert.equal(cold.error, null);
     assert.deepEqual(cold.cacheWork, {
       resolve: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 },
-      moduleBuild: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 }
+      moduleBuild: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 },
+      codeGeneration: { hits: 0, misses: 3, stores: 3, restores: 0, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
 
     await writeFile(
@@ -326,7 +843,9 @@ test("a source mutation rebuilds only the affected Module Build record", async (
     assert.equal(changed.error, null);
     assert.deepEqual(changed.cacheWork, {
       resolve: { hits: 3, misses: 0, stores: 0, restores: 3, evictions: 0 },
-      moduleBuild: { hits: 3, misses: 0, stores: 1, restores: 3, evictions: 0 }
+      moduleBuild: { hits: 3, misses: 0, stores: 1, restores: 3, evictions: 0 },
+      codeGeneration: { hits: 2, misses: 1, stores: 1, restores: 2, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /stable/);
@@ -361,12 +880,16 @@ test("cache version is an exact container guard at the same location", async () 
       assert.equal(cold.error, null);
       assert.deepEqual(cold.cacheWork, {
         resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
-        moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 }
+        moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+        codeGeneration: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+        assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
       });
     }
     assert.deepEqual(warmV2.cacheWork, {
       resolve: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
-      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 }
+      moduleBuild: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      codeGeneration: { hits: 2, misses: 0, stores: 0, restores: 2, evictions: 0 },
+      assetRender: { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 }
     });
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -424,7 +947,9 @@ test("legacy JSON and CBOR cache files remain untouched and are treated as cold"
     assert.equal(observation.error, null);
     assert.deepEqual(observation.cacheWork, {
       resolve: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
-      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 }
+      moduleBuild: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      codeGeneration: { hits: 0, misses: 2, stores: 2, restores: 0, evictions: 0 },
+      assetRender: { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
     });
     assert.deepEqual(await readFile(manifestPath), manifest);
     assert.deepEqual(await readFile(packPath), pack);
@@ -487,33 +1012,6 @@ test("filesystem cache falls back to cwd and explicit cache name overrides top-l
     await assert.rejects(
       stat(join(fixture, ".cache/unpack/top-level-production"))
     );
-  } finally {
-    await rm(fixture, { recursive: true, force: true });
-  }
-});
-
-test("empty top-level name uses the default derived cache name", async () => {
-  const fixture = await createFixture({
-    "src/index.js": "export const value = 1;"
-  });
-
-  try {
-    const observation = await runCacheProcess(
-      {
-        bundler: "unpack",
-        options: {
-          context: fixture,
-          mode: "production",
-          name: "",
-          outputPath: join(fixture, "dist"),
-          cache: { type: "filesystem" }
-        }
-      },
-      { cwd: fixture }
-    );
-
-    assert.equal(observation.error, null);
-    assert.ok(await stat(join(fixture, ".cache/unpack/default-production")));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -596,22 +1094,66 @@ function publicBuildOutcome(observation: CacheProcessObservation) {
   };
 }
 
+function singleModuleCacheWork(kind: "cold" | "warm") {
+  const item =
+    kind === "cold"
+      ? { hits: 0, misses: 1, stores: 1, restores: 0, evictions: 0 }
+      : { hits: 1, misses: 0, stores: 0, restores: 1, evictions: 0 };
+  return {
+    resolve: { ...item },
+    moduleBuild: { ...item },
+    codeGeneration: { ...item },
+    assetRender: { ...item }
+  };
+}
+
+async function readAssetRenderFixture(outputPath: string) {
+  const [main, mainMap, asyncChunk, asyncMap] = await Promise.all([
+    readFile(join(outputPath, "main.js"), "utf8"),
+    readFile(join(outputPath, "main.js.map"), "utf8"),
+    readFile(join(outputPath, "src_feature_js.js"), "utf8"),
+    readFile(join(outputPath, "src_feature_js.js.map"), "utf8")
+  ]);
+  return { main, mainMap, asyncChunk, asyncMap };
+}
+
 async function assertOmittedCacheBehavior(mode: Mode, expected: "before" | "after") {
-  await assertCacheBehavior(mode, expected);
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const entry = join(fixture, "src/index.js");
+  const output = join(fixture, "dist/main.js");
+  const stableTime = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(entry, stableTime, stableTime);
+  const compiler = unpack({
+    context: fixture,
+    mode,
+    entry: "./src/index.js",
+    sourcemap: false,
+    snapshot: {
+      module: { timestamp: false, hash: false }
+    }
+  });
+
+  try {
+    assert.equal((await runCompiler(compiler)).err, null);
+    assert.match(await readFile(output, "utf8"), /before/);
+
+    await writeFile(entry, "export const value = 'after';", "utf8");
+    await utimes(entry, stableTime, stableTime);
+
+    assert.equal((await runCompiler(compiler)).err, null);
+    assert.match(await readFile(output, "utf8"), new RegExp(expected));
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
 }
 
 async function assertCacheOverrideBehavior(
   mode: Mode,
   cache: boolean,
   expected: "before" | "after"
-) {
-  await assertCacheBehavior(mode, expected, cache);
-}
-
-async function assertCacheBehavior(
-  mode: Mode,
-  expected: "before" | "after",
-  cache?: boolean
 ) {
   const fixture = await createFixture({
     "src/index.js": "export const value = 'before';"
@@ -625,7 +1167,7 @@ async function assertCacheBehavior(
     mode,
     entry: "./src/index.js",
     sourcemap: false,
-    ...(cache === undefined ? {} : { cache }),
+    cache,
     snapshot: {
       module: { timestamp: false, hash: false }
     }
@@ -633,7 +1175,6 @@ async function assertCacheBehavior(
 
   try {
     assert.equal((await runCompiler(compiler)).err, null);
-    assert.match(await readFile(output, "utf8"), /before/);
     await writeFile(entry, "export const value = 'after';", "utf8");
     await utimes(entry, stableTime, stableTime);
     assert.equal((await runCompiler(compiler)).err, null);

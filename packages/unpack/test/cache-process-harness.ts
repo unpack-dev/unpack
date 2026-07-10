@@ -12,6 +12,7 @@ export interface CacheProcessOptions {
   mode?: "development" | "production" | "none";
   name?: string;
   outputPath: string;
+  sourcemap?: boolean;
   cache?: boolean | Record<string, unknown>;
   snapshot?: Record<string, unknown>;
 }
@@ -29,6 +30,7 @@ export interface CacheProcessObservation {
   hasStats: boolean;
   hasErrors: boolean | null;
   assets: string[];
+  assetDetails: { name: string; size: number }[];
   outputPath: string | null;
   cacheWork: CacheWorkObservation | null;
 }
@@ -44,6 +46,13 @@ export interface CacheItemWorkObservation {
 export interface CacheWorkObservation {
   resolve: CacheItemWorkObservation;
   moduleBuild: CacheItemWorkObservation;
+  codeGeneration: CacheItemWorkObservation;
+  assetRender: CacheItemWorkObservation;
+}
+
+export interface CacheProcessTermination {
+  code: number | null;
+  signal: string | null;
 }
 
 export async function runColdWarmBuilds(
@@ -57,7 +66,7 @@ export async function runColdWarmBuilds(
 
 export async function runCacheProcess(
   request: CacheProcessRequest,
-  options: { cwd?: string } = {}
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
 ): Promise<CacheProcessObservation> {
   const driver = fileURLToPath(new URL("./cache-process-driver.js", import.meta.url));
   const { stdout, stderr } = await execFile(
@@ -68,6 +77,7 @@ export async function runCacheProcess(
       maxBuffer: 1024 * 1024,
       env: {
         ...process.env,
+        ...options.env,
         UNPACK_INTERNAL_TRACING: "unpack_core::cache_work=info"
       }
     }
@@ -80,6 +90,30 @@ export async function runCacheProcess(
     ...(JSON.parse(output) as CacheProcessObservation),
     cacheWork: parseCacheWork(stderr)
   };
+}
+
+/**
+ * Runs a cache process that is expected to be force-stopped by a native
+ * publication fault hook. Keeping this separate from the normal observation
+ * path ensures acceptance tests cannot accidentally accept a graceful error.
+ */
+export async function runCacheProcessExpectTermination(
+  request: CacheProcessRequest,
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
+): Promise<CacheProcessTermination> {
+  try {
+    await runCacheProcess(request, options);
+  } catch (error) {
+    const termination = error as { code?: unknown; signal?: unknown };
+    const code = typeof termination.code === "number" ? termination.code : null;
+    const signal =
+      typeof termination.signal === "string" ? termination.signal : null;
+    if (code !== null || signal !== null) {
+      return { code, signal };
+    }
+    throw error;
+  }
+  throw new Error("cache process completed instead of being force-stopped");
 }
 
 function parseCacheWork(stderr: string): CacheWorkObservation | null {
@@ -97,7 +131,9 @@ function parseCacheWork(stderr: string): CacheWorkObservation | null {
     }
     return Number(value);
   };
-  const item = (prefix: "resolve" | "module") => ({
+  const item = (
+    prefix: "resolve" | "module" | "code_generation" | "asset_render"
+  ) => ({
     hits: field(`${prefix}_hits`),
     misses: field(`${prefix}_misses`),
     stores: field(`${prefix}_stores`),
@@ -106,6 +142,8 @@ function parseCacheWork(stderr: string): CacheWorkObservation | null {
   });
   return {
     resolve: item("resolve"),
-    moduleBuild: item("module")
+    moduleBuild: item("module"),
+    codeGeneration: item("code_generation"),
+    assetRender: item("asset_render")
   };
 }

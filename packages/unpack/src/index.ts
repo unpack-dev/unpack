@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { statSync, watch as watchFileSystem } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface UnpackOptions {
   name?: string;
@@ -25,6 +26,7 @@ export type CacheOptions =
 
 export interface MemoryCacheOptions {
   type: "memory";
+  maxGenerations?: number;
 }
 
 export interface FilesystemCacheOptions {
@@ -34,7 +36,14 @@ export interface FilesystemCacheOptions {
   name?: string;
   version?: string;
   buildDependencies?: Record<string, string[]>;
+  maxMemoryGenerations?: number;
+  maxAge?: number;
+  compression?: false | "gzip" | "brotli";
+  allowCollectingMemory?: boolean;
   idleTimeout?: number;
+  idleTimeoutForInitialStore?: number;
+  idleTimeoutAfterLargeChanges?: number;
+  profile?: boolean;
   readonly?: boolean;
   hashAlgorithm?: string;
   managedPaths?: SnapshotPathPattern[];
@@ -147,13 +156,21 @@ interface NormalizedCacheOptions {
   name?: string;
   version?: string;
   buildDependencies: NormalizedBuildDependency[];
+  maxMemoryGenerations?: number;
+  automaticBuildDependencies: string[];
+  maxAge?: number;
+  compression?: "gzip" | "brotli";
+  allowCollectingMemory?: boolean;
   idleTimeout?: number;
+  idleTimeoutForInitialStore?: number;
+  idleTimeoutAfterLargeChanges?: number;
+  profile: boolean;
   readonly: boolean;
 }
 
 interface NormalizedBuildDependency {
   name: string;
-  files: string[];
+  requests: string[];
 }
 
 interface NormalizedSnapshotOptions {
@@ -252,11 +269,12 @@ interface NativeFlushResult {
     name: string;
     message: string;
   } | null;
+  logs?: InfrastructureLogEvent[] | null;
 }
 
 interface NativeCompiler {
   run(): Promise<NativeRunResult>;
-  flushCache(): Promise<NativeFlushResult>;
+  settleCache(): Promise<NativeFlushResult>;
   close(): void;
 }
 
@@ -266,6 +284,14 @@ interface NativeBinding {
 
 const require = createRequire(import.meta.url);
 const native = require("./unpack_node.node") as NativeBinding;
+const unpackJavaScriptPath = fileURLToPath(import.meta.url);
+// The native addon is the compiled closure of the Rust compiler, parser, and
+// resolver; together with the JS entry and package metadata it is the runtime toolchain.
+const unpackToolchainBuildDependencies = [
+  unpackJavaScriptPath,
+  require.resolve("./unpack_node.node"),
+  resolve(dirname(unpackJavaScriptPath), "../package.json")
+];
 
 class CompilerImpl implements Compiler {
   #closed = false;
@@ -273,8 +299,11 @@ class CompilerImpl implements Compiler {
   #watching: WatchingImpl | undefined;
   #idleFlushTimer: ReturnType<typeof setTimeout> | undefined;
   #pendingCacheFlush: Promise<NativeFlushResult> | undefined;
+  #hasCompletedFilesystemCompilation = false;
   readonly #writableFilesystemCache: boolean;
   readonly #cacheIdleTimeout: number;
+  readonly #cacheInitialStoreTimeout: number;
+  readonly #cacheLargeChangeTimeout: number;
   readonly #infrastructureLoggingLevel: InfrastructureLoggingLevel;
   readonly #nativeCompiler: NativeCompiler;
 
@@ -282,7 +311,11 @@ class CompilerImpl implements Compiler {
     this.#nativeCompiler = native.createCompiler(options);
     this.#writableFilesystemCache =
       options.cache.type === "filesystem" && !options.cache.readonly;
-    this.#cacheIdleTimeout = options.cache.idleTimeout ?? 0;
+    this.#cacheIdleTimeout = options.cache.idleTimeout ?? 60_000;
+    this.#cacheInitialStoreTimeout =
+      options.cache.idleTimeoutForInitialStore ?? 5_000;
+    this.#cacheLargeChangeTimeout =
+      options.cache.idleTimeoutAfterLargeChanges ?? 1_000;
     this.#infrastructureLoggingLevel = options.infrastructureLogging.level;
   }
 
@@ -334,7 +367,12 @@ class CompilerImpl implements Compiler {
           return;
         }
 
-        this.#scheduleIdleCacheFlush();
+        this.#scheduleIdleCacheFlush(
+          this.#hasCompletedFilesystemCompilation
+            ? this.#cacheIdleTimeout
+            : this.#cacheInitialStoreTimeout
+        );
+        this.#hasCompletedFilesystemCompilation = true;
         this.#emitInfrastructureLog("info", "unpack.Compiler", "run completed");
         callback(null, new StatsImpl(normalizeNativeStats(result.stats)));
       },
@@ -421,12 +459,7 @@ class CompilerImpl implements Compiler {
 
     try {
       this.#clearIdleFlushTimer();
-      this.#flushCacheNow().then((flushError) => {
-        if (flushError) {
-          callback(flushError);
-          return;
-        }
-
+      this.#flushCacheNow().then(() => {
         try {
           this.#nativeCompiler.close();
           this.#closed = true;
@@ -466,7 +499,12 @@ class CompilerImpl implements Compiler {
         return;
       }
 
-      this.#scheduleIdleCacheFlush();
+      this.#scheduleIdleCacheFlush(
+        this.#hasCompletedFilesystemCompilation
+          ? this.#cacheLargeChangeTimeout
+          : this.#cacheInitialStoreTimeout
+      );
+      this.#hasCompletedFilesystemCompilation = true;
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation completed");
       handler(null, new StatsImpl(normalizeNativeStats(result.stats)));
     } catch (error) {
@@ -476,16 +514,13 @@ class CompilerImpl implements Compiler {
     }
   }
 
-  #scheduleIdleCacheFlush(): void {
-    if (!this.#writableFilesystemCache || this.#closed) {
-      return;
-    }
-
+  #scheduleIdleCacheFlush(delay: number): void {
+    if (!this.#writableFilesystemCache || this.#closed) return;
     this.#clearIdleFlushTimer();
     this.#idleFlushTimer = setTimeout(() => {
       this.#idleFlushTimer = undefined;
       void this.#flushCacheNow();
-    }, this.#cacheIdleTimeout);
+    }, delay);
   }
 
   #clearIdleFlushTimer(): void {
@@ -504,11 +539,12 @@ class CompilerImpl implements Compiler {
     if (startsFlush) {
       this.#emitInfrastructureLog("info", "unpack.Cache", "cache flush started");
     }
-    const flush = this.#pendingCacheFlush ?? this.#nativeCompiler.flushCache();
+    const flush = this.#pendingCacheFlush ?? this.#nativeCompiler.settleCache();
     this.#pendingCacheFlush = flush;
 
     try {
       const result = await flush;
+      this.#emitInfrastructureLogs(result.logs);
       if (result.error) {
         const error = namedError(result.error.name, result.error.message);
         if (startsFlush) {
@@ -653,10 +689,10 @@ class WatchingImpl implements Watching {
 
   async #finishClose(): Promise<void> {
     const callbacks = this.#closeCallbacks.splice(0);
-    const flushError = await this.#flushCache();
+    await this.#flushCache();
     this.#onClose();
     for (const callback of callbacks) {
-      callback(flushError);
+      callback(null);
     }
   }
 
@@ -899,6 +935,8 @@ function normalizeCacheOptions(
     return {
       type: mode === "development" ? "memory" : "disabled",
       buildDependencies: [],
+      automaticBuildDependencies: [],
+      profile: false,
       readonly: false
     };
   }
@@ -907,6 +945,8 @@ function normalizeCacheOptions(
     return {
       type: "memory",
       buildDependencies: [],
+      automaticBuildDependencies: [],
+      profile: false,
       readonly: false
     };
   }
@@ -915,6 +955,8 @@ function normalizeCacheOptions(
     return {
       type: "disabled",
       buildDependencies: [],
+      automaticBuildDependencies: [],
+      profile: false,
       readonly: false
     };
   }
@@ -930,10 +972,22 @@ function normalizeCacheOptions(
   const cacheRecord = cache as unknown as Record<string, unknown>;
 
   if (type === "memory") {
-    assertCacheKeysForType(cacheRecord, ["type"], "memory");
+    assertCacheKeysForType(cacheRecord, ["type", "maxGenerations"], "memory");
+    const memoryCache = cache as MemoryCacheOptions;
+    const maxMemoryGenerations =
+      memoryCache.maxGenerations === undefined
+        ? undefined
+        : normalizeGenerationLimit(
+            memoryCache.maxGenerations,
+            "options.cache.maxGenerations",
+            false
+          );
     return {
       type: "memory",
       buildDependencies: [],
+      automaticBuildDependencies: [],
+      ...(maxMemoryGenerations === undefined ? {} : { maxMemoryGenerations }),
+      profile: false,
       readonly: false
     };
   }
@@ -952,7 +1006,14 @@ function normalizeCacheOptions(
       "name",
       "version",
       "buildDependencies",
+      "maxMemoryGenerations",
+      "maxAge",
+      "compression",
+      "allowCollectingMemory",
       "idleTimeout",
+      "idleTimeoutForInitialStore",
+      "idleTimeoutAfterLargeChanges",
+      "profile",
       "readonly",
       "hashAlgorithm",
       "managedPaths",
@@ -978,7 +1039,7 @@ function normalizeCacheOptions(
 
   const name =
     filesystemCache.name === undefined
-      ? `${compilerName || "default"}-${mode}`
+      ? `${compilerName ?? "default"}-${mode}`
       : assertString(filesystemCache.name, "options.cache.name");
   const cacheDirectory =
     filesystemCache.cacheDirectory === undefined
@@ -1004,6 +1065,16 @@ function normalizeCacheOptions(
     filesystemCache.readonly === undefined
       ? false
       : assertBoolean(filesystemCache.readonly, "options.cache.readonly");
+  const maxMemoryGenerations =
+    filesystemCache.maxMemoryGenerations === undefined
+      ? mode === "development"
+        ? 5
+        : undefined
+      : normalizeGenerationLimit(
+          filesystemCache.maxMemoryGenerations,
+          "options.cache.maxMemoryGenerations",
+          true
+        );
 
   return {
     type,
@@ -1019,9 +1090,17 @@ function normalizeCacheOptions(
           )
         }),
     buildDependencies: normalizeBuildDependencies(
-      filesystemCache.buildDependencies,
-      context
+      filesystemCache.buildDependencies
     ),
+    automaticBuildDependencies: [...unpackToolchainBuildDependencies],
+    ...(maxMemoryGenerations === undefined ? {} : { maxMemoryGenerations }),
+    ...(filesystemCache.maxAge === undefined ? {} : { maxAge: assertNonNegativeNumber(filesystemCache.maxAge, "options.cache.maxAge") }),
+    ...(filesystemCache.compression === undefined || filesystemCache.compression === false
+      ? {}
+      : { compression: assertCacheCompression(filesystemCache.compression) }),
+    ...(filesystemCache.allowCollectingMemory === undefined
+      ? {}
+      : { allowCollectingMemory: assertBoolean(filesystemCache.allowCollectingMemory, "options.cache.allowCollectingMemory") }),
     ...(filesystemCache.idleTimeout === undefined
       ? {}
       : {
@@ -1030,6 +1109,12 @@ function normalizeCacheOptions(
             "options.cache.idleTimeout"
           )
         }),
+    ...(filesystemCache.idleTimeoutForInitialStore === undefined ? {} : { idleTimeoutForInitialStore: assertNonNegativeInteger(filesystemCache.idleTimeoutForInitialStore, "options.cache.idleTimeoutForInitialStore") }),
+    ...(filesystemCache.idleTimeoutAfterLargeChanges === undefined ? {} : { idleTimeoutAfterLargeChanges: assertNonNegativeInteger(filesystemCache.idleTimeoutAfterLargeChanges, "options.cache.idleTimeoutAfterLargeChanges") }),
+    profile:
+      filesystemCache.profile === undefined
+        ? false
+        : assertBoolean(filesystemCache.profile, "options.cache.profile"),
     readonly
   };
 }
@@ -1091,7 +1176,7 @@ function assertCacheKeysForType(
     return;
   }
 
-  if (key === "cacheUnaffected" || key === "memoryCacheUnaffected" || key === "maxMemoryGenerations") {
+  if (key === "cacheUnaffected" || key === "memoryCacheUnaffected") {
     throw new TypeError(`options.cache contains unsupported option '${key}'`);
   }
 
@@ -1101,7 +1186,12 @@ function assertCacheKeysForType(
     "name",
     "version",
     "buildDependencies",
+    "maxMemoryGenerations",
+    "maxAge",
     "idleTimeout",
+    "idleTimeoutForInitialStore",
+    "idleTimeoutAfterLargeChanges",
+    "profile",
     "readonly",
     "hashAlgorithm",
     "managedPaths",
@@ -1115,8 +1205,7 @@ function assertCacheKeysForType(
 }
 
 function normalizeBuildDependencies(
-  buildDependencies: Record<string, string[]> | undefined,
-  context: string
+  buildDependencies: Record<string, string[]> | undefined
 ): NormalizedBuildDependency[] {
   if (buildDependencies === undefined) {
     return [];
@@ -1129,8 +1218,11 @@ function normalizeBuildDependencies(
     }
     return {
       name,
-      files: files.map((file, index) =>
-        normalizePath(file, `options.cache.buildDependencies.${name}[${index}]`, context)
+      requests: files.map((file, index) =>
+        assertNonEmptyString(
+          file,
+          `options.cache.buildDependencies.${name}[${index}]`
+        )
       )
     };
   });
@@ -1624,6 +1716,39 @@ function assertNonNegativeInteger(value: unknown, name: string): number {
     throw new TypeError(`${name} must be a non-negative integer`);
   }
   return value;
+}
+
+function assertNonNegativeNumber(value: unknown, name: string): number {
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative number`);
+  }
+  return value;
+}
+
+function assertCacheCompression(value: unknown): "gzip" | "brotli" {
+  if (value === "gzip" || value === "brotli") return value;
+  throw new TypeError("options.cache.compression must be false, 'gzip', or 'brotli'");
+}
+function normalizeGenerationLimit(
+  value: unknown,
+  name: string,
+  allowZero: boolean
+): number | undefined {
+  const valid =
+    typeof value === "number" &&
+    !Number.isNaN(value) &&
+    value !== Number.NEGATIVE_INFINITY &&
+    (allowZero ? value >= 0 : value >= 1);
+  if (!valid) {
+    throw new TypeError(
+      `${name} must be ${allowZero ? "non-negative" : "at least 1"}`
+    );
+  }
+  if (value === Number.POSITIVE_INFINITY) {
+    return undefined;
+  }
+
+  return Math.ceil(value);
 }
 
 function assertPositiveInteger(value: unknown, name: string): number {

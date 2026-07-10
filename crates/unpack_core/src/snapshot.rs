@@ -1,15 +1,15 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap},
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{
-    Error, Result,
-    pack_file::{ManagedItemStateDto, PathBytes, SnapshotDto, SnapshotEntryDto, TimestampDto},
-};
+#[cfg(test)]
+use std::collections::BTreeMap;
+
+use crate::{Error, Result};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
@@ -146,6 +146,14 @@ impl FileSystemInfo {
         }
     }
 
+    pub(crate) fn for_build_dependencies() -> Self {
+        Self {
+            managed_paths: Vec::new(),
+            immutable_paths: Vec::new(),
+            unmanaged_paths: Vec::new(),
+        }
+    }
+
     pub(crate) async fn create_file_snapshot(
         &self,
         path: &Path,
@@ -220,6 +228,7 @@ impl FileSystemInfo {
         snapshot.is_valid_sync(strategy, self)
     }
 
+    #[cfg(test)]
     pub(crate) fn merge_snapshots<'a>(
         &self,
         snapshots: impl IntoIterator<Item = &'a Snapshot>,
@@ -288,68 +297,99 @@ pub(crate) struct Snapshot {
     entries: Vec<SnapshotEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PersistentSnapshotEntry {
+    File {
+        path: PathBuf,
+        exists: bool,
+        modified: Option<SystemTime>,
+        source_hash: Option<u64>,
+    },
+    Context {
+        path: PathBuf,
+        exists: bool,
+        timestamp_hash: Option<u64>,
+        content_hash: Option<u64>,
+    },
+    MissingExistence {
+        path: PathBuf,
+    },
+    ImmutablePath {
+        path: PathBuf,
+    },
+    ManagedPath {
+        path: PathBuf,
+        root: PathBuf,
+        state: PersistentManagedItemState,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PersistentManagedItemState {
+    NodeModules,
+    GroupingFolder,
+    Package { name: String, version: String },
+}
+
 impl Snapshot {
-    pub(crate) fn to_pack_file_dto(&self) -> SnapshotDto {
-        SnapshotDto {
-            entries: self
-                .entries
-                .iter()
-                .map(|entry| match entry {
-                    SnapshotEntry::File(file) => SnapshotEntryDto::File {
-                        path: PathBytes::from_path(&file.path),
-                        exists: file.snapshot.exists,
-                        modified: file.snapshot.modified.map(system_time_to_dto),
-                        source_hash: file.snapshot.source_hash,
-                    },
-                    SnapshotEntry::Context(context) => SnapshotEntryDto::Context {
-                        path: PathBytes::from_path(&context.path),
-                        exists: context.snapshot.exists,
-                        timestamp_hash: context.snapshot.timestamp_hash,
-                        content_hash: context.snapshot.content_hash,
-                    },
-                    SnapshotEntry::MissingExistence { path } => {
-                        SnapshotEntryDto::MissingExistence {
-                            path: PathBytes::from_path(path),
+    pub(crate) fn persistent_entries(&self) -> Vec<PersistentSnapshotEntry> {
+        self.entries
+            .iter()
+            .map(|entry| match entry {
+                SnapshotEntry::File(file) => PersistentSnapshotEntry::File {
+                    path: file.path.clone(),
+                    exists: file.snapshot.exists,
+                    modified: file.snapshot.modified,
+                    source_hash: file.snapshot.source_hash,
+                },
+                SnapshotEntry::Context(context) => PersistentSnapshotEntry::Context {
+                    path: context.path.clone(),
+                    exists: context.snapshot.exists,
+                    timestamp_hash: context.snapshot.timestamp_hash,
+                    content_hash: context.snapshot.content_hash,
+                },
+                SnapshotEntry::MissingExistence { path } => {
+                    PersistentSnapshotEntry::MissingExistence { path: path.clone() }
+                }
+                SnapshotEntry::ImmutablePath { path } => {
+                    PersistentSnapshotEntry::ImmutablePath { path: path.clone() }
+                }
+                SnapshotEntry::ManagedPath(managed) => PersistentSnapshotEntry::ManagedPath {
+                    path: managed.path.clone(),
+                    root: managed.root.clone(),
+                    state: match &managed.state {
+                        ManagedItemState::NodeModules => PersistentManagedItemState::NodeModules,
+                        ManagedItemState::GroupingFolder => {
+                            PersistentManagedItemState::GroupingFolder
                         }
-                    }
-                    SnapshotEntry::ImmutablePath { path } => SnapshotEntryDto::ImmutablePath {
-                        path: PathBytes::from_path(path),
-                    },
-                    SnapshotEntry::ManagedPath(snapshot) => SnapshotEntryDto::ManagedPath {
-                        path: PathBytes::from_path(&snapshot.path),
-                        root: PathBytes::from_path(&snapshot.root),
-                        state: match &snapshot.state {
-                            ManagedItemState::NodeModules => ManagedItemStateDto::NodeModules,
-                            ManagedItemState::GroupingFolder => ManagedItemStateDto::GroupingFolder,
-                            ManagedItemState::Package { name, version } => {
-                                ManagedItemStateDto::Package {
-                                    name: name.clone(),
-                                    version: version.clone(),
-                                }
+                        ManagedItemState::Package { name, version } => {
+                            PersistentManagedItemState::Package {
+                                name: name.clone(),
+                                version: version.clone(),
                             }
-                        },
+                        }
                     },
-                })
-                .collect(),
-        }
+                },
+            })
+            .collect()
     }
 
-    pub(crate) fn from_pack_file_dto(dto: SnapshotDto) -> Option<Self> {
+    pub(crate) fn from_persistent_entries(entries: Vec<PersistentSnapshotEntry>) -> Option<Self> {
         let mut seen_paths = BTreeSet::new();
-        let mut entries = Vec::with_capacity(dto.entries.len());
-        for entry in dto.entries {
+        let mut snapshots = Vec::with_capacity(entries.len());
+        for entry in entries {
             let path = match &entry {
-                SnapshotEntryDto::File { path, .. }
-                | SnapshotEntryDto::Context { path, .. }
-                | SnapshotEntryDto::MissingExistence { path }
-                | SnapshotEntryDto::ImmutablePath { path }
-                | SnapshotEntryDto::ManagedPath { path, .. } => path.to_path_buf()?,
+                PersistentSnapshotEntry::File { path, .. }
+                | PersistentSnapshotEntry::Context { path, .. }
+                | PersistentSnapshotEntry::MissingExistence { path }
+                | PersistentSnapshotEntry::ImmutablePath { path }
+                | PersistentSnapshotEntry::ManagedPath { path, .. } => path,
             };
             if !seen_paths.insert(path.clone()) {
                 return None;
             }
-            entries.push(match entry {
-                SnapshotEntryDto::File {
+            snapshots.push(match entry {
+                PersistentSnapshotEntry::File {
                     path,
                     exists,
                     modified,
@@ -359,18 +399,15 @@ impl Snapshot {
                         return None;
                     }
                     SnapshotEntry::File(SnapshottedFile {
-                        path: path.to_path_buf()?,
+                        path,
                         snapshot: FileSnapshot {
                             exists,
-                            modified: match modified {
-                                Some(value) => Some(system_time_from_dto(value)?),
-                                None => None,
-                            },
+                            modified,
                             source_hash,
                         },
                     })
                 }
-                SnapshotEntryDto::Context {
+                PersistentSnapshotEntry::Context {
                     path,
                     exists,
                     timestamp_hash,
@@ -380,7 +417,7 @@ impl Snapshot {
                         return None;
                     }
                     SnapshotEntry::Context(SnapshottedContext {
-                        path: path.to_path_buf()?,
+                        path,
                         snapshot: ContextSnapshot {
                             exists,
                             timestamp_hash,
@@ -388,20 +425,24 @@ impl Snapshot {
                         },
                     })
                 }
-                SnapshotEntryDto::MissingExistence { path } => SnapshotEntry::MissingExistence {
-                    path: path.to_path_buf()?,
-                },
-                SnapshotEntryDto::ImmutablePath { path } => SnapshotEntry::ImmutablePath {
-                    path: path.to_path_buf()?,
-                },
-                SnapshotEntryDto::ManagedPath { path, root, state } => {
+                PersistentSnapshotEntry::MissingExistence { path } => {
+                    SnapshotEntry::MissingExistence { path }
+                }
+                PersistentSnapshotEntry::ImmutablePath { path } => {
+                    SnapshotEntry::ImmutablePath { path }
+                }
+                PersistentSnapshotEntry::ManagedPath { path, root, state } => {
                     SnapshotEntry::ManagedPath(ManagedPathSnapshot {
-                        path: path.to_path_buf()?,
-                        root: root.to_path_buf()?,
+                        path,
+                        root,
                         state: match state {
-                            ManagedItemStateDto::NodeModules => ManagedItemState::NodeModules,
-                            ManagedItemStateDto::GroupingFolder => ManagedItemState::GroupingFolder,
-                            ManagedItemStateDto::Package { name, version } => {
+                            PersistentManagedItemState::NodeModules => {
+                                ManagedItemState::NodeModules
+                            }
+                            PersistentManagedItemState::GroupingFolder => {
+                                ManagedItemState::GroupingFolder
+                            }
+                            PersistentManagedItemState::Package { name, version } => {
                                 ManagedItemState::Package { name, version }
                             }
                         },
@@ -409,7 +450,7 @@ impl Snapshot {
                 }
             });
         }
-        Some(Self { entries })
+        Some(Self { entries: snapshots })
     }
 
     async fn create_file(
@@ -519,6 +560,21 @@ impl Snapshot {
                 .all(|(entry, path)| entry.path() == path)
     }
 
+    pub(crate) fn has_valid_paths_sync(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> bool {
+        normalize_paths(paths).iter().all(|path| {
+            self.entries
+                .iter()
+                .find(|entry| entry.path() == path)
+                .is_some_and(|entry| entry.is_valid_sync(strategy, file_system_info))
+        })
+    }
+
+    #[cfg(test)]
     fn merge<'a>(snapshots: impl IntoIterator<Item = &'a Snapshot>) -> Self {
         let mut entries = BTreeMap::new();
         for snapshot in snapshots {
@@ -530,48 +586,6 @@ impl Snapshot {
         Self {
             entries: entries.into_values().collect(),
         }
-    }
-}
-
-fn system_time_to_dto(value: SystemTime) -> TimestampDto {
-    match value.duration_since(UNIX_EPOCH) {
-        Ok(duration) => TimestampDto {
-            seconds: i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
-            nanoseconds: duration.subsec_nanos(),
-        },
-        Err(error) => {
-            let duration = error.duration();
-            if duration.subsec_nanos() == 0 {
-                TimestampDto {
-                    seconds: -i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
-                    nanoseconds: 0,
-                }
-            } else {
-                TimestampDto {
-                    seconds: -i64::try_from(duration.as_secs()).unwrap_or(i64::MAX) - 1,
-                    nanoseconds: 1_000_000_000 - duration.subsec_nanos(),
-                }
-            }
-        }
-    }
-}
-
-fn system_time_from_dto(value: TimestampDto) -> Option<SystemTime> {
-    if value.nanoseconds >= 1_000_000_000 {
-        return None;
-    }
-    if value.seconds >= 0 {
-        UNIX_EPOCH.checked_add(std::time::Duration::new(
-            value.seconds as u64,
-            value.nanoseconds,
-        ))
-    } else if value.nanoseconds == 0 {
-        UNIX_EPOCH.checked_sub(std::time::Duration::new(value.seconds.unsigned_abs(), 0))
-    } else {
-        UNIX_EPOCH.checked_sub(std::time::Duration::new(
-            value.seconds.unsigned_abs() - 1,
-            1_000_000_000 - value.nanoseconds,
-        ))
     }
 }
 

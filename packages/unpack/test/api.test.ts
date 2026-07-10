@@ -542,7 +542,7 @@ test("accepts filesystem cache option shape", async () => {
   }
 });
 
-test("filesystem cache flushes after idle timeout", async () => {
+test("filesystem cache flushes after the initial-store timeout", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"
   });
@@ -553,7 +553,8 @@ test("filesystem cache flushes after idle timeout", async () => {
     cache: {
       type: "filesystem",
       cacheLocation,
-      idleTimeout: 30
+      idleTimeout: 60_000,
+      idleTimeoutForInitialStore: 30
     }
   });
 
@@ -564,6 +565,45 @@ test("filesystem cache flushes after idle timeout", async () => {
 
     await delay(100);
     assert.ok(await stat(join(cacheLocation, "index.pack")));
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("repeated run uses the ordinary idle cache timeout", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const entry = join(fixture, "src/index.js");
+  const cacheLocation = join(fixture, ".cache/unpack/ordinary-idle");
+  const indexPath = join(cacheLocation, "index.pack");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeout: 150,
+      idleTimeoutForInitialStore: 0,
+      idleTimeoutAfterLargeChanges: 10
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await delay(120);
+    const firstRevision = await readFile(indexPath);
+
+    await writeFile(entry, "export const value = 'after';", "utf8");
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(entry, changedTime, changedTime);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+
+    await delay(60);
+    assert.deepEqual(await readFile(indexPath), firstRevision);
+    await delay(180);
+    assert.notDeepEqual(await readFile(indexPath), firstRevision);
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
@@ -591,6 +631,63 @@ test("compiler close waits for pending filesystem cache flush", async () => {
 
     await closeCompiler(compiler);
     assert.ok(await stat(join(cacheLocation, "index.pack")));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("filesystem cache publication failures are warnings and do not fail close", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;",
+    ".cache/unpack/unwritable": "not a directory"
+  });
+  const captured = captureConsole();
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation: join(fixture, ".cache/unpack/unwritable"),
+      idleTimeout: 60_000
+    },
+    infrastructureLogging: { level: "warn" }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    assert.equal(result.err, null);
+
+    assert.equal(await closeCompilerResult(compiler), null);
+    assert.ok(captured.calls.warn.some((event) => event.startsWith("[unpack.Cache]")));
+  } finally {
+    captured.restore();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("filesystem cache publication failures do not fail watching close", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;",
+    ".cache/unpack/unwritable": "not a directory"
+  });
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation: join(fixture, ".cache/unpack/unwritable"),
+      idleTimeout: 60_000
+    }
+  });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+
+    await closeWatching(watching);
+    await closeCompiler(compiler);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -646,6 +743,37 @@ test("watch performs initial build and close keeps compiler reusable", async () 
   }
 });
 
+test("watch close settles pending filesystem cache work and keeps compiler reusable", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/watch-close");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeoutForInitialStore: 60_000
+    }
+  });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+    await assert.rejects(stat(join(cacheLocation, "index.pack")));
+
+    await closeWatching(watching);
+    assert.ok(await stat(join(cacheLocation, "index.pack")));
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("watch invalidate triggers rebuild", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 'before';"
@@ -668,6 +796,51 @@ test("watch invalidate triggers rebuild", async () => {
 
     assert.equal((await second).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("watch invalidation uses the post-large-change cache timeout", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 'before';"
+  });
+  const entry = join(fixture, "src/index.js");
+  const cacheLocation = join(fixture, ".cache/unpack/watch-large-change");
+  const indexPath = join(cacheLocation, "index.pack");
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation,
+      idleTimeout: 60_000,
+      idleTimeoutForInitialStore: 0,
+      idleTimeoutAfterLargeChanges: 150
+    }
+  });
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+    await delay(120);
+    const firstRevision = await readFile(indexPath);
+
+    const second = results.next();
+    await writeFile(entry, "export const value = 'after';", "utf8");
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(entry, changedTime, changedTime);
+    watching.invalidate();
+    assert.equal((await second).err, null);
+
+    await delay(60);
+    assert.deepEqual(await readFile(indexPath), firstRevision);
+    await delay(180);
+    assert.notDeepEqual(await readFile(indexPath), firstRevision);
     await closeWatching(watching);
     await closeCompiler(compiler);
   } finally {
@@ -980,6 +1153,52 @@ test("infrastructure logging level verbose reports compilation phases", async ()
       "[unpack.Compilation] asset creation started",
       "[unpack.Compilation] asset creation completed"
     ]);
+  } finally {
+    captured.restore();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("cache profile reports persistent activity through infrastructure logging only", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const captured = captureConsole();
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation: join(fixture, ".cache/unpack/profile"),
+      profile: true,
+      idleTimeout: 0
+    },
+    infrastructureLogging: { level: "log" }
+  });
+
+  try {
+    const result = await runExistingCompiler(compiler);
+    await closeCompiler(compiler);
+
+    assert.equal(result.err, null);
+    assert.ok(result.stats);
+    assert.equal("cache" in result.stats.toJson(), false);
+    assert.equal("logs" in result.stats.toJson(), false);
+    const profile = captured.calls.log.filter((message) =>
+      message.startsWith("[unpack.Cache.Profile]")
+    );
+    for (const activity of [
+      "restore",
+      "store",
+      "serialization",
+      "deserialization",
+      "garbage collection",
+      "merge",
+      "split",
+      "compaction"
+    ]) {
+      assert.ok(profile.some((message) => message.includes(activity)), activity);
+    }
   } finally {
     captured.restore();
     await rm(fixture, { recursive: true, force: true });

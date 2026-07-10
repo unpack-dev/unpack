@@ -1,42 +1,20 @@
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, fs, path::Path};
+    use std::{fs, path::Path};
 
     use crate::cache_hash::stable_hash;
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{
-        ModuleIdentity, SnapshotStrategy, build_cache::ResolveRecord, snapshot::FileSystemInfo,
-    };
 
-    #[tokio::test]
-    async fn resolve_records_round_trip_through_the_registered_private_codec()
+    #[test]
+    fn resolve_records_round_trip_through_the_registered_private_codec()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let source = temp.path().join("src/dep.js");
-        fs::create_dir_all(source.parent().expect("source should have a parent"))?;
-        fs::write(&source, "export const value = 1;")?;
-        let missing = temp.path().join("src/missing.js");
         let address = PackFileAddress::new("unpack/resolve", b"issuer:/project/src|request:./dep");
         let etag = PackFileETag::new(b"resolve-inputs-v1");
-        let actual_record = ResolveRecord::new(
-            ModuleIdentity::new(&source),
-            source.clone(),
-            BTreeSet::from([source]),
-            BTreeSet::from([temp.path().join("src")]),
-            BTreeSet::from([missing]),
-            &FileSystemInfo::default(),
-            SnapshotStrategy::timestamp_and_hash(),
-        )
-        .await?;
-        let codec = ResolveRecordCodec::current();
-        let record = codec.to_dto(&actual_record);
-        assert_eq!(
-            codec.from_dto(record.clone()).as_ref(),
-            Some(&actual_record)
-        );
-        let registry = CodecRegistry::new().with_resolve_record(codec);
+        let record = resolve_record("dep.js");
+        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
 
         PackFile::publish_resolve_records(
             temp.path(),
@@ -52,12 +30,11 @@ mod tests {
 
         let mut pack_file = PackFile::open(temp.path(), registry);
         assert_eq!(pack_file.entry_count(), 1);
-        let restored_dto = pack_file
-            .get_resolve_record(&address, Some(&etag))
-            .expect("Resolve Record DTO should restore");
         assert_eq!(
-            codec.from_dto((*restored_dto).clone()).as_ref(),
-            Some(&actual_record)
+            pack_file
+                .get_resolve_record(&address, Some(&etag))
+                .as_deref(),
+            Some(&record)
         );
 
         Ok(())
@@ -93,8 +70,12 @@ mod tests {
                 content_reads: 0,
                 content_bytes_read: 0,
                 decoded_records: 0,
+                retained_content_bytes: 0,
             }
         );
+
+        assert!(pack_file.touch(&first, Some(&etag), AccessStamp::from_millis(1_000)));
+        assert_eq!(pack_file.read_stats().content_reads, 0);
 
         assert!(
             pack_file
@@ -186,6 +167,160 @@ mod tests {
             pack_file.get_module_build_record(&address, None).as_deref(),
             Some(&record)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn asset_render_records_round_trip_through_the_registered_private_codec()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let address = PackFileAddress::new("unpack/asset-render", b"initial:main");
+        let etag = PackFileETag::new(b"exact-render-hash");
+        let record = AssetRenderRecordDto {
+            source: "console.log('cached render');\n".to_string(),
+            source_map: Some(
+                r#"{"version":3,"sources":["src/index.js"],"names":[],"mappings":"AAAA","sourcesContent":["console.log('cached render');\\n"]}"#
+                    .to_string(),
+            ),
+        };
+        let registry =
+            CodecRegistry::new().with_asset_render_record(AssetRenderRecordCodec::current());
+
+        PackFile::publish_items(
+            temp.path(),
+            &registry,
+            [(address.clone(), Some(etag.clone()), record.clone())],
+        )?;
+
+        assert_eq!(ASSET_RENDER_RECORD_TYPE_ID.as_bytes(), b"unpack.asset-r.1");
+        let mut pack_file = PackFile::open(temp.path(), registry);
+        assert_eq!(
+            pack_file
+                .get::<AssetRenderRecordDto>(&address, Some(&etag))
+                .as_deref(),
+            Some(&record)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn asset_render_codec_rejects_trailing_bytes_and_invalid_source_maps_on_restore()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let codec = AssetRenderRecordCodec::current();
+        let record = AssetRenderRecordDto {
+            source: "rendered".to_string(),
+            source_map: None,
+        };
+        let mut trailing = codec.encode(&record)?;
+        trailing.push(0xff);
+        assert!(codec.decode(&trailing).is_none());
+
+        assert!(
+            RenderedSource::try_from(AssetRenderRecordDto {
+                source: "rendered".to_string(),
+                source_map: Some("not source map json".to_string()),
+            })
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn asset_render_codec_accepts_sources_larger_than_the_generic_field_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let codec = AssetRenderRecordCodec::current();
+        let record = AssetRenderRecordDto {
+            source: "x".repeat(MAX_FIELD_BYTES + 1),
+            source_map: None,
+        };
+
+        let encoded = codec.encode(&record)?;
+        assert_eq!(codec.decode(&encoded), Some(record));
+        Ok(())
+    }
+
+    #[test]
+    fn code_generation_records_round_trip_through_the_registered_private_codec()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let address = PackFileAddress::new(
+            "unpack/code-generation",
+            b"module:/project/src/index.js|runtime:main",
+        );
+        let etag = PackFileETag::new(b"module-and-dependency-template-inputs");
+        let record = CodeGenerationRecordDto {
+            source: CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix: "(() => {\n".to_string(),
+                original_source: "export const value = before;".to_string(),
+                original_name: "./src/index.js".to_string(),
+                replacements: vec![CodeGenerationReplacementDto {
+                    start: 21,
+                    end: 27,
+                    content: "after".to_string(),
+                    name: None,
+                    enforce: ReplacementEnforceDto::Normal,
+                }],
+                suffix: "\n})".to_string(),
+            },
+        };
+        let registry =
+            CodecRegistry::new().with_code_generation_record(CodeGenerationRecordCodec::current());
+
+        PackFile::publish_items(
+            temp.path(),
+            &registry,
+            [(address.clone(), Some(etag.clone()), record.clone())],
+        )?;
+
+        assert_eq!(
+            CODE_GENERATION_RECORD_TYPE_ID.as_bytes(),
+            b"unpack.codegen.1"
+        );
+        let mut pack_file = PackFile::open(temp.path(), registry);
+        assert_eq!(
+            pack_file
+                .get::<CodeGenerationRecordDto>(&address, Some(&etag))
+                .as_deref(),
+            Some(&record)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn code_generation_codec_covers_raw_sources_and_rejects_invalid_recipes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let codec = CodeGenerationRecordCodec::current();
+        let raw = CodeGenerationRecordDto {
+            source: CodeGenerationSourceDto::Raw {
+                source: "throw new Error('failed module');".to_string(),
+            },
+        };
+        assert_eq!(codec.decode(&codec.encode(&raw)?), Some(raw));
+
+        let invalid_range = CodeGenerationRecordDto {
+            source: CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix: String::new(),
+                original_source: "short".to_string(),
+                original_name: "./short.js".to_string(),
+                replacements: vec![CodeGenerationReplacementDto {
+                    start: 0,
+                    end: 6,
+                    content: String::new(),
+                    name: None,
+                    enforce: ReplacementEnforceDto::Normal,
+                }],
+                suffix: String::new(),
+            },
+        };
+        assert!(codec.encode(&invalid_range).is_err());
+
+        let mut unknown_tag = codec.encode(&CodeGenerationRecordDto {
+            source: CodeGenerationSourceDto::Raw {
+                source: "valid".to_string(),
+            },
+        })?;
+        unknown_tag[0] = 0xff;
+        assert!(codec.decode(&unknown_tag).is_none());
         Ok(())
     }
 
@@ -367,6 +502,719 @@ mod tests {
     }
 
     #[test]
+    fn max_age_gc_expires_only_old_unused_entries_after_the_strict_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let first = PackFileAddress::new("unpack/resolve", b"first");
+        let recent = PackFileAddress::new("unpack/resolve", b"recent");
+        let restored = PackFileAddress::new("unpack/resolve", b"restored");
+        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let mut clock = ManualClock::at_millis(1_000);
+        let max_age = Duration::from_millis(100);
+
+        let mut initial = PackFileWriteBatch::new();
+        initial.insert(&registry, first.clone(), None, resolve_record("first.js"))?;
+        initial.insert(&registry, recent.clone(), None, resolve_record("recent.js"))?;
+        initial.insert(
+            &registry,
+            restored.clone(),
+            None,
+            resolve_record("restored.js"),
+        )?;
+        PackFile::publish_batch_with_retention(
+            temp.path(),
+            None,
+            PublicationBase::ReplaceAll,
+            initial,
+            PackFileRetention::new(clock.stamp(), max_age),
+        )?;
+        let initial_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode initial retained index");
+        let shared_content = initial_index.entries[&first].content.file.clone();
+
+        clock.advance_millis(50);
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        assert!(opened.touch(&recent, None, clock.stamp()));
+        let mut second = PackFileWriteBatch::new();
+        opened.copy_access_updates_to(&mut second);
+        PackFile::publish_batch_with_retention(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            second,
+            PackFileRetention::new(clock.stamp(), max_age),
+        )?;
+        let second_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode second retained index");
+        assert_eq!(second_index.entries[&first].last_used_revision, 1);
+        assert_eq!(second_index.entries[&first].unused_since_revision, Some(2));
+        assert_eq!(second_index.entries[&recent].last_used_revision, 2);
+        assert_eq!(second_index.entries[&recent].unused_since_revision, None);
+        assert_eq!(
+            second_index.entries[&recent].last_access,
+            AccessStamp::from_millis(1_050)
+        );
+        assert_eq!(
+            second_index.entries[&restored].unused_since_revision,
+            Some(2)
+        );
+
+        clock.advance_millis(50);
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        assert!(opened.touch(&restored, None, clock.stamp()));
+        let mut boundary = PackFileWriteBatch::new();
+        opened.copy_access_updates_to(&mut boundary);
+        PackFile::publish_batch_with_retention(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            boundary,
+            PackFileRetention::new(clock.stamp(), max_age),
+        )?;
+        let boundary_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode boundary index");
+        assert_eq!(
+            boundary_index.entries[&first].unused_since_revision,
+            Some(2)
+        );
+        assert_eq!(
+            boundary_index.entries[&recent].unused_since_revision,
+            Some(3)
+        );
+        assert_eq!(boundary_index.entries[&restored].last_used_revision, 3);
+        assert_eq!(
+            boundary_index.entries[&restored].unused_since_revision,
+            None
+        );
+        assert_eq!(
+            PackFile::open(temp.path(), registry.clone()).entry_count(),
+            3,
+            "maxAge is strict: equality must retain the entry"
+        );
+
+        clock.advance_millis(1);
+        let opened = PackFile::open(temp.path(), registry.clone());
+        PackFile::publish_batch_with_retention(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            PackFileWriteBatch::new(),
+            PackFileRetention::new(clock.stamp(), max_age),
+        )?;
+
+        let mut retained = PackFile::open(temp.path(), registry);
+        assert!(retained.get_resolve_record(&first, None).is_none());
+        assert!(retained.get_resolve_record(&recent, None).is_some());
+        assert!(retained.get_resolve_record(&restored, None).is_some());
+        let retained_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode retained index");
+        assert!(!retained_index.entries.contains_key(&first));
+        assert_eq!(
+            retained_index.entries[&recent].content,
+            initial_index.entries[&recent].content
+        );
+        assert_eq!(
+            retained_index.entries[&restored].content,
+            initial_index.entries[&restored].content
+        );
+        assert!(temp.path().join(shared_content).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_splits_oversized_content_without_changing_cache_item_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let addresses = (0..3)
+            .map(|index| PackFileAddress::new("unpack/dummy", format!("item-{index}").as_bytes()))
+            .collect::<Vec<_>>();
+        let mut batch = PackFileWriteBatch::new();
+        for (index, address) in addresses.iter().enumerate() {
+            batch.insert(
+                &registry,
+                address.clone(),
+                Some(PackFileETag::new(format!("etag-{index}").as_bytes())),
+                DummyItem(vec![u8::try_from(index)?; 96]),
+            )?;
+        }
+
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::ReplaceAll,
+            batch,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_000), DEFAULT_MAX_AGE),
+                PackFileCompression::None,
+            )
+            .with_maintenance(PackFileMaintenance::for_tests(1_024, 0, usize::MAX)),
+        )?;
+
+        let initial_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode oversized PackFile index");
+        assert_eq!(
+            initial_index
+                .entries
+                .values()
+                .map(|entry| entry.content.file.clone())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
+        let old_file = initial_index.entries[&addresses[0]].content.file.clone();
+
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        let mut access_batch = PackFileWriteBatch::new();
+        for (index, address) in addresses.iter().enumerate() {
+            assert!(opened.touch(
+                address,
+                Some(&PackFileETag::new(format!("etag-{index}").as_bytes())),
+                AccessStamp::from_millis(1_001)
+            ));
+        }
+        opened.copy_access_updates_to(&mut access_batch);
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            access_batch,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_001), DEFAULT_MAX_AGE),
+                PackFileCompression::None,
+            )
+            .with_maintenance(PackFileMaintenance::for_tests(256, 0, usize::MAX)),
+        )?;
+
+        let split_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode split PackFile index");
+        assert_eq!(
+            split_index
+                .entries
+                .values()
+                .map(|entry| entry.content.file.clone())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert!(!temp.path().join(old_file).exists());
+
+        let mut reopened = PackFile::open(temp.path(), registry);
+        for (index, address) in addresses.iter().enumerate() {
+            assert_eq!(
+                reopened
+                    .get::<DummyItem>(
+                        address,
+                        Some(&PackFileETag::new(format!("etag-{index}").as_bytes()))
+                    )
+                    .as_deref(),
+                Some(&DummyItem(vec![u8::try_from(index)?; 96]))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_separates_used_and_unused_frames_when_splitting_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let used = PackFileAddress::new("unpack/dummy", b"used");
+        let unused_first = PackFileAddress::new("unpack/dummy", b"unused-first");
+        let unused_second = PackFileAddress::new("unpack/dummy", b"unused-second");
+        let mut initial = PackFileWriteBatch::new();
+        for (address, byte) in [
+            (used.clone(), 1),
+            (unused_first.clone(), 2),
+            (unused_second.clone(), 3),
+        ] {
+            initial.insert(&registry, address, None, DummyItem(vec![byte; 96]))?;
+        }
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::ReplaceAll,
+            initial,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_000), DEFAULT_MAX_AGE),
+                PackFileCompression::None,
+            )
+            .with_maintenance(PackFileMaintenance::for_tests(1_024, 0, usize::MAX)),
+        )?;
+
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        assert!(opened.touch(&used, None, AccessStamp::from_millis(1_001)));
+        let mut accesses = PackFileWriteBatch::new();
+        opened.copy_access_updates_to(&mut accesses);
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            accesses,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_001), DEFAULT_MAX_AGE),
+                PackFileCompression::None,
+            )
+            .with_maintenance(PackFileMaintenance::for_tests(512, 0, usize::MAX)),
+        )?;
+
+        let split = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode used/unused split index");
+        assert_ne!(
+            split.entries[&used].content.file,
+            split.entries[&unused_first].content.file
+        );
+        assert_eq!(
+            split.entries[&unused_first].content.file,
+            split.entries[&unused_second].content.file
+        );
+        assert_eq!(split.entries[&used].unused_since_revision, None);
+        assert_eq!(split.entries[&unused_first].unused_since_revision, Some(2));
+
+        let mut reopened = PackFile::open(temp.path(), registry);
+        assert!(reopened.get::<DummyItem>(&used, None).is_some());
+        assert!(reopened.get::<DummyItem>(&unused_first, None).is_some());
+        assert!(reopened.get::<DummyItem>(&unused_second, None).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_merges_small_used_content_and_removes_superseded_packs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let first = PackFileAddress::new("unpack/dummy", b"first");
+        let second = PackFileAddress::new("unpack/dummy", b"second");
+        let disabled_maintenance = PackFileMaintenance::for_tests(1_024, 0, usize::MAX);
+
+        let mut first_batch = PackFileWriteBatch::new();
+        first_batch.insert(&registry, first.clone(), None, DummyItem(vec![1; 96]))?;
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::ReplaceAll,
+            first_batch,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_000), DEFAULT_MAX_AGE),
+                PackFileCompression::None,
+            )
+            .with_maintenance(disabled_maintenance),
+        )?;
+
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        assert!(opened.touch(&first, None, AccessStamp::from_millis(1_001)));
+        let mut second_batch = PackFileWriteBatch::new();
+        opened.copy_access_updates_to(&mut second_batch);
+        second_batch.insert(&registry, second.clone(), None, DummyItem(vec![2; 96]))?;
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            second_batch,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_001), DEFAULT_MAX_AGE),
+                PackFileCompression::None,
+            )
+            .with_maintenance(disabled_maintenance),
+        )?;
+
+        let before = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode pre-merge index");
+        let old_files = before
+            .entries
+            .values()
+            .map(|entry| entry.content.file.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(old_files.len(), 2);
+
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        assert!(opened.touch(&first, None, AccessStamp::from_millis(1_002)));
+        assert!(opened.touch(&second, None, AccessStamp::from_millis(1_002)));
+        let mut access_batch = PackFileWriteBatch::new();
+        opened.copy_access_updates_to(&mut access_batch);
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            access_batch,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_002), DEFAULT_MAX_AGE),
+                PackFileCompression::None,
+            )
+            .with_maintenance(PackFileMaintenance::for_tests(1_024, 512, usize::MAX)),
+        )?;
+
+        let after = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode merged index");
+        let merged_files = after
+            .entries
+            .values()
+            .map(|entry| entry.content.file.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(merged_files.len(), 1);
+        for old_file in old_files {
+            assert!(!temp.path().join(old_file).exists());
+        }
+        let mut reopened = PackFile::open(temp.path(), registry);
+        assert_eq!(
+            reopened.get::<DummyItem>(&first, None).as_deref(),
+            Some(&DummyItem(vec![1; 96]))
+        );
+        assert_eq!(
+            reopened.get::<DummyItem>(&second, None).as_deref(),
+            Some(&DummyItem(vec![2; 96]))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_compacts_dead_content_out_of_a_mixed_pack()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let live = PackFileAddress::new("unpack/dummy", b"live");
+        let dead = PackFileAddress::new("unpack/dummy", b"dead");
+        let disabled_maintenance = PackFileMaintenance::for_tests(1_024, 0, usize::MAX);
+        let mut initial = PackFileWriteBatch::new();
+        initial.insert(&registry, live.clone(), None, DummyItem(vec![1; 96]))?;
+        initial.insert(&registry, dead.clone(), None, DummyItem(vec![2; 96]))?;
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::ReplaceAll,
+            initial,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_000), Duration::from_millis(10)),
+                PackFileCompression::None,
+            )
+            .with_maintenance(disabled_maintenance),
+        )?;
+        let initial_index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode mixed content index");
+        let old_file = initial_index.entries[&live].content.file.clone();
+        assert_eq!(old_file, initial_index.entries[&dead].content.file);
+
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        assert!(opened.touch(&live, None, AccessStamp::from_millis(1_001)));
+        let mut second = PackFileWriteBatch::new();
+        opened.copy_access_updates_to(&mut second);
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            second,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_001), Duration::from_millis(10)),
+                PackFileCompression::None,
+            )
+            .with_maintenance(disabled_maintenance),
+        )?;
+
+        let mut opened = PackFile::open(temp.path(), registry.clone());
+        assert!(opened.touch(&live, None, AccessStamp::from_millis(1_020)));
+        let mut third = PackFileWriteBatch::new();
+        opened.copy_access_updates_to(&mut third);
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::PreserveEntries {
+                expected_revision: opened.revision(),
+            },
+            third,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_020), Duration::from_millis(10)),
+                PackFileCompression::None,
+            )
+            .with_maintenance(PackFileMaintenance::for_tests(1_024, 0, 1)),
+        )?;
+
+        let compacted = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode compacted index");
+        assert!(!compacted.entries.contains_key(&dead));
+        assert_ne!(compacted.entries[&live].content.file, old_file);
+        assert!(!temp.path().join(old_file).exists());
+        let mut reopened = PackFile::open(temp.path(), registry);
+        assert_eq!(
+            reopened.get::<DummyItem>(&live, None).as_deref(),
+            Some(&DummyItem(vec![1; 96]))
+        );
+        assert!(reopened.get::<DummyItem>(&dead, None).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn compression_round_trips_all_registered_cache_item_families()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for compression in [
+            PackFileCompression::None,
+            PackFileCompression::Gzip,
+            PackFileCompression::Brotli,
+        ] {
+            let temp = tempdir()?;
+            let resolve_address = PackFileAddress::new("unpack/resolve", b"request");
+            let module_address = PackFileAddress::new("unpack/module-build", b"module");
+            let resolve = resolve_record("compressed-resolve.js");
+            let module = module_build_record();
+            let registry = CodecRegistry::new()
+                .with_resolve_record(ResolveRecordCodec::current())
+                .with_module_build_record(ModuleBuildRecordCodec::current());
+            let mut batch = PackFileWriteBatch::new();
+            batch.insert(&registry, resolve_address.clone(), None, resolve.clone())?;
+            batch.insert(&registry, module_address.clone(), None, module.clone())?;
+            PackFile::publish_batch_with_options(
+                temp.path(),
+                None,
+                PublicationBase::ReplaceAll,
+                batch,
+                PackFilePublicationOptions::new(
+                    PackFileRetention::new(AccessStamp::from_millis(1_000), DEFAULT_MAX_AGE),
+                    compression,
+                ),
+            )?;
+
+            let index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+                .expect("decode compressed PackFile index");
+            assert!(
+                index
+                    .entries
+                    .values()
+                    .all(|entry| entry.content.compression == compression)
+            );
+            let suffix = match compression {
+                PackFileCompression::None => ".bin",
+                PackFileCompression::Gzip => ".bin.gz",
+                PackFileCompression::Brotli => ".bin.br",
+            };
+            assert!(
+                index.entries.values().all(|entry| entry
+                    .content
+                    .file
+                    .to_string_lossy()
+                    .ends_with(suffix))
+            );
+
+            let mut reopened = PackFile::open(temp.path(), registry);
+            assert_eq!(
+                reopened
+                    .get_resolve_record(&resolve_address, None)
+                    .as_deref(),
+                Some(&resolve)
+            );
+            assert_eq!(
+                reopened
+                    .get_module_build_record(&module_address, None)
+                    .as_deref(),
+                Some(&module)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn allow_collecting_memory_releases_compressed_deserialization_buffers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let first = PackFileAddress::new("unpack/dummy", b"first");
+        let second = PackFileAddress::new("unpack/dummy", b"second");
+        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let mut batch = PackFileWriteBatch::new();
+        batch.insert(&registry, first.clone(), None, DummyItem(vec![1; 96]))?;
+        batch.insert(&registry, second.clone(), None, DummyItem(vec![2; 96]))?;
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::ReplaceAll,
+            batch,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_000), DEFAULT_MAX_AGE),
+                PackFileCompression::Gzip,
+            ),
+        )?;
+
+        let mut retained = PackFile::open_with_options(
+            temp.path(),
+            registry.clone(),
+            PackFileOpenOptions::new(false),
+        );
+        assert_eq!(retained.read_stats().content_reads, 0);
+        assert_eq!(retained.read_stats().retained_content_bytes, 0);
+        assert!(retained.get::<DummyItem>(&first, None).is_some());
+        let retained_bytes = retained.read_stats().retained_content_bytes;
+        assert!(retained_bytes > 96);
+        assert!(retained.get::<DummyItem>(&second, None).is_some());
+        assert_eq!(retained.read_stats().retained_content_bytes, retained_bytes);
+
+        let mut collecting =
+            PackFile::open_with_options(temp.path(), registry, PackFileOpenOptions::new(true));
+        assert_eq!(collecting.read_stats().content_reads, 0);
+        assert!(collecting.get::<DummyItem>(&first, None).is_some());
+        assert_eq!(collecting.read_stats().retained_content_bytes, 0);
+        assert!(collecting.get::<DummyItem>(&second, None).is_some());
+        assert_eq!(collecting.read_stats().retained_content_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_faults_preserve_compressed_and_uncompressed_committed_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for compression in [
+            PackFileCompression::None,
+            PackFileCompression::Gzip,
+            PackFileCompression::Brotli,
+        ] {
+            let temp = tempdir()?;
+            let live = PackFileAddress::new("unpack/dummy", b"live");
+            let dead = PackFileAddress::new("unpack/dummy", b"dead");
+            let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+            let no_maintenance = PackFileMaintenance::for_tests(1_024, 0, usize::MAX);
+            let mut initial = PackFileWriteBatch::new();
+            initial.insert(&registry, live.clone(), None, DummyItem(vec![1; 96]))?;
+            initial.insert(&registry, dead.clone(), None, DummyItem(vec![2; 96]))?;
+            PackFile::publish_batch_with_options(
+                temp.path(),
+                None,
+                PublicationBase::ReplaceAll,
+                initial,
+                PackFilePublicationOptions::new(
+                    PackFileRetention::new(
+                        AccessStamp::from_millis(1_000),
+                        Duration::from_millis(10),
+                    ),
+                    compression,
+                )
+                .with_maintenance(no_maintenance),
+            )?;
+
+            let mut opened = PackFile::open(temp.path(), registry.clone());
+            assert!(opened.touch(&live, None, AccessStamp::from_millis(1_001)));
+            let mut second = PackFileWriteBatch::new();
+            opened.copy_access_updates_to(&mut second);
+            PackFile::publish_batch_with_options(
+                temp.path(),
+                None,
+                PublicationBase::PreserveEntries {
+                    expected_revision: opened.revision(),
+                },
+                second,
+                PackFilePublicationOptions::new(
+                    PackFileRetention::new(
+                        AccessStamp::from_millis(1_001),
+                        Duration::from_millis(10),
+                    ),
+                    compression,
+                )
+                .with_maintenance(no_maintenance),
+            )?;
+            let committed_index = fs::read(PackFile::index_path(temp.path()))?;
+            let committed = decode_index(&committed_index).expect("decode committed mixed pack");
+            let old_file = committed.entries[&live].content.file.clone();
+
+            for fault in [
+                PublishFault::AfterContentCommit,
+                PublishFault::BeforeIndexReplace,
+            ] {
+                let mut opened = PackFile::open(temp.path(), registry.clone());
+                assert!(opened.touch(&live, None, AccessStamp::from_millis(1_020)));
+                let mut batch = PackFileWriteBatch::new();
+                opened.copy_access_updates_to(&mut batch);
+                let result = publish_batch(
+                    temp.path(),
+                    None,
+                    PublicationBase::PreserveEntries {
+                        expected_revision: opened.revision(),
+                    },
+                    batch,
+                    PackFilePublicationOptions::new(
+                        PackFileRetention::new(
+                            AccessStamp::from_millis(1_020),
+                            Duration::from_millis(10),
+                        ),
+                        compression,
+                    )
+                    .with_maintenance(PackFileMaintenance::for_tests(1_024, 0, 1)),
+                    fault,
+                );
+                assert!(result.is_err());
+                assert_eq!(
+                    fs::read(PackFile::index_path(temp.path()))?,
+                    committed_index
+                );
+                assert!(temp.path().join(&old_file).exists());
+                let mut reopened = PackFile::open(temp.path(), registry.clone());
+                assert_eq!(
+                    reopened.get::<DummyItem>(&live, None).as_deref(),
+                    Some(&DummyItem(vec![1; 96]))
+                );
+                assert_eq!(
+                    reopened.get::<DummyItem>(&dead, None).as_deref(),
+                    Some(&DummyItem(vec![2; 96]))
+                );
+            }
+
+            let mut opened = PackFile::open(temp.path(), registry.clone());
+            assert!(opened.touch(&live, None, AccessStamp::from_millis(1_020)));
+            let mut final_batch = PackFileWriteBatch::new();
+            opened.copy_access_updates_to(&mut final_batch);
+            PackFile::publish_batch_with_options(
+                temp.path(),
+                None,
+                PublicationBase::PreserveEntries {
+                    expected_revision: opened.revision(),
+                },
+                final_batch,
+                PackFilePublicationOptions::new(
+                    PackFileRetention::new(
+                        AccessStamp::from_millis(1_020),
+                        Duration::from_millis(10),
+                    ),
+                    compression,
+                )
+                .with_maintenance(PackFileMaintenance::for_tests(1_024, 0, 1)),
+            )?;
+            assert!(!temp.path().join(old_file).exists());
+            let mut reopened = PackFile::open(temp.path(), registry);
+            assert!(reopened.get::<DummyItem>(&live, None).is_some());
+            assert!(reopened.get::<DummyItem>(&dead, None).is_none());
+        }
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ManualClock {
+        now_millis: u64,
+    }
+
+    impl ManualClock {
+        fn at_millis(now_millis: u64) -> Self {
+            Self { now_millis }
+        }
+
+        fn advance_millis(&mut self, millis: u64) {
+            self.now_millis += millis;
+        }
+
+        fn stamp(self) -> AccessStamp {
+            AccessStamp::from_millis(self.now_millis)
+        }
+    }
+
+    #[test]
     fn production_records_convert_to_and_from_their_persistent_dtos()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut resolve_dto = resolve_record("conversion.js");
@@ -385,6 +1233,27 @@ mod tests {
         let module_dto = module_build_record();
         let module_record = ModuleBuildRecord::try_from(module_dto.clone())?;
         assert_eq!(ModuleBuildRecordDto::try_from(&module_record)?, module_dto);
+
+        let code_generation_record = CodeGenerationResult::from_record_source(
+            CodeGenerationSource::OriginalWithReplacements {
+                prefix: "prefix".to_string(),
+                original_source: "before".to_string(),
+                original_name: "./fixture.js".to_string(),
+                replacements: vec![CodeGenerationReplacement {
+                    start: 0,
+                    end: 6,
+                    content: "after".to_string(),
+                    name: None,
+                    enforce: ReplacementEnforce::Normal,
+                }],
+                suffix: "suffix".to_string(),
+            },
+        );
+        let code_generation_dto = CodeGenerationRecordDto::from(&code_generation_record);
+        assert_eq!(
+            CodeGenerationResult::try_from(code_generation_dto)?,
+            code_generation_record
+        );
         Ok(())
     }
 
@@ -418,6 +1287,18 @@ mod tests {
             .entry_count(),
             0
         );
+
+        let (temp, address, _, registry) = published_record("invalid-history.js")?;
+        let index_path = temp.path().join(INDEX_FILE);
+        let mut index = decode_index(&fs::read(&index_path)?).expect("decode valid history index");
+        let invalid_revision = index.revision + 1;
+        index
+            .entries
+            .get_mut(&address)
+            .expect("history entry should exist")
+            .last_used_revision = invalid_revision;
+        fs::write(&index_path, encode_index(&index)?)?;
+        assert_eq!(PackFile::open(temp.path(), registry).entry_count(), 0);
 
         Ok(())
     }
@@ -564,7 +1445,7 @@ mod tests {
         let path = PathBytes(vec![b'/', b'p', b'k', b'g', 0xff]);
         assert_eq!(
             path.to_path_buf()
-                .expect("Unix path bytes should round-trip")
+                .expect("Linux path bytes should be recoverable")
                 .as_os_str()
                 .as_bytes(),
             path.0
@@ -847,6 +1728,9 @@ mod tests {
     }
 }
 // Private PackFile storage primitives.
+//
+// This module is intentionally not selected by the production cache options yet. Its module
+// boundary exists so the storage contract can be exercised before the backend cutover.
 
 use std::{
     any::Any,
@@ -855,7 +1739,12 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+use rspack_sources::ReplacementEnforce;
+use brotli::{CompressorWriter, Decompressor};
+use flate2::{Compression as GzipLevel, read::GzDecoder, write::GzEncoder};
 
 use crate::{
     AsyncDependenciesBlock, ConstDependency, Dependency, EntryDependency,
@@ -865,14 +1754,16 @@ use crate::{
     ModuleDependency, ModuleIdentity, ModuleType, NullDependency, SourceRange,
     build_cache::{ModuleBuildRecord, ResolveRecord},
     cache_hash::stable_hash,
+    code_generation_record::{
+        CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
+    },
     parser::ParsedModule,
-    snapshot::Snapshot,
+    rendered_source::RenderedSource,
+    snapshot::{PersistentManagedItemState, PersistentSnapshotEntry, Snapshot},
 };
 
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-#[cfg(windows)]
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 const INDEX_FILE: &str = "index.pack";
 const CONTENT_DIRECTORY: &str = "content";
@@ -880,14 +1771,34 @@ const INDEX_MAGIC: &[u8] = b"UNPACK-PACKFILE-INDEX\0";
 const CONTENT_MAGIC: &[u8] = b"UNPACK-PACKFILE-CONTENT\0";
 const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONTENT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_ENCODED_CONTENT_BYTES: usize = 40 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FIELD_BYTES: usize = 1024 * 1024;
 const MAX_COLLECTION_ENTRIES: usize = 100_000;
+pub(crate) const DEFAULT_MAX_AGE: Duration = Duration::from_secs(60 * 24 * 60 * 60);
+// Unpack's records are already compact binary frames. Four MiB keeps a maintenance read bounded
+// while amortizing one fsync across many typical Resolve and Module Build records.
+const TARGET_CONTENT_PACK_BYTES: usize = 4 * 1024 * 1024;
+// Small packs are worth merging when they occupy less than one sixteenth of the target pack.
+const SMALL_CONTENT_PACK_BYTES: usize = 256 * 1024;
+// Rewriting a mixed pack only pays for itself after at least 128 KiB can be reclaimed.
+const MIN_COMPACTABLE_WASTE_BYTES: usize = 128 * 1024;
+const MIN_COMPACTABLE_WASTE_PERCENT: u64 = 25;
+const BROTLI_BUFFER_BYTES: usize = 16 * 1024;
+const BROTLI_QUALITY: u32 = 5;
+const BROTLI_WINDOW_BITS: u32 = 22;
+const GZIP_LEVEL: u32 = 6;
 const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
 const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c001");
+const CODE_GENERATION_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.cgen.c001");
+const ASSET_RENDER_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.astr.c001");
 pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.resolve.1");
 pub(crate) const MODULE_BUILD_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.moduleb.1");
+pub(crate) const CODE_GENERATION_RECORD_TYPE_ID: StableTypeId =
+    StableTypeId::new(*b"unpack.codegen.1");
+pub(crate) const ASSET_RENDER_RECORD_TYPE_ID: StableTypeId =
+    StableTypeId::new(*b"unpack.asset-r.1");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct StableTypeId([u8; 16]);
@@ -908,6 +1819,124 @@ pub(crate) struct StableCodecId([u8; 16]);
 impl StableCodecId {
     pub(crate) const fn new(bytes: [u8; 16]) -> Self {
         Self(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct AccessStamp {
+    unix_millis: u64,
+}
+
+impl AccessStamp {
+    pub(crate) const fn from_millis(unix_millis: u64) -> Self {
+        Self { unix_millis }
+    }
+
+    pub(crate) fn now() -> Self {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        Self::from_millis(u64::try_from(millis).unwrap_or(u64::MAX))
+    }
+
+    fn elapsed_since(self, earlier: Self) -> Option<Duration> {
+        self.unix_millis
+            .checked_sub(earlier.unix_millis)
+            .map(Duration::from_millis)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PackFileRetention {
+    now: AccessStamp,
+    max_age: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PackFileCompression {
+    None,
+    Gzip,
+    Brotli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PackFileMaintenance {
+    target_content_bytes: usize,
+    small_content_bytes: usize,
+    minimum_compactable_waste_bytes: usize,
+}
+
+impl PackFileMaintenance {
+    const fn production() -> Self {
+        Self {
+            target_content_bytes: TARGET_CONTENT_PACK_BYTES,
+            small_content_bytes: SMALL_CONTENT_PACK_BYTES,
+            minimum_compactable_waste_bytes: MIN_COMPACTABLE_WASTE_BYTES,
+        }
+    }
+
+    #[cfg(test)]
+    const fn for_tests(
+        target_content_bytes: usize,
+        small_content_bytes: usize,
+        minimum_compactable_waste_bytes: usize,
+    ) -> Self {
+        Self {
+            target_content_bytes,
+            small_content_bytes,
+            minimum_compactable_waste_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PackFilePublicationOptions {
+    retention: PackFileRetention,
+    compression: PackFileCompression,
+    maintenance: PackFileMaintenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PackFileOpenOptions {
+    allow_collecting_memory: bool,
+}
+
+impl PackFileOpenOptions {
+    pub(crate) const fn new(allow_collecting_memory: bool) -> Self {
+        Self {
+            allow_collecting_memory,
+        }
+    }
+}
+
+impl PackFilePublicationOptions {
+    pub(crate) const fn new(
+        retention: PackFileRetention,
+        compression: PackFileCompression,
+    ) -> Self {
+        Self {
+            retention,
+            compression,
+            maintenance: PackFileMaintenance::production(),
+        }
+    }
+
+    #[cfg(test)]
+    const fn with_maintenance(mut self, maintenance: PackFileMaintenance) -> Self {
+        self.maintenance = maintenance;
+        self
+    }
+}
+
+impl PackFileRetention {
+    pub(crate) const fn new(now: AccessStamp, max_age: Duration) -> Self {
+        Self { now, max_age }
+    }
+
+    #[cfg(test)]
+    fn system_default() -> Self {
+        Self::new(AccessStamp::now(), DEFAULT_MAX_AGE)
     }
 }
 
@@ -944,39 +1973,17 @@ impl PathBytes {
         Self(path.as_os_str().as_bytes().to_vec())
     }
 
+    #[cfg(not(unix))]
+    pub(crate) fn from_path(path: &Path) -> Self {
+        Self(path.to_string_lossy().as_bytes().to_vec())
+    }
+
     #[cfg(unix)]
     pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
         Some(PathBuf::from(std::ffi::OsString::from_vec(self.0.clone())))
     }
 
-    #[cfg(windows)]
-    pub(crate) fn from_path(path: &Path) -> Self {
-        Self(
-            path.as_os_str()
-                .encode_wide()
-                .flat_map(u16::to_le_bytes)
-                .collect(),
-        )
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
-        let chunks = self.0.chunks_exact(2);
-        if !chunks.remainder().is_empty() {
-            return None;
-        }
-        let wide = chunks
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect::<Vec<_>>();
-        Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    pub(crate) fn from_path(path: &Path) -> Self {
-        Self(path.to_string_lossy().as_bytes().to_vec())
-    }
-
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(unix))]
     pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
         String::from_utf8(self.0.clone()).ok().map(PathBuf::from)
     }
@@ -1058,6 +2065,47 @@ pub(crate) struct ModuleBuildRecordDto {
     pub(crate) source: String,
     pub(crate) source_hash: u64,
     pub(crate) snapshot: SnapshotDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AssetRenderRecordDto {
+    pub(crate) source: String,
+    pub(crate) source_map: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodeGenerationRecordDto {
+    pub(crate) source: CodeGenerationSourceDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CodeGenerationSourceDto {
+    Raw {
+        source: String,
+    },
+    OriginalWithReplacements {
+        prefix: String,
+        original_source: String,
+        original_name: String,
+        replacements: Vec<CodeGenerationReplacementDto>,
+        suffix: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodeGenerationReplacementDto {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    pub(crate) content: String,
+    pub(crate) name: Option<String>,
+    pub(crate) enforce: ReplacementEnforceDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplacementEnforceDto {
+    Pre,
+    Normal,
+    Post,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1153,9 +2201,17 @@ struct PendingPackFileItem {
     payload: Vec<u8>,
 }
 
+struct StagedContentItem {
+    address: PackFileAddress,
+    pending: Option<PendingPackFileItem>,
+    frame: Vec<u8>,
+    used: bool,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct PackFileWriteBatch {
     items: BTreeMap<PackFileAddress, PendingPackFileItem>,
+    accesses: BTreeMap<PackFileAddress, AccessStamp>,
 }
 
 impl PackFileWriteBatch {
@@ -1181,6 +2237,13 @@ impl PackFileWriteBatch {
             },
         );
         Ok(())
+    }
+
+    fn record_access(&mut self, address: PackFileAddress, stamp: AccessStamp) {
+        self.accesses
+            .entry(address)
+            .and_modify(|current| *current = (*current).max(stamp))
+            .or_insert(stamp);
     }
 }
 
@@ -1220,7 +2283,64 @@ impl TryFrom<&Snapshot> for SnapshotDto {
     type Error = io::Error;
 
     fn try_from(snapshot: &Snapshot) -> io::Result<Self> {
-        Ok(snapshot.to_pack_file_dto())
+        let entries = snapshot
+            .persistent_entries()
+            .into_iter()
+            .map(|entry| {
+                Ok(match entry {
+                    PersistentSnapshotEntry::File {
+                        path,
+                        exists,
+                        modified,
+                        source_hash,
+                    } => SnapshotEntryDto::File {
+                        path: PathBytes::from_path(&path),
+                        exists,
+                        modified: modified.map(timestamp_from_system_time).transpose()?,
+                        source_hash,
+                    },
+                    PersistentSnapshotEntry::Context {
+                        path,
+                        exists,
+                        timestamp_hash,
+                        content_hash,
+                    } => SnapshotEntryDto::Context {
+                        path: PathBytes::from_path(&path),
+                        exists,
+                        timestamp_hash,
+                        content_hash,
+                    },
+                    PersistentSnapshotEntry::MissingExistence { path } => {
+                        SnapshotEntryDto::MissingExistence {
+                            path: PathBytes::from_path(&path),
+                        }
+                    }
+                    PersistentSnapshotEntry::ImmutablePath { path } => {
+                        SnapshotEntryDto::ImmutablePath {
+                            path: PathBytes::from_path(&path),
+                        }
+                    }
+                    PersistentSnapshotEntry::ManagedPath { path, root, state } => {
+                        SnapshotEntryDto::ManagedPath {
+                            path: PathBytes::from_path(&path),
+                            root: PathBytes::from_path(&root),
+                            state: match state {
+                                PersistentManagedItemState::NodeModules => {
+                                    ManagedItemStateDto::NodeModules
+                                }
+                                PersistentManagedItemState::GroupingFolder => {
+                                    ManagedItemStateDto::GroupingFolder
+                                }
+                                PersistentManagedItemState::Package { name, version } => {
+                                    ManagedItemStateDto::Package { name, version }
+                                }
+                            },
+                        }
+                    }
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(Self { entries })
     }
 }
 
@@ -1228,7 +2348,64 @@ impl TryFrom<SnapshotDto> for Snapshot {
     type Error = io::Error;
 
     fn try_from(snapshot: SnapshotDto) -> io::Result<Self> {
-        Snapshot::from_pack_file_dto(snapshot).ok_or_else(|| {
+        let entries = snapshot
+            .entries
+            .into_iter()
+            .map(|entry| {
+                Ok(match entry {
+                    SnapshotEntryDto::File {
+                        path,
+                        exists,
+                        modified,
+                        source_hash,
+                    } => PersistentSnapshotEntry::File {
+                        path: path_from_bytes(path)?,
+                        exists,
+                        modified: modified.map(system_time_from_timestamp).transpose()?,
+                        source_hash,
+                    },
+                    SnapshotEntryDto::Context {
+                        path,
+                        exists,
+                        timestamp_hash,
+                        content_hash,
+                    } => PersistentSnapshotEntry::Context {
+                        path: path_from_bytes(path)?,
+                        exists,
+                        timestamp_hash,
+                        content_hash,
+                    },
+                    SnapshotEntryDto::MissingExistence { path } => {
+                        PersistentSnapshotEntry::MissingExistence {
+                            path: path_from_bytes(path)?,
+                        }
+                    }
+                    SnapshotEntryDto::ImmutablePath { path } => {
+                        PersistentSnapshotEntry::ImmutablePath {
+                            path: path_from_bytes(path)?,
+                        }
+                    }
+                    SnapshotEntryDto::ManagedPath { path, root, state } => {
+                        PersistentSnapshotEntry::ManagedPath {
+                            path: path_from_bytes(path)?,
+                            root: path_from_bytes(root)?,
+                            state: match state {
+                                ManagedItemStateDto::NodeModules => {
+                                    PersistentManagedItemState::NodeModules
+                                }
+                                ManagedItemStateDto::GroupingFolder => {
+                                    PersistentManagedItemState::GroupingFolder
+                                }
+                                ManagedItemStateDto::Package { name, version } => {
+                                    PersistentManagedItemState::Package { name, version }
+                                }
+                            },
+                        }
+                    }
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        Snapshot::from_persistent_entries(entries).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "PackFile Snapshot contains inconsistent or duplicate entries",
@@ -1314,6 +2491,101 @@ impl TryFrom<ModuleBuildRecordDto> for ModuleBuildRecord {
     }
 }
 
+impl From<&CodeGenerationResult> for CodeGenerationRecordDto {
+    fn from(record: &CodeGenerationResult) -> Self {
+        let source = match record.record_source() {
+            CodeGenerationSource::Raw { source } => CodeGenerationSourceDto::Raw {
+                source: source.clone(),
+            },
+            CodeGenerationSource::OriginalWithReplacements {
+                prefix,
+                original_source,
+                original_name,
+                replacements,
+                suffix,
+            } => CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix: prefix.clone(),
+                original_source: original_source.clone(),
+                original_name: original_name.clone(),
+                replacements: replacements
+                    .iter()
+                    .map(|replacement| CodeGenerationReplacementDto {
+                        start: replacement.start,
+                        end: replacement.end,
+                        content: replacement.content.clone(),
+                        name: replacement.name.clone(),
+                        enforce: match replacement.enforce {
+                            ReplacementEnforce::Pre => ReplacementEnforceDto::Pre,
+                            ReplacementEnforce::Normal => ReplacementEnforceDto::Normal,
+                            ReplacementEnforce::Post => ReplacementEnforceDto::Post,
+                        },
+                    })
+                    .collect(),
+                suffix: suffix.clone(),
+            },
+        };
+        Self { source }
+    }
+}
+
+impl TryFrom<CodeGenerationRecordDto> for CodeGenerationResult {
+    type Error = io::Error;
+
+    fn try_from(record: CodeGenerationRecordDto) -> io::Result<Self> {
+        validate_code_generation_record(&record)?;
+        let source = match record.source {
+            CodeGenerationSourceDto::Raw { source } => CodeGenerationSource::Raw { source },
+            CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix,
+                original_source,
+                original_name,
+                replacements,
+                suffix,
+            } => CodeGenerationSource::OriginalWithReplacements {
+                prefix,
+                original_source,
+                original_name,
+                replacements: replacements
+                    .into_iter()
+                    .map(|replacement| CodeGenerationReplacement {
+                        start: replacement.start,
+                        end: replacement.end,
+                        content: replacement.content,
+                        name: replacement.name,
+                        enforce: match replacement.enforce {
+                            ReplacementEnforceDto::Pre => ReplacementEnforce::Pre,
+                            ReplacementEnforceDto::Normal => ReplacementEnforce::Normal,
+                            ReplacementEnforceDto::Post => ReplacementEnforce::Post,
+                        },
+                    })
+                    .collect(),
+                suffix,
+            },
+        };
+        Ok(CodeGenerationResult::from_record_source(source))
+    }
+}
+
+impl From<&RenderedSource> for AssetRenderRecordDto {
+    fn from(record: &RenderedSource) -> Self {
+        let (source, source_map) = record.persistent_parts();
+        Self { source, source_map }
+    }
+}
+
+impl TryFrom<AssetRenderRecordDto> for RenderedSource {
+    type Error = io::Error;
+
+    fn try_from(record: AssetRenderRecordDto) -> io::Result<Self> {
+        RenderedSource::from_persistent_parts(record.source, record.source_map).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Asset Render Record contains an invalid source map",
+            )
+        })
+    }
+}
+
 fn validate_module_build_record(record: &ModuleBuildRecordDto) -> io::Result<()> {
     if record.source_hash != stable_hash(&record.source) {
         return Err(io::Error::new(
@@ -1344,6 +2616,98 @@ fn paths_from_bytes(paths: Vec<PathBytes>) -> io::Result<BTreeSet<PathBuf>> {
         .into_iter()
         .map(path_from_bytes)
         .collect::<io::Result<BTreeSet<_>>>()
+}
+
+fn timestamp_from_system_time(time: SystemTime) -> io::Result<TimestampDto> {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => Ok(TimestampDto {
+            seconds: i64::try_from(duration.as_secs()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Snapshot timestamp is too large",
+                )
+            })?,
+            nanoseconds: duration.subsec_nanos(),
+        }),
+        Err(error) => {
+            let duration = error.duration();
+            let seconds = i64::try_from(duration.as_secs()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Snapshot timestamp is too small",
+                )
+            })?;
+            if duration.subsec_nanos() == 0 {
+                Ok(TimestampDto {
+                    seconds: seconds.checked_neg().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Snapshot timestamp is too small",
+                        )
+                    })?,
+                    nanoseconds: 0,
+                })
+            } else {
+                Ok(TimestampDto {
+                    seconds: seconds
+                        .checked_neg()
+                        .and_then(|seconds| seconds.checked_sub(1))
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Snapshot timestamp is too small",
+                            )
+                        })?,
+                    nanoseconds: 1_000_000_000 - duration.subsec_nanos(),
+                })
+            }
+        }
+    }
+}
+
+fn system_time_from_timestamp(timestamp: TimestampDto) -> io::Result<SystemTime> {
+    if timestamp.nanoseconds >= 1_000_000_000 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Snapshot timestamp nanoseconds are out of range",
+        ));
+    }
+    if timestamp.seconds >= 0 {
+        return UNIX_EPOCH
+            .checked_add(Duration::new(
+                timestamp.seconds.unsigned_abs(),
+                timestamp.nanoseconds,
+            ))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Snapshot timestamp is too large",
+                )
+            });
+    }
+
+    let (seconds, nanoseconds) = if timestamp.nanoseconds == 0 {
+        (timestamp.seconds.unsigned_abs(), 0)
+    } else {
+        (
+            timestamp
+                .seconds
+                .unsigned_abs()
+                .checked_sub(1)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Snapshot timestamp is invalid")
+                })?,
+            1_000_000_000 - timestamp.nanoseconds,
+        )
+    };
+    UNIX_EPOCH
+        .checked_sub(Duration::new(seconds, nanoseconds))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Snapshot timestamp is too small",
+            )
+        })
 }
 
 impl TryFrom<&ParsedModule> for ParsedModuleDto {
@@ -1591,6 +2955,14 @@ impl PackFileItem for ModuleBuildRecordDto {
     const TYPE_ID: StableTypeId = MODULE_BUILD_RECORD_TYPE_ID;
 }
 
+impl PackFileItem for CodeGenerationRecordDto {
+    const TYPE_ID: StableTypeId = CODE_GENERATION_RECORD_TYPE_ID;
+}
+
+impl PackFileItem for AssetRenderRecordDto {
+    const TYPE_ID: StableTypeId = ASSET_RENDER_RECORD_TYPE_ID;
+}
+
 pub(crate) trait ItemCodec<T: PackFileItem>: fmt::Debug + Send + Sync + 'static {
     fn codec_id(&self) -> StableCodecId;
     fn encode(&self, value: &T) -> io::Result<Vec<u8>>;
@@ -1657,6 +3029,16 @@ impl CodecRegistry {
 
     pub(crate) fn with_module_build_record(mut self, codec: ModuleBuildRecordCodec) -> Self {
         self.register::<ModuleBuildRecordDto, _>(codec);
+        self
+    }
+
+    pub(crate) fn with_code_generation_record(mut self, codec: CodeGenerationRecordCodec) -> Self {
+        self.register::<CodeGenerationRecordDto, _>(codec);
+        self
+    }
+
+    pub(crate) fn with_asset_render_record(mut self, codec: AssetRenderRecordCodec) -> Self {
+        self.register::<AssetRenderRecordDto, _>(codec);
         self
     }
 
@@ -1731,19 +3113,6 @@ impl ResolveRecordCodec {
     }
 
     #[cfg(test)]
-    pub(crate) fn to_dto(self, record: &crate::build_cache::ResolveRecord) -> ResolveRecordDto {
-        record.to_pack_file_dto()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_dto(
-        self,
-        dto: ResolveRecordDto,
-    ) -> Option<crate::build_cache::ResolveRecord> {
-        crate::build_cache::ResolveRecord::from_pack_file_dto(dto)
-    }
-
-    #[cfg(test)]
     const fn with_codec_id(codec_id: StableCodecId) -> Self {
         Self { codec_id }
     }
@@ -1787,6 +3156,176 @@ impl ItemCodec<ModuleBuildRecordDto> for ModuleBuildRecordCodec {
 
     fn decode(&self, bytes: &[u8]) -> Option<ModuleBuildRecordDto> {
         decode_module_build_record(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CodeGenerationRecordCodec {
+    codec_id: StableCodecId,
+}
+
+impl CodeGenerationRecordCodec {
+    pub(crate) const fn current() -> Self {
+        Self {
+            codec_id: CODE_GENERATION_RECORD_CODEC_ID,
+        }
+    }
+}
+
+impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
+    fn codec_id(&self) -> StableCodecId {
+        self.codec_id
+    }
+
+    fn encode(&self, value: &CodeGenerationRecordDto) -> io::Result<Vec<u8>> {
+        validate_code_generation_record(value)?;
+        let mut encoder = Encoder::default();
+        match &value.source {
+            CodeGenerationSourceDto::Raw { source } => {
+                encoder.write_u8(0);
+                encoder.write_record_string(source)?;
+            }
+            CodeGenerationSourceDto::OriginalWithReplacements {
+                prefix,
+                original_source,
+                original_name,
+                replacements,
+                suffix,
+            } => {
+                encoder.write_u8(1);
+                encoder.write_record_string(prefix)?;
+                encoder.write_record_string(original_source)?;
+                encoder.write_record_string(original_name)?;
+                encoder.write_count(replacements.len())?;
+                for replacement in replacements {
+                    encoder.write_u32(replacement.start);
+                    encoder.write_u32(replacement.end);
+                    encoder.write_record_string(&replacement.content)?;
+                    encoder.write_optional_record_string(replacement.name.as_deref())?;
+                    encoder.write_u8(match replacement.enforce {
+                        ReplacementEnforceDto::Pre => 0,
+                        ReplacementEnforceDto::Normal => 1,
+                        ReplacementEnforceDto::Post => 2,
+                    });
+                }
+                encoder.write_record_string(suffix)?;
+            }
+        }
+        Ok(encoder.finish())
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Option<CodeGenerationRecordDto> {
+        let mut decoder = Decoder::new(bytes);
+        let source = match decoder.read_u8()? {
+            0 => CodeGenerationSourceDto::Raw {
+                source: decoder.read_record_string()?,
+            },
+            1 => {
+                let prefix = decoder.read_record_string()?;
+                let original_source = decoder.read_record_string()?;
+                let original_name = decoder.read_record_string()?;
+                let replacement_count = decoder.read_count()?;
+                let mut replacements = Vec::with_capacity(replacement_count);
+                for _ in 0..replacement_count {
+                    replacements.push(CodeGenerationReplacementDto {
+                        start: decoder.read_u32()?,
+                        end: decoder.read_u32()?,
+                        content: decoder.read_record_string()?,
+                        name: decoder.read_optional_record_string()?,
+                        enforce: match decoder.read_u8()? {
+                            0 => ReplacementEnforceDto::Pre,
+                            1 => ReplacementEnforceDto::Normal,
+                            2 => ReplacementEnforceDto::Post,
+                            _ => return None,
+                        },
+                    });
+                }
+                CodeGenerationSourceDto::OriginalWithReplacements {
+                    prefix,
+                    original_source,
+                    original_name,
+                    replacements,
+                    suffix: decoder.read_record_string()?,
+                }
+            }
+            _ => return None,
+        };
+        decoder.finish()?;
+        let record = CodeGenerationRecordDto { source };
+        validate_code_generation_record(&record).ok()?;
+        Some(record)
+    }
+}
+
+fn validate_code_generation_record(record: &CodeGenerationRecordDto) -> io::Result<()> {
+    let CodeGenerationSourceDto::OriginalWithReplacements {
+        original_source,
+        replacements,
+        ..
+    } = &record.source
+    else {
+        return Ok(());
+    };
+    for replacement in replacements {
+        let start = usize::try_from(replacement.start).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Code Generation Record replacement start is invalid",
+            )
+        })?;
+        let end = usize::try_from(replacement.end).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Code Generation Record replacement end is invalid",
+            )
+        })?;
+        if start > end
+            || end > original_source.len()
+            || !original_source.is_char_boundary(start)
+            || !original_source.is_char_boundary(end)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Code Generation Record contains an invalid replacement range",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AssetRenderRecordCodec {
+    codec_id: StableCodecId,
+}
+
+impl AssetRenderRecordCodec {
+    pub(crate) const fn current() -> Self {
+        Self {
+            codec_id: ASSET_RENDER_RECORD_CODEC_ID,
+        }
+    }
+}
+
+impl ItemCodec<AssetRenderRecordDto> for AssetRenderRecordCodec {
+    fn codec_id(&self) -> StableCodecId {
+        self.codec_id
+    }
+
+    fn encode(&self, value: &AssetRenderRecordDto) -> io::Result<Vec<u8>> {
+        let mut encoder = Encoder::default();
+        encoder.write_record_string(&value.source)?;
+        encoder.write_optional_record_string(value.source_map.as_deref())?;
+        Ok(encoder.finish())
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Option<AssetRenderRecordDto> {
+        let mut decoder = Decoder::new(bytes);
+        let record = AssetRenderRecordDto {
+            source: decoder.read_record_string()?,
+            source_map: decoder.read_optional_record_string()?,
+        };
+        decoder.finish()?;
+        Some(record)
     }
 }
 
@@ -2301,7 +3840,11 @@ impl Encoder {
     }
 
     fn write_bytes(&mut self, value: &[u8]) -> io::Result<()> {
-        if value.len() > MAX_FIELD_BYTES {
+        self.write_bytes_with_limit(value, MAX_FIELD_BYTES)
+    }
+
+    fn write_bytes_with_limit(&mut self, value: &[u8], limit: usize) -> io::Result<()> {
+        if value.len() > limit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "PackFile field exceeds the configured bound",
@@ -2336,6 +3879,10 @@ impl Encoder {
         self.write_bytes(value.as_bytes())
     }
 
+    fn write_record_string(&mut self, value: &str) -> io::Result<()> {
+        self.write_bytes_with_limit(value.as_bytes(), MAX_RECORD_BYTES)
+    }
+
     fn write_path(&mut self, value: &PathBytes) -> io::Result<()> {
         self.write_bytes(&value.0)
     }
@@ -2345,6 +3892,19 @@ impl Encoder {
             Some(value) => {
                 self.write_u8(1);
                 self.write_string(value)
+            }
+            None => {
+                self.write_u8(0);
+                Ok(())
+            }
+        }
+    }
+
+    fn write_optional_record_string(&mut self, value: Option<&str>) -> io::Result<()> {
+        match value {
+            Some(value) => {
+                self.write_u8(1);
+                self.write_record_string(value)
             }
             None => {
                 self.write_u8(0);
@@ -2451,8 +4011,12 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_bytes(&mut self) -> Option<Vec<u8>> {
+        self.read_bytes_with_limit(MAX_FIELD_BYTES)
+    }
+
+    fn read_bytes_with_limit(&mut self, limit: usize) -> Option<Vec<u8>> {
         let length = usize::try_from(self.read_u32()?).ok()?;
-        if length > MAX_FIELD_BYTES {
+        if length > limit {
             return None;
         }
         let end = self.position.checked_add(length)?;
@@ -2473,6 +4037,10 @@ impl<'a> Decoder<'a> {
         String::from_utf8(self.read_bytes()?).ok()
     }
 
+    fn read_record_string(&mut self) -> Option<String> {
+        String::from_utf8(self.read_bytes_with_limit(MAX_RECORD_BYTES)?).ok()
+    }
+
     fn read_path(&mut self) -> Option<PathBytes> {
         Some(PathBytes(self.read_bytes()?))
     }
@@ -2481,6 +4049,14 @@ impl<'a> Decoder<'a> {
         match self.read_u8()? {
             0 => Some(None),
             1 => Some(Some(self.read_string()?)),
+            _ => None,
+        }
+    }
+
+    fn read_optional_record_string(&mut self) -> Option<Option<String>> {
+        match self.read_u8()? {
+            0 => Some(None),
+            1 => Some(Some(self.read_record_string()?)),
             _ => None,
         }
     }
@@ -2540,6 +4116,11 @@ struct PackFileIndexEntry {
     type_id: StableTypeId,
     codec_id: StableCodecId,
     content: ContentReference,
+    last_access: AccessStamp,
+    last_used_revision: u64,
+    // None means the item was used in the current published revision. Some is the first
+    // revision that carried it forward without observing an access.
+    unused_since_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2548,6 +4129,8 @@ struct ContentReference {
     offset: u64,
     length: u64,
     checksum: u64,
+    pack_size: u64,
+    compression: PackFileCompression,
 }
 
 #[cfg(test)]
@@ -2557,6 +4140,7 @@ struct PackFileReadStats {
     content_reads: usize,
     content_bytes_read: usize,
     decoded_records: usize,
+    retained_content_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -2564,6 +4148,9 @@ pub(crate) struct PackFile {
     root: PathBuf,
     registry: CodecRegistry,
     index: PackFileIndex,
+    access_updates: BTreeMap<PackFileAddress, AccessStamp>,
+    allow_collecting_memory: bool,
+    content_buffers: HashMap<PathBuf, Vec<u8>>,
     #[cfg(test)]
     reads: PackFileReadStats,
 }
@@ -2573,7 +4160,16 @@ impl PackFile {
         root.as_ref().join(INDEX_FILE)
     }
 
+    #[cfg(test)]
     pub(crate) fn open(root: impl AsRef<Path>, registry: CodecRegistry) -> Self {
+        Self::open_with_options(root, registry, PackFileOpenOptions::new(false))
+    }
+
+    pub(crate) fn open_with_options(
+        root: impl AsRef<Path>,
+        registry: CodecRegistry,
+        options: PackFileOpenOptions,
+    ) -> Self {
         let root = root.as_ref().to_path_buf();
         let index_path = Self::index_path(&root);
         let index = read_bounded(&index_path, MAX_INDEX_BYTES)
@@ -2583,6 +4179,9 @@ impl PackFile {
             root,
             registry,
             index,
+            access_updates: BTreeMap::new(),
+            allow_collecting_memory: options.allow_collecting_memory,
+            content_buffers: HashMap::new(),
             #[cfg(test)]
             reads: PackFileReadStats {
                 index_reads: usize::from(index_path.exists()),
@@ -2591,8 +4190,7 @@ impl PackFile {
         }
     }
 
-    #[cfg(test)]
-    fn entry_count(&self) -> usize {
+    pub(crate) fn entry_count(&self) -> usize {
         self.index.entries.len()
     }
 
@@ -2604,6 +4202,40 @@ impl PackFile {
         self.index.guard.as_ref()
     }
 
+    pub(crate) fn touch(
+        &mut self,
+        address: &PackFileAddress,
+        etag: Option<&PackFileETag>,
+        stamp: AccessStamp,
+    ) -> bool {
+        let Some(entry) = self.index.entries.get(address) else {
+            return false;
+        };
+        if entry.etag.as_ref() != etag {
+            return false;
+        }
+        let stamp = stamp.max(entry.last_access);
+        match self.access_updates.entry(address.clone()) {
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(stamp);
+                true
+            }
+            std::collections::btree_map::Entry::Occupied(mut occupied)
+                if stamp > *occupied.get() =>
+            {
+                occupied.insert(stamp);
+                true
+            }
+            std::collections::btree_map::Entry::Occupied(_) => false,
+        }
+    }
+
+    pub(crate) fn copy_access_updates_to(&self, batch: &mut PackFileWriteBatch) {
+        for (address, stamp) in &self.access_updates {
+            batch.record_access(address.clone(), *stamp);
+        }
+    }
+
     pub(crate) fn get<T: PackFileItem>(
         &mut self,
         address: &PackFileAddress,
@@ -2613,17 +4245,15 @@ impl PackFile {
         if entry.etag.as_ref() != etag || entry.type_id != T::TYPE_ID {
             return None;
         }
-        let codec = self.registry.codecs.get(&entry.type_id)?;
-        if codec.codec_id() != entry.codec_id {
+        if self.registry.codecs.get(&entry.type_id)?.codec_id() != entry.codec_id {
             return None;
         }
 
-        let path = self.root.join(&entry.content.file);
         #[cfg(test)]
         {
             self.reads.content_reads += 1;
         }
-        let frame = read_content_reference(&path, &entry.content)?;
+        let frame = self.read_content_frame(&entry.content)?;
         #[cfg(test)]
         {
             self.reads.content_bytes_read += frame.len();
@@ -2641,6 +4271,29 @@ impl PackFile {
             self.reads.decoded_records += 1;
         }
         Some(Arc::new(value))
+    }
+
+    fn read_content_frame(&mut self, reference: &ContentReference) -> Option<Vec<u8>> {
+        let path = self.root.join(&reference.file);
+        if reference.compression == PackFileCompression::None {
+            return read_content_reference(&path, reference);
+        }
+
+        if self.allow_collecting_memory {
+            let pack = read_content_pack(&path, reference.compression, reference.pack_size)?;
+            return content_frame_from_pack(&pack, reference);
+        }
+
+        if !self.content_buffers.contains_key(&reference.file) {
+            let pack = read_content_pack(&path, reference.compression, reference.pack_size)?;
+            #[cfg(test)]
+            {
+                self.reads.retained_content_bytes =
+                    self.reads.retained_content_bytes.checked_add(pack.len())?;
+            }
+            self.content_buffers.insert(reference.file.clone(), pack);
+        }
+        content_frame_from_pack(self.content_buffers.get(&reference.file)?, reference)
     }
 
     pub(crate) fn get_resolve_record(
@@ -2672,13 +4325,54 @@ impl PackFile {
         publish_items(root.as_ref(), registry, items, PublishFault::None)
     }
 
-    pub(crate) fn publish_batch(
+    #[cfg(test)]
+    fn publish_batch(
         root: impl AsRef<Path>,
         guard: Option<PackFileGuardDto>,
         base: PublicationBase,
         batch: PackFileWriteBatch,
     ) -> io::Result<()> {
-        publish_batch(root.as_ref(), guard, base, batch, PublishFault::None)
+        Self::publish_batch_with_retention(
+            root,
+            guard,
+            base,
+            batch,
+            PackFileRetention::system_default(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_batch_with_retention(
+        root: impl AsRef<Path>,
+        guard: Option<PackFileGuardDto>,
+        base: PublicationBase,
+        batch: PackFileWriteBatch,
+        retention: PackFileRetention,
+    ) -> io::Result<()> {
+        Self::publish_batch_with_options(
+            root,
+            guard,
+            base,
+            batch,
+            PackFilePublicationOptions::new(retention, PackFileCompression::None),
+        )
+    }
+
+    pub(crate) fn publish_batch_with_options(
+        root: impl AsRef<Path>,
+        guard: Option<PackFileGuardDto>,
+        base: PublicationBase,
+        batch: PackFileWriteBatch,
+        options: PackFilePublicationOptions,
+    ) -> io::Result<()> {
+        publish_batch(
+            root.as_ref(),
+            guard,
+            base,
+            batch,
+            options,
+            PublishFault::None,
+        )
     }
 
     #[cfg(test)]
@@ -2755,6 +4449,10 @@ where
         current.guard,
         PublicationBase::PreserveEntries { expected_revision },
         batch,
+        PackFilePublicationOptions::new(
+            PackFileRetention::system_default(),
+            PackFileCompression::None,
+        ),
         fault,
     )
 }
@@ -2764,11 +4462,26 @@ fn publish_batch(
     guard: Option<PackFileGuardDto>,
     base: PublicationBase,
     batch: PackFileWriteBatch,
+    options: PackFilePublicationOptions,
     fault: PublishFault,
 ) -> io::Result<()> {
+    if options.maintenance.target_content_bytes == 0
+        || options.maintenance.target_content_bytes > MAX_CONTENT_BYTES
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PackFile target content size is outside the configured bound",
+        ));
+    }
+    let retention = options.retention;
     let current = read_bounded(&root.join(INDEX_FILE), MAX_INDEX_BYTES)
         .and_then(|bytes| decode_index(&bytes))
         .unwrap_or_default();
+    let previously_referenced_files = current
+        .entries
+        .values()
+        .map(|entry| entry.content.file.clone())
+        .collect::<BTreeSet<_>>();
     let mut entries = match base {
         PublicationBase::PreserveEntries { expected_revision }
             if current.revision == expected_revision =>
@@ -2787,62 +4500,250 @@ fn publish_batch(
         .revision
         .checked_add(1)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PackFile revision overflow"))?;
+    let PackFileWriteBatch { items, accesses } = batch;
+    let pending_addresses = items.keys().cloned().collect::<BTreeSet<_>>();
+    for (address, entry) in &mut entries {
+        if pending_addresses.contains(address) {
+            continue;
+        }
+        if let Some(access) = accesses.get(address) {
+            entry.last_access = entry.last_access.max(*access);
+            entry.last_used_revision = revision;
+            entry.unused_since_revision = None;
+        } else if entry.unused_since_revision.is_none() {
+            entry.unused_since_revision = Some(revision);
+        }
+    }
+    entries.retain(|address, entry| {
+        pending_addresses.contains(address) || !entry_is_expired(entry, revision, retention)
+    });
+
+    let mut entries_by_content_file = BTreeMap::<PathBuf, Vec<PackFileAddress>>::new();
+    for (address, entry) in &entries {
+        if !pending_addresses.contains(address) {
+            entries_by_content_file
+                .entry(entry.content.file.clone())
+                .or_default()
+                .push(address.clone());
+        }
+    }
+    let small_used_files = entries_by_content_file
+        .iter()
+        .filter_map(|(file, addresses)| {
+            let first = entries.get(addresses.first()?)?;
+            let is_small = usize::try_from(first.content.pack_size).ok()?
+                <= options.maintenance.small_content_bytes;
+            let was_used = addresses.iter().any(|address| {
+                entries
+                    .get(address)
+                    .is_some_and(|entry| entry.unused_since_revision.is_none())
+            });
+            (is_small && was_used).then_some(file.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let merge_small_files = (small_used_files.len() >= 2).then_some(small_used_files);
+    let mut maintenance_source_files = BTreeSet::new();
+    for (file, addresses) in &entries_by_content_file {
+        let Some(first) = addresses.first().and_then(|address| entries.get(address)) else {
+            continue;
+        };
+        let live_bytes = addresses.iter().try_fold(0u64, |total, address| {
+            total.checked_add(entries.get(address)?.content.length)
+        });
+        let Some(live_bytes) = live_bytes else {
+            continue;
+        };
+        let waste = first.content.pack_size.saturating_sub(live_bytes);
+        let compactable = waste
+            >= u64::try_from(options.maintenance.minimum_compactable_waste_bytes)
+                .unwrap_or(u64::MAX)
+            && u128::from(waste) * 100
+                >= u128::from(first.content.pack_size) * u128::from(MIN_COMPACTABLE_WASTE_PERCENT);
+        let oversized = first.content.pack_size
+            > u64::try_from(options.maintenance.target_content_bytes).unwrap_or(u64::MAX);
+        if compactable
+            || oversized
+            || merge_small_files
+                .as_ref()
+                .is_some_and(|files| files.contains(file))
+        {
+            maintenance_source_files.insert(file.clone());
+        }
+    }
+
+    let mut staged_items = Vec::<StagedContentItem>::new();
+    for file in &maintenance_source_files {
+        let Some(addresses) = entries_by_content_file.get(file) else {
+            continue;
+        };
+        let Some(first) = addresses.first().and_then(|address| entries.get(address)) else {
+            continue;
+        };
+        let pack = read_content_pack(
+            &root.join(file),
+            first.content.compression,
+            first.content.pack_size,
+        )
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("PackFile maintenance could not read {}", file.display()),
+            )
+        })?;
+        let mut addresses = addresses.clone();
+        addresses.sort_by_key(|address| entries[address].content.offset);
+        for address in addresses {
+            let entry = &entries[&address];
+            let start = usize::try_from(entry.content.offset).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "content offset is too large")
+            })?;
+            let length = usize::try_from(entry.content.length).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "content length is too large")
+            })?;
+            let end = start.checked_add(length).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "content reference overflow")
+            })?;
+            let frame = pack.get(start..end).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "content reference is out of bounds",
+                )
+            })?;
+            let valid_frame = checksum(frame) == entry.content.checksum
+                && decode_content(frame).is_some_and(|(type_id, codec_id, _)| {
+                    type_id == entry.type_id && codec_id == entry.codec_id
+                });
+            if !valid_frame {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PackFile maintenance found invalid content",
+                ));
+            }
+            staged_items.push(StagedContentItem {
+                address,
+                pending: None,
+                frame: frame.to_vec(),
+                used: entry.unused_since_revision.is_none(),
+            });
+        }
+    }
+
+    for (address, item) in items {
+        let frame = encode_content(item.type_id, item.codec_id, &item.payload)?;
+        staged_items.push(StagedContentItem {
+            address,
+            pending: Some(item),
+            frame,
+            used: true,
+        });
+    }
 
     fs::create_dir_all(root)?;
     let content_directory = root.join(CONTENT_DIRECTORY);
     fs::create_dir_all(&content_directory)?;
-    let filename = format!("pack-{revision:016x}.bin");
-    let relative_path = PathBuf::from(CONTENT_DIRECTORY).join(&filename);
-    let mut content_pack = Vec::new();
-    for (address, item) in batch.items {
-        let frame = encode_content(item.type_id, item.codec_id, &item.payload)?;
-        let offset = u64::try_from(content_pack.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "content pack offset is too large",
-            )
-        })?;
-        let length = u64::try_from(frame.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "content frame is too large")
-        })?;
-        let frame_checksum = checksum(&frame);
-        content_pack.extend_from_slice(&frame);
-        if content_pack.len() > MAX_CONTENT_BYTES {
+    let mut encoded_packs = Vec::<Vec<StagedContentItem>>::new();
+    let mut current_pack = Vec::new();
+    let mut current_pack_bytes = 0usize;
+    let mut current_pack_used = None;
+    staged_items.sort_by_key(|item| !item.used);
+    for item in staged_items {
+        if !current_pack.is_empty()
+            && (current_pack_used != Some(item.used)
+                || current_pack_bytes.saturating_add(item.frame.len())
+                    > options.maintenance.target_content_bytes)
+        {
+            encoded_packs.push(std::mem::take(&mut current_pack));
+            current_pack_bytes = 0;
+        }
+        current_pack_used = Some(item.used);
+        current_pack_bytes = current_pack_bytes
+            .checked_add(item.frame.len())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "content pack size overflow")
+            })?;
+        if current_pack_bytes > MAX_CONTENT_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "content pack exceeds the configured bound",
             ));
         }
-        entries.insert(
-            address,
-            PackFileIndexEntry {
-                etag: item.etag,
-                type_id: item.type_id,
-                codec_id: item.codec_id,
-                content: ContentReference {
-                    file: relative_path.clone(),
-                    offset,
-                    length,
-                    checksum: frame_checksum,
-                },
-            },
-        );
+        current_pack.push(item);
+    }
+    if !current_pack.is_empty() {
+        encoded_packs.push(current_pack);
     }
 
-    if !content_pack.is_empty() {
+    let pack_count = encoded_packs.len();
+    for (pack_index, pack) in encoded_packs.into_iter().enumerate() {
+        let filename = content_pack_filename(revision, pack_index, pack_count, options.compression);
+        let relative_path = PathBuf::from(CONTENT_DIRECTORY).join(&filename);
+        let pack_size = pack.iter().try_fold(0u64, |total, item| {
+            total
+                .checked_add(u64::try_from(item.frame.len()).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "content frame is too large")
+                })?)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "content pack size overflow")
+                })
+        })?;
+        let mut content_pack = Vec::new();
+        for item in pack {
+            let offset = u64::try_from(content_pack.len()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "content pack offset is too large",
+                )
+            })?;
+            let length = u64::try_from(item.frame.len()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "content frame is too large")
+            })?;
+            let frame_checksum = checksum(&item.frame);
+            content_pack.extend_from_slice(&item.frame);
+            let content = ContentReference {
+                file: relative_path.clone(),
+                offset,
+                length,
+                checksum: frame_checksum,
+                pack_size,
+                compression: options.compression,
+            };
+            if let Some(pending) = item.pending {
+                entries.insert(
+                    item.address,
+                    PackFileIndexEntry {
+                        etag: pending.etag,
+                        type_id: pending.type_id,
+                        codec_id: pending.codec_id,
+                        content,
+                        last_access: retention.now,
+                        last_used_revision: revision,
+                        unused_since_revision: None,
+                    },
+                );
+            } else {
+                entries
+                    .get_mut(&item.address)
+                    .expect("maintenance item should remain indexed")
+                    .content = content;
+            }
+        }
         let final_path = root.join(&relative_path);
         let temporary_path = content_directory.join(format!(".{filename}.tmp"));
-        write_synced(&temporary_path, &content_pack)?;
+        let encoded_content = encode_content_pack(content_pack, options.compression)?;
+        write_synced(&temporary_path, &encoded_content)?;
         if let Err(error) = fs::rename(&temporary_path, &final_path) {
             let _ = fs::remove_file(&temporary_path);
             return Err(error);
         }
+    }
+    if pack_count > 0 {
         sync_directory(&content_directory)?;
     }
 
     if fault == PublishFault::AfterContentCommit {
         return Err(injected_publish_error("after content commit"));
     }
+    force_test_process_termination(PublishFault::AfterContentCommit);
 
     let index = PackFileIndex {
         revision,
@@ -2856,15 +4757,130 @@ fn publish_batch(
         let _ = fs::remove_file(&temporary_index);
         return Err(injected_publish_error("before index replacement"));
     }
+    force_test_process_termination(PublishFault::BeforeIndexReplace);
     if let Err(error) = fs::rename(&temporary_index, root.join(INDEX_FILE)) {
         let _ = fs::remove_file(&temporary_index);
         return Err(error);
     }
-    sync_directory(root)
+    sync_directory(root)?;
+
+    let referenced_files = index
+        .entries
+        .values()
+        .map(|entry| entry.content.file.clone())
+        .collect::<BTreeSet<_>>();
+    let mut removed_content = false;
+    for file in previously_referenced_files.difference(&referenced_files) {
+        match fs::remove_file(root.join(file)) {
+            Ok(()) => removed_content = true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            // The index is already committed. A stale unreferenced content pack is safer than
+            // reporting a failed publication that cannot be retried with the same base revision.
+            Err(_) => {}
+        }
+    }
+    if removed_content {
+        let _ = sync_directory(&content_directory);
+    }
+    Ok(())
+}
+
+fn entry_is_expired(
+    entry: &PackFileIndexEntry,
+    candidate_revision: u64,
+    retention: PackFileRetention,
+) -> bool {
+    entry
+        .unused_since_revision
+        .is_some_and(|revision| revision < candidate_revision)
+        && retention
+            .now
+            .elapsed_since(entry.last_access)
+            .is_some_and(|age| age > retention.max_age)
 }
 
 fn injected_publish_error(point: &str) -> io::Error {
     io::Error::other(format!("injected PackFile failure {point}"))
+}
+
+fn content_pack_filename(
+    revision: u64,
+    pack_index: usize,
+    pack_count: usize,
+    compression: PackFileCompression,
+) -> String {
+    let sequence = if pack_count == 1 {
+        String::new()
+    } else {
+        format!("-{pack_index:04x}")
+    };
+    let extension = match compression {
+        PackFileCompression::None => ".bin",
+        PackFileCompression::Gzip => ".bin.gz",
+        PackFileCompression::Brotli => ".bin.br",
+    };
+    format!("pack-{revision:016x}{sequence}{extension}")
+}
+
+fn encode_content_pack(content: Vec<u8>, compression: PackFileCompression) -> io::Result<Vec<u8>> {
+    let encoded = match compression {
+        PackFileCompression::None => content,
+        PackFileCompression::Gzip => {
+            let mut encoder = GzEncoder::new(Vec::new(), GzipLevel::new(GZIP_LEVEL));
+            encoder.write_all(&content)?;
+            encoder.finish()?
+        }
+        PackFileCompression::Brotli => {
+            let mut encoded = Vec::new();
+            {
+                let mut encoder = CompressorWriter::new(
+                    &mut encoded,
+                    BROTLI_BUFFER_BYTES,
+                    BROTLI_QUALITY,
+                    BROTLI_WINDOW_BITS,
+                );
+                encoder.write_all(&content)?;
+                encoder.flush()?;
+            }
+            encoded
+        }
+    };
+    if encoded.len() > MAX_ENCODED_CONTENT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "encoded content pack exceeds the configured bound",
+        ));
+    }
+    Ok(encoded)
+}
+
+/// Stops a test process at a point where a real process interruption must not
+/// expose an incomplete revision. This deliberately lives below the compiler
+/// lifecycle: the public acceptance suite needs to exercise an abrupt process
+/// death, rather than a handled flush error.
+///
+/// It is dormant unless the test-only environment variable is set. Normal
+/// users have no configuration surface for this hook.
+fn force_test_process_termination(point: PublishFault) {
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = point;
+        return;
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let requested_point = match point {
+            PublishFault::None => return,
+            PublishFault::AfterContentCommit => "after-content-commit",
+            PublishFault::BeforeIndexReplace => "before-index-replace",
+        };
+        if std::env::var_os("UNPACK_TEST_PERSISTENT_CACHE_CRASH_AT").as_deref()
+            == Some(std::ffi::OsStr::new(requested_point))
+        {
+            std::process::abort();
+        }
+    }
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -2887,9 +4903,56 @@ fn read_bounded(path: &Path, maximum: usize) -> Option<Vec<u8>> {
     (bytes.len() == length).then_some(bytes)
 }
 
+fn read_content_pack(
+    path: &Path,
+    compression: PackFileCompression,
+    expected_size: u64,
+) -> Option<Vec<u8>> {
+    let expected_size = usize::try_from(expected_size).ok()?;
+    if expected_size > MAX_CONTENT_BYTES {
+        return None;
+    }
+    match compression {
+        PackFileCompression::None => {
+            let bytes = read_bounded(path, MAX_CONTENT_BYTES)?;
+            (bytes.len() == expected_size).then_some(bytes)
+        }
+        PackFileCompression::Gzip => {
+            let encoded = read_bounded(path, MAX_ENCODED_CONTENT_BYTES)?;
+            read_decompressed_pack(GzDecoder::new(encoded.as_slice()), expected_size)
+        }
+        PackFileCompression::Brotli => {
+            let encoded = read_bounded(path, MAX_ENCODED_CONTENT_BYTES)?;
+            read_decompressed_pack(
+                Decompressor::new(encoded.as_slice(), BROTLI_BUFFER_BYTES),
+                expected_size,
+            )
+        }
+    }
+}
+
+fn read_decompressed_pack(reader: impl Read, expected_size: usize) -> Option<Vec<u8>> {
+    let limit = u64::try_from(expected_size).ok()?.checked_add(1)?;
+    let mut content = Vec::with_capacity(expected_size);
+    reader.take(limit).read_to_end(&mut content).ok()?;
+    (content.len() == expected_size).then_some(content)
+}
+
+fn content_frame_from_pack(pack: &[u8], reference: &ContentReference) -> Option<Vec<u8>> {
+    let start = usize::try_from(reference.offset).ok()?;
+    let length = usize::try_from(reference.length).ok()?;
+    let end = start.checked_add(length)?;
+    Some(pack.get(start..end)?.to_vec())
+}
+
 fn read_content_reference(path: &Path, reference: &ContentReference) -> Option<Vec<u8>> {
+    if reference.compression != PackFileCompression::None {
+        let pack = read_content_pack(path, reference.compression, reference.pack_size)?;
+        return content_frame_from_pack(&pack, reference);
+    }
     let file_length = fs::metadata(path).ok()?.len();
-    if usize::try_from(file_length).ok()? > MAX_CONTENT_BYTES {
+    if usize::try_from(file_length).ok()? > MAX_CONTENT_BYTES || file_length != reference.pack_size
+    {
         return None;
     }
     let end = reference.offset.checked_add(reference.length)?;
@@ -2932,6 +4995,15 @@ fn encode_index(index: &PackFileIndex) -> io::Result<Vec<u8>> {
         body.write_u64(entry.content.offset);
         body.write_u64(entry.content.length);
         body.write_u64(entry.content.checksum);
+        body.write_u64(entry.content.pack_size);
+        body.write_u8(match entry.content.compression {
+            PackFileCompression::None => 0,
+            PackFileCompression::Gzip => 1,
+            PackFileCompression::Brotli => 2,
+        });
+        body.write_u64(entry.last_access.unix_millis);
+        body.write_u64(entry.last_used_revision);
+        body.write_optional_u64(entry.unused_since_revision);
     }
     encode_frame(INDEX_MAGIC, &body.finish(), MAX_INDEX_BYTES)
 }
@@ -2969,6 +5041,28 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
             return None;
         }
         let checksum = decoder.read_u64()?;
+        let pack_size = decoder.read_u64()?;
+        if usize::try_from(pack_size).ok()? > MAX_CONTENT_BYTES
+            || offset.checked_add(length)? > pack_size
+        {
+            return None;
+        }
+        let compression = match decoder.read_u8()? {
+            0 => PackFileCompression::None,
+            1 => PackFileCompression::Gzip,
+            2 => PackFileCompression::Brotli,
+            _ => return None,
+        };
+        let last_access = AccessStamp::from_millis(decoder.read_u64()?);
+        let last_used_revision = decoder.read_u64()?;
+        let unused_since_revision = decoder.read_optional_u64()?;
+        if last_used_revision > revision
+            || unused_since_revision.is_some_and(|unused_since| {
+                unused_since > revision || unused_since < last_used_revision
+            })
+        {
+            return None;
+        }
         entries.insert(
             address,
             PackFileIndexEntry {
@@ -2980,7 +5074,12 @@ fn decode_index(bytes: &[u8]) -> Option<PackFileIndex> {
                     offset,
                     length,
                     checksum,
+                    pack_size,
+                    compression,
                 },
+                last_access,
+                last_used_revision,
+                unused_since_revision,
             },
         );
     }

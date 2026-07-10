@@ -7,13 +7,13 @@ use std::{
     },
 };
 
-use napi::{Env, Result, Task, bindgen_prelude::AsyncTask};
+use napi::Result;
 use napi_derive::napi;
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use unpack_core::{
-    Asset, BuildDependency, CacheOptions, Compiler, CompilerOptions, Entry, Error as CoreError,
-    InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions, SnapshotOptions,
-    SnapshotPathPattern, SnapshotStrategy,
+    Asset, BuildDependency, CacheCompression, CacheIdleReason, CacheOptions, Compiler, CompilerOptions, Entry,
+    Error as CoreError, InfrastructureLogEvent, InfrastructureLogLevel,
+    InfrastructureLoggingOptions, SnapshotOptions, SnapshotPathPattern, SnapshotStrategy,
 };
 
 #[global_allocator]
@@ -73,10 +73,22 @@ pub struct NativeCacheOptions {
     pub version: Option<String>,
     #[napi(js_name = "buildDependencies")]
     pub build_dependencies: Vec<NativeBuildDependency>,
+    #[napi(js_name = "automaticBuildDependencies")]
+    pub automatic_build_dependencies: Vec<String>,
+    #[napi(js_name = "maxAge")]
+    pub max_age: Option<f64>,
+    pub compression: Option<String>,
+    #[napi(js_name = "allowCollectingMemory")]
+    pub allow_collecting_memory: Option<bool>,
     #[napi(js_name = "maxMemoryGenerations")]
-    pub max_memory_generations: Option<u32>,
+    pub max_memory_generations: Option<f64>,
     #[napi(js_name = "idleTimeout")]
     pub idle_timeout: Option<u32>,
+    #[napi(js_name = "idleTimeoutForInitialStore")]
+    pub idle_timeout_for_initial_store: Option<u32>,
+    #[napi(js_name = "idleTimeoutAfterLargeChanges")]
+    pub idle_timeout_after_large_changes: Option<u32>,
+    pub profile: Option<bool>,
     #[napi(js_name = "readonly")]
     pub readonly: Option<bool>,
 }
@@ -84,7 +96,7 @@ pub struct NativeCacheOptions {
 #[napi(object)]
 pub struct NativeBuildDependency {
     pub name: String,
-    pub files: Vec<String>,
+    pub requests: Vec<String>,
 }
 
 #[napi(object)]
@@ -179,6 +191,7 @@ pub struct NativeRunResult {
 #[napi(object)]
 pub struct NativeFlushResult {
     pub error: Option<NativeInfrastructureError>,
+    pub logs: Vec<NativeInfrastructureLogEvent>,
 }
 
 #[napi(js_name = "createCompiler")]
@@ -196,18 +209,36 @@ pub struct NativeCompiler {
 #[napi]
 impl NativeCompiler {
     #[napi]
-    pub async fn run(&self) -> NativeRunResult {
+    pub async fn run(&self, idle_reason: Option<String>) -> NativeRunResult {
         let compiler = self.compiler.clone();
         let output_path = self.output_path.clone();
+        let idle_reason = match idle_reason.as_deref() {
+            Some("largeChange") => CacheIdleReason::LargeChange,
+            _ => CacheIdleReason::Ordinary,
+        };
 
-        run_compiler_inner(compiler, output_path).await
+        run_compiler_inner(compiler, output_path, idle_reason).await
+    }
+
+    #[napi(js_name = "settleCache")]
+    pub async fn settle_cache(&self) -> NativeFlushResult {
+        let Some(compiler) = self.compiler.as_deref() else {
+            return closed_cache_lifecycle_result();
+        };
+        cache_lifecycle_result(compiler.settle_cache().await)
     }
 
     #[napi(js_name = "flushCache")]
-    pub fn flush_cache(&self) -> AsyncTask<FlushCacheTask> {
-        AsyncTask::new(FlushCacheTask {
-            compiler: self.compiler.clone(),
-        })
+    pub async fn flush_cache(&self) -> NativeFlushResult {
+        self.settle_cache().await
+    }
+
+    #[napi]
+    pub async fn shutdown(&self) -> NativeFlushResult {
+        let Some(compiler) = self.compiler.as_deref() else {
+            return closed_cache_lifecycle_result();
+        };
+        cache_lifecycle_result(compiler.shutdown().await)
     }
 
     #[napi]
@@ -258,7 +289,7 @@ impl NativeCompiler {
             .map(|entry| Entry::new(entry.name, entry.request))
             .collect::<Vec<_>>();
         let mut compiler_options = CompilerOptions::new(context, entries);
-        compiler_options.cache = cache_options_from_native(options.cache);
+        compiler_options.cache = cache_options_from_native(options.cache)?;
         compiler_options.snapshot = snapshot_options_from_native(options.snapshot)?;
         compiler_options.infrastructure_logging =
             infrastructure_logging_options_from_native(options.infrastructure_logging);
@@ -272,7 +303,7 @@ impl NativeCompiler {
     }
 }
 
-fn cache_options_from_native(options: NativeCacheOptions) -> CacheOptions {
+fn cache_options_from_native(options: NativeCacheOptions) -> Result<CacheOptions> {
     let mut cache = match options.cache_type.as_str() {
         "disabled" => CacheOptions::disabled(),
         "filesystem" => CacheOptions::filesystem(),
@@ -287,13 +318,47 @@ fn cache_options_from_native(options: NativeCacheOptions) -> CacheOptions {
         .into_iter()
         .map(|dependency| BuildDependency {
             name: dependency.name,
-            files: dependency.files.into_iter().map(PathBuf::from).collect(),
+            requests: dependency.requests,
         })
         .collect();
-    cache.max_memory_generations = options.max_memory_generations;
+    cache.automatic_build_dependencies = options
+        .automatic_build_dependencies
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    cache.max_memory_generations = options
+        .max_memory_generations
+        .map(|generations| generations as u64);
+    if let Some(max_age) = options.max_age {
+        if max_age.is_nan() || max_age < 0.0 {
+            return Err(napi::Error::from_reason(
+                "options.cache.maxAge must be a non-negative number",
+            ));
+        }
+        cache.max_age = if max_age.is_infinite() {
+            std::time::Duration::MAX
+        } else {
+            std::time::Duration::try_from_secs_f64(max_age / 1_000.0)
+                .unwrap_or(std::time::Duration::MAX)
+        };
+    }
+    cache.compression = match options.compression.as_deref() {
+        None => CacheCompression::None,
+        Some("gzip") => CacheCompression::Gzip,
+        Some("brotli") => CacheCompression::Brotli,
+        Some(_) => {
+            return Err(napi::Error::from_reason(
+                "options.cache.compression must be false, 'gzip', or 'brotli'",
+            ));
+        }
+    };
+    cache.allow_collecting_memory = options.allow_collecting_memory.unwrap_or(false);
     cache.idle_timeout = options.idle_timeout;
+    cache.idle_timeout_for_initial_store = options.idle_timeout_for_initial_store;
+    cache.idle_timeout_after_large_changes = options.idle_timeout_after_large_changes;
+    cache.profile = options.profile.unwrap_or(false);
     cache.readonly = options.readonly.unwrap_or(false);
-    cache
+    Ok(cache)
 }
 
 fn snapshot_options_from_native(options: NativeSnapshotOptions) -> Result<SnapshotOptions> {
@@ -373,59 +438,49 @@ fn infrastructure_logging_options_from_native(
     }
 }
 
-pub struct FlushCacheTask {
-    compiler: Option<Arc<Compiler>>,
+fn closed_cache_lifecycle_result() -> NativeFlushResult {
+    NativeFlushResult {
+        error: Some(NativeInfrastructureError {
+            name: "CompilerClosedError".to_string(),
+            message: "compiler is closed".to_string(),
+        }),
+        logs: Vec::new(),
+    }
 }
 
-impl Task for FlushCacheTask {
-    type Output = NativeFlushResult;
-    type JsValue = NativeFlushResult;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        let Some(compiler) = self.compiler.as_deref() else {
-            return Ok(NativeFlushResult {
-                error: Some(NativeInfrastructureError {
-                    name: "CompilerClosedError".to_string(),
-                    message: "compiler is closed".to_string(),
-                }),
-            });
-        };
-
-        Ok(match compiler.flush_cache() {
-            Ok(()) => NativeFlushResult { error: None },
-            Err(message) => NativeFlushResult {
-                error: Some(NativeInfrastructureError {
-                    name: "CacheFlushError".to_string(),
-                    message,
-                }),
-            },
-        })
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
+fn cache_lifecycle_result(outcome: unpack_core::CacheLifecycleOutcome) -> NativeFlushResult {
+    NativeFlushResult {
+        error: outcome
+            .diagnostic()
+            .map(|message| NativeInfrastructureError {
+                name: "CacheFlushError".to_string(),
+                message: message.to_string(),
+            }),
+        logs: infrastructure_log_events(outcome.infrastructure_log_events()),
     }
 }
 
 async fn run_compiler_inner(
     compiler: Option<Arc<Compiler>>,
     output_path: PathBuf,
+    idle_reason: CacheIdleReason,
 ) -> NativeRunResult {
     let Some(compiler) = compiler else {
         return infrastructure_error("CompilerClosedError", "compiler is closed");
     };
 
-    let compilation = match compiler.run().await {
-        Ok(compilation) => compilation,
+    let pending = match compiler.run_until_finalize(idle_reason).await {
+        Ok(pending) => pending,
         Err(error) => {
             return infrastructure_error("InfrastructureError", error.to_string());
         }
     };
 
-    let logs = infrastructure_log_events(compilation.infrastructure_log_events());
-    if let Err(error) = emit_assets(&output_path, compilation.assets()) {
+    let logs = infrastructure_log_events(pending.compilation().infrastructure_log_events());
+    if let Err(error) = emit_assets(&output_path, pending.compilation().assets()) {
         return infrastructure_error_with_logs("OutputWriteError", error, logs);
     }
+    let compilation = pending.finish();
 
     NativeRunResult {
         error: None,
@@ -516,7 +571,10 @@ fn stats_error(error: &CoreError) -> NativeStatsError {
             issuer: None,
             stack: Some(message.clone()),
         },
-        CoreError::MissingModule(_) | CoreError::MissingModuleDirectory(_) => NativeStatsError {
+        CoreError::CompilerBusy
+        | CoreError::CompilerClosed
+        | CoreError::MissingModule(_)
+        | CoreError::MissingModuleDirectory(_) => NativeStatsError {
             message: error.to_string(),
             path: None,
             request: None,

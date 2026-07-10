@@ -8,7 +8,9 @@ license = "MIT"
 repository = "https://github.com/unpack-dev/unpack"
 
 [workspace.dependencies]
+brotli = "7.0.0"
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
+flate2 = "1.1.9"
 futures = "0.3.31"
 filetime = "0.2.26"
 mimalloc = { version = "0.1.48", default-features = false }
@@ -25,6 +27,6 @@ swc_experimental_ecma_ast = "0.11.0"
 swc_experimental_ecma_parser = "0.11.0"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
-tokio = { version = "1.48.0", features = ["fs", "macros", "rt", "rt-multi-thread", "sync"] }
+tokio = { version = "1.48.0", features = ["fs", "macros", "rt", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }

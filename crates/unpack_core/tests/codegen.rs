@@ -74,11 +74,7 @@ async fn builds_a_render_manifest_before_creating_asset_bookkeeping()
 
     assert_eq!(compilation.assets(), []);
 
-    compilation.render_asset_sources();
-
-    assert_eq!(compilation.assets(), []);
-
-    compilation.emit_assets();
+    compilation.render_assets();
 
     assert_eq!(compilation.errors(), []);
     assert_eq!(
@@ -99,41 +95,55 @@ async fn builds_a_render_manifest_before_creating_asset_bookkeeping()
 }
 
 #[tokio::test]
-async fn rebuilding_graphs_invalidates_generated_and_rendered_work()
+async fn preserves_byte_exact_static_async_and_sourcemap_outputs()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     write(
         temp.path().join("src/index.js"),
-        "export const value = 'before';",
+        r#"
+            import { eager } from "./eager";
+
+            export async function load() {
+                const feature = await import("./feature");
+                return [eager, feature.value];
+            }
+        "#,
+    )?;
+    write(
+        temp.path().join("src/eager.js"),
+        "export const eager = 'eager';",
+    )?;
+    write(
+        temp.path().join("src/feature.js"),
+        "export const value = 'feature';",
     )?;
 
-    let compiler = Compiler::new(CompilerOptions::new(
+    let compilation = Compiler::new(CompilerOptions::new(
         temp.path(),
         vec![Entry::new("main", "./src/index")],
-    ));
-    let mut compilation = compiler.create_compilation();
-    compilation.make().await?;
-    compilation.build_chunk_graph();
-    compilation.create_assets();
-    assert!(
-        compilation
-            .assets()
-            .iter()
-            .any(|asset| asset.filename == "main.js" && asset.source.contains("before"))
-    );
+    ))
+    .run()
+    .await?;
+    let fingerprints = compilation
+        .assets()
+        .iter()
+        .map(|asset| {
+            (
+                asset.filename.as_str(),
+                asset.source.len(),
+                fnv1a64(asset.source.as_bytes()),
+            )
+        })
+        .collect::<Vec<_>>();
 
-    write(
-        temp.path().join("src/index.js"),
-        "export const value = 'after';",
-    )?;
-    compilation.make().await?;
-    compilation.build_chunk_graph();
-    compilation.create_assets();
-    assert!(
-        compilation
-            .assets()
-            .iter()
-            .any(|asset| asset.filename == "main.js" && asset.source.contains("after"))
+    assert_eq!(
+        fingerprints,
+        [
+            ("main.js", 3166, 12861121386719719501),
+            ("main.js.map", 480, 10309079247393373181),
+            ("src_feature_js.js", 398, 7014656015713497901),
+            ("src_feature_js.js.map", 164, 2414748877879059404)
+        ]
     );
 
     Ok(())
@@ -507,4 +517,10 @@ fn node_available() -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
 }

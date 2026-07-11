@@ -39,6 +39,38 @@ test("summary renders loader results before a separate non-loader table", () => 
   assert.doesNotMatch(summary.slice(nonLoaderHeading), /\| loader \|/);
 });
 
+test("summary compares measurements with matching latest main results", () => {
+  const current = summaryResult({ fixture: "large", bundler: "unpack" });
+  const baseline = {
+    ...current,
+    cold_build_ms: 8,
+    warm_build_ms: 2.5,
+    no_cache_build_ms: 10,
+    output_bytes: 200
+  };
+  const summary = toSummaryMarkdown(
+    { results: [current] },
+    { results: [baseline] }
+  );
+
+  assert.doesNotMatch(summary, /delta_vs_main/);
+  assert.match(
+    summary,
+    /\| 10\.0 \(\+25\.0%\) \| 5\.0 \(\+100\.0%\) \| 8\.0 \(-20\.0%\) \| 100 \(-50\.0%\) \| success \|/
+  );
+  assert.match(summary, /`\+` means slower or larger; `−` means faster or smaller/);
+});
+
+test("summary omits inline deltas when main has no matching result", () => {
+  const summary = toSummaryMarkdown(
+    { results: [summaryResult({ fixture: "large", bundler: "unpack" })] },
+    { results: [summaryResult({ fixture: "loader", bundler: "unpack" })] }
+  );
+
+  assert.match(summary, /\| 10\.0 \| 5\.0 \| 8\.0 \| 100 \| success \|/);
+  assert.doesNotMatch(summary, /\([+-][\d.]+%\)/);
+});
+
 test("runner emits persistent-cache and no-cache measurements for a verified bundle", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
   const calls = [];

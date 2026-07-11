@@ -66,7 +66,10 @@ export async function runBenchmark(options = {}) {
   };
 }
 
-export function toSummaryMarkdown(report) {
+export function toSummaryMarkdown(report, baselineReport) {
+  const baselines = new Map(
+    (baselineReport?.results ?? []).map((result) => [resultKey(result), result])
+  );
   const groups = [
     ["### Loader Benchmarks", report.results.filter((result) => result.fixture === "loader")],
     [
@@ -75,33 +78,53 @@ export function toSummaryMarkdown(report) {
     ]
   ].filter(([, results]) => results.length > 0);
 
-  return `${groups
-    .map(([heading, results]) => `${heading}\n\n${toSummaryTable(results)}`)
-    .join("\n\n")}\n`;
+  const summary = groups
+    .map(([heading, results]) => `${heading}\n\n${toSummaryTable(results, baselines)}`)
+    .join("\n\n");
+  const comparisonNote = baselineReport
+    ? "\n\n> Delta vs main: `+` means slower or larger; `−` means faster or smaller. Calculated as `(current - main) / main`."
+    : "";
+
+  return `${summary}${comparisonNote}\n`;
 }
 
-function toSummaryTable(results) {
+function toSummaryTable(results, baselines) {
   const lines = [
     "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | no_cache_build_ms | output_bytes | status |",
     "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"
   ];
 
   for (const result of results) {
+    const baseline = baselines.get(resultKey(result));
     lines.push(
       [
         result.fixture,
         result.bundler,
         result.version_source ?? "",
-        formatNumber(result.cold_build_ms),
-        formatNumber(result.warm_build_ms),
-        formatNumber(result.no_cache_build_ms),
-        formatNumber(result.output_bytes, 0),
+        formatMeasurement(result.cold_build_ms, baseline?.cold_build_ms),
+        formatMeasurement(result.warm_build_ms, baseline?.warm_build_ms),
+        formatMeasurement(result.no_cache_build_ms, baseline?.no_cache_build_ms),
+        formatMeasurement(result.output_bytes, baseline?.output_bytes, 0),
         result.status
       ].join(" | ").replace(/^/, "| ").replace(/$/, " |")
     );
   }
 
   return lines.join("\n");
+}
+
+function resultKey(result) {
+  return `${result.fixture}\0${result.bundler}`;
+}
+
+function formatMeasurement(current, baseline, digits = 1) {
+  const value = formatNumber(current, digits);
+  if (!Number.isFinite(current) || !Number.isFinite(baseline) || baseline === 0) {
+    return value;
+  }
+  const percentage = ((current - baseline) / baseline) * 100;
+  const delta = `${percentage >= 0 ? "+" : ""}${percentage.toFixed(1)}%`;
+  return `${value} (${delta})`;
 }
 
 async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, options }) {

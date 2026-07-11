@@ -67,12 +67,19 @@ Important fields:
 - `version_source`: the npm package version or fixed source commit used for the bundler.
 - `status`: `success`, `unsupported`, `setup_failed`, `build_failed`, `runtime_failed`, or a warm/no-cache build variant.
 
+On pull requests, the Markdown summary also compares each numeric measurement
+with the matching fixture and bundler from the latest successful `main` push.
+Each delta is shown in parentheses after the current value and uses
+`(current - main) / main`, so a positive build-time delta is slower and a
+negative build-time delta is faster. If `main` has no matching result, only the
+current value is shown.
+
 Runtime verification is separate from build timing. A Bundle that builds but does not export the expected checksum is marked `runtime_failed` and should not be treated as a valid performance result.
 
 ## CI
 
 The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. CI runs compare Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack across the `large` and `loader` fixtures by default. The workflow downloads the `turbopack-cli-main` release artifact from `hardfist/bundler-diff` and passes it to the benchmark runner with `--turbopack-binary`; manual dispatch can set `include_turbopack` to `false` when a non-Turbopack run is needed. Turbopack CI runs enable `TURBOPACK_TRACING=turbo-tasks`, copy raw trace files into `.benchmark-work/ci/turbopack-traces`, upload each trace log as a separate workflow artifact, and link those trace artifacts from the pull request timing comment. The workflow writes the benchmark table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, raw timing log, and Turbopack trace log artifacts.
 
-The workflow builds the Unpack native addon with `UNPACK_NATIVE_PROFILE=release` so benchmark results compare optimized native builds.
+The workflow builds the Unpack native addon with `UNPACK_NATIVE_PROFILE=release` so benchmark results compare optimized native builds. Pull request runs download the JSON artifact from the latest successful `main` push and show inline percentage deltas in the job summary and benchmark comment.
 
 The workflow is intentionally non-blocking. Benchmark setup failures, external toolchain failures, or runtime verification failures should be visible in the workflow output without blocking unrelated code from merging.

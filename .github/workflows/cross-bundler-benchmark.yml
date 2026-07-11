@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
+      actions: read
       contents: read
       issues: write
       pull-requests: write
@@ -66,6 +67,40 @@ jobs:
           chmod +x .benchmark-tools/turbopack-cli/turbopack-cli
           .benchmark-tools/turbopack-cli/turbopack-cli --help >/dev/null
 
+      - name: Download latest main benchmark results
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          main_run_ids="$(
+            gh run list \
+              --workflow cross-bundler-benchmark.yml \
+              --branch main \
+              --event push \
+              --status success \
+              --limit 20 \
+              --json databaseId \
+              --jq '.[].databaseId'
+          )"
+          if [ -z "$main_run_ids" ]; then
+            echo "No successful main benchmark run was found; delta columns will be omitted."
+            exit 0
+          fi
+          while read -r main_run_id; do
+            rm -rf .benchmark-work/main
+            mkdir -p .benchmark-work/main
+            if gh run download "$main_run_id" \
+              --name cross-bundler-benchmark-results \
+              --dir .benchmark-work/main \
+              && find .benchmark-work/main -name results.json -type f -print -quit | grep -q .; then
+              echo "Using benchmark results from main workflow run $main_run_id."
+              exit 0
+            fi
+          done <<< "$main_run_ids"
+          rm -rf .benchmark-work/main
+          echo "No recent successful main run has a results artifact; delta columns will be omitted."
+
       - name: Run cross-bundler benchmark
         id: benchmark
         continue-on-error: true
@@ -100,6 +135,19 @@ jobs:
             --bundlers "$benchmark_bundlers" \
             "${turbopack_args[@]}" \
             2> >(tee .benchmark-work/ci/bundler-phase-timings.log | sed -E '/^\[(unpack|webpack) tracing\]/d; /(^| )TRACE .*: .*: close time\.busy=/d' >&2)
+
+      - name: Compare benchmark results with latest main
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          baseline_results="$(find .benchmark-work/main -name results.json -type f -print -quit 2>/dev/null || true)"
+          if [ -f .benchmark-work/ci/results.json ] && [ -n "$baseline_results" ]; then
+            node packages/benchmarks/src/compare-summary.mjs \
+              .benchmark-work/ci/results.json \
+              "$baseline_results" \
+              .benchmark-work/ci/summary.md
+          else
+            echo "Current or main benchmark results are unavailable; keeping the unpaired summary."
+          fi
 
       - name: Format bundler phase timing summary
         if: always()

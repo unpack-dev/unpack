@@ -201,7 +201,7 @@ async function writeWebpackAllFixture(context, shape) {
     benchmarkCase: {
       source: "webpack/benchmark/cases/all",
       commit: WEBPACK_ALL_COMMIT,
-      loaderTransform: shape.kind === "loader" ? "swc-loader" : null
+      loaderTransform: shape.kind === "loader" ? "babel-loader" : null
     },
     dependencies: WEBPACK_ALL_DEPENDENCIES
   });

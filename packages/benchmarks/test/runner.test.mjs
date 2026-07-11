@@ -276,12 +276,17 @@ test("webpack-compatible adapters build the loader benchmark fixture", async () 
     const [javascriptRule, typescriptRule] = rspackConfig.module.rules;
     assert.equal(javascriptRule.test.test("src/index.js"), true);
     assert.equal(javascriptRule.test.test("src/rome.ts"), false);
-    assert.match(javascriptRule.loader, /swc-loader/);
-    assert.equal(javascriptRule.options.jsc.parser.syntax, "ecmascript");
+    assert.match(javascriptRule.loader, /babel-loader/);
+    assert.equal(javascriptRule.options.babelrc, false);
+    assert.equal(javascriptRule.options.configFile, false);
+    assert.equal(javascriptRule.options.presets.length, 1);
+    assert.match(javascriptRule.options.presets[0][0], /@babel\/preset-env/);
     assert.equal(typescriptRule.test.test("src/index.js"), false);
     assert.equal(typescriptRule.test.test("src/rome.ts"), true);
-    assert.match(typescriptRule.loader, /swc-loader/);
-    assert.equal(typescriptRule.options.jsc.parser.syntax, "typescript");
+    assert.match(typescriptRule.loader, /babel-loader/);
+    assert.equal(typescriptRule.options.presets.length, 2);
+    assert.match(typescriptRule.options.presets[0][0], /@babel\/preset-env/);
+    assert.match(typescriptRule.options.presets[1], /@babel\/preset-typescript/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -515,7 +520,7 @@ printf 'raw trace\\n' > "${sourceTraceDir}/trace.log"
   }
 });
 
-test("turbopack does not claim support for the swc-loader fixture", () => {
+test("turbopack does not claim support for the babel-loader fixture", () => {
   assert.equal(adapters.turbopack.supportsLoaderFixture, undefined);
 });
 

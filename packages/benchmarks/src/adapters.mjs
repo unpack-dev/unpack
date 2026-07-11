@@ -15,7 +15,9 @@ const DEFAULT_UNPACK_TRACING_FILTER = "unpack_core=trace,unpack_node=trace";
 const TURBOPACK_TRACING_ENV = "TURBOPACK_TRACING";
 const DEFAULT_TURBOPACK_TRACING_FILTER = "turbo-tasks";
 const METRO_COMMONJS_TRANSFORMER = require.resolve("./metro-commonjs-transformer.cjs");
-const SWC_LOADER = require.resolve("swc-loader");
+const BABEL_LOADER = require.resolve("babel-loader");
+const BABEL_PRESET_ENV = require.resolve("@babel/preset-env");
+const BABEL_PRESET_TYPESCRIPT = require.resolve("@babel/preset-typescript");
 const UNPACK_PACKAGE_ROOT = resolve(dirname(require.resolve("@unpack-js/core")), "..");
 
 export const adapters = {
@@ -533,21 +535,22 @@ function webpackLoaderRules(fixture) {
   }
 
   return [
-    swcLoaderRule(/\.js$/, "ecmascript"),
-    swcLoaderRule(/\.ts$/, "typescript")
+    babelLoaderRule(/\.js$/),
+    babelLoaderRule(/\.ts$/, true)
   ];
 }
 
-function swcLoaderRule(test, syntax) {
+function babelLoaderRule(test, typescript = false) {
   return {
     test,
-    loader: SWC_LOADER,
+    loader: BABEL_LOADER,
     options: {
-      jsc: {
-        parser: { syntax },
-        target: "es2022"
-      },
-      module: { type: "es6" },
+      babelrc: false,
+      configFile: false,
+      presets: [
+        [BABEL_PRESET_ENV, { targets: { node: "18" }, modules: false }],
+        ...(typescript ? [BABEL_PRESET_TYPESCRIPT] : [])
+      ],
       sourceMaps: false
     }
   };

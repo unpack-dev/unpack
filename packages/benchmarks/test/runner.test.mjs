@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -320,7 +320,7 @@ test("webpack-compatible adapters build the loader benchmark fixture", async () 
   }
 });
 
-test("rspack warm benchmark config enables readonly persistent cache", () => {
+test("rspack benchmark config aligns with Unpack's Implemented Webpack Surface", () => {
   const config = createRspackBenchmarkConfig({
     fixture: {
       context: "/benchmark/fixture",
@@ -332,14 +332,122 @@ test("rspack warm benchmark config enables readonly persistent cache", () => {
     cacheReadonly: true
   });
 
-  assert.deepEqual(config.cache, {
-    type: "persistent",
-    storage: {
-      type: "filesystem",
-      directory: "/benchmark/cache"
-    },
-    readonly: true
+  assert.equal(config.mode, "none");
+  assert.equal(config.target, "node");
+  assert.deepEqual(config.externalsPresets, {
+    node: false
   });
+  assert.deepEqual(config.entry, {
+    main: "/benchmark/fixture/src/index.js"
+  });
+  assert.deepEqual(config.output, {
+    path: "/benchmark/output",
+    filename: "main.js",
+    chunkFilename: "[name].js",
+    library: {
+      type: "commonjs2"
+    },
+    clean: false,
+    module: false,
+    iife: false,
+    chunkFormat: "commonjs",
+    chunkLoading: "require",
+    workerChunkLoading: false,
+    wasmLoading: false,
+    workerWasmLoading: false,
+    asyncChunks: true,
+    pathinfo: false,
+    strictModuleErrorHandling: false,
+    compareBeforeEmit: false
+  });
+  assert.equal(config.devtool, false);
+  assert.deepEqual(config.resolve, {
+    conditionNames: [],
+    extensions: [".ts", ".tsx", ".js", ".jsx"],
+    mainFields: ["main"],
+    byDependency: {
+      esm: {
+        conditionNames: [],
+        extensions: [".ts", ".tsx", ".js", ".jsx"],
+        mainFields: ["main"]
+      }
+    }
+  });
+  assert.deepEqual(config.module, {
+    parser: {
+      javascript: {
+        commonjs: false,
+        commonjsMagicComments: false,
+        createRequire: false,
+        exportsPresence: false,
+        importDynamic: true,
+        importMeta: false,
+        importMetaResolve: false,
+        requireAlias: false,
+        requireAsExpression: false,
+        requireDynamic: false,
+        requireResolve: false,
+        url: false,
+        worker: false
+      }
+    }
+  });
+  assert.equal(config.amd, false);
+  assert.equal(config.node, false);
+  assert.equal(config.performance, false);
+  assert.deepEqual(config.experiments, {
+    asyncWebAssembly: false
+  });
+  assert.deepEqual(config.optimization, {
+    moduleIds: "named",
+    chunkIds: "named",
+    minimize: false,
+    mergeDuplicateChunks: false,
+    splitChunks: false,
+    runtimeChunk: false,
+    removeEmptyChunks: true,
+    realContentHash: false,
+    sideEffects: false,
+    providedExports: true,
+    concatenateModules: false,
+    innerGraph: false,
+    usedExports: false,
+    mangleExports: false,
+    inlineExports: false,
+    nodeEnv: false,
+    emitOnErrors: true,
+    avoidEntryIife: false
+  });
+  assert.deepEqual(Object.keys(config.cache).sort(), [
+    "readonly",
+    "snapshot",
+    "storage",
+    "type"
+  ]);
+  assert.equal(config.cache.type, "persistent");
+  assert.deepEqual(config.cache.storage, {
+    type: "filesystem",
+    directory: "/benchmark/cache"
+  });
+  assert.equal(config.cache.readonly, true);
+  assert.deepEqual(Object.keys(config.cache.snapshot), ["managedPaths"]);
+  assert.equal(config.cache.snapshot.managedPaths.length, 1);
+  assert.equal(isAbsolute(config.cache.snapshot.managedPaths[0]), true);
+  assert.equal(
+    config.cache.snapshot.managedPaths[0].endsWith(join("@rspack", "core")),
+    true
+  );
+
+  const noCacheConfig = createRspackBenchmarkConfig({
+    fixture: {
+      context: "/benchmark/fixture",
+      entry: "./src/index.js"
+    },
+    outputDir: "/benchmark/output",
+    cacheDir: "/benchmark/cache",
+    persistentCache: false
+  });
+  assert.equal(noCacheConfig.cache, false);
 });
 
 test("non-loader adapters mark the loader benchmark fixture unsupported", async () => {

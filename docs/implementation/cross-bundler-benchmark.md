@@ -54,6 +54,33 @@ trace server with `pnpm next internal trace <trace.log>` or
 `cargo run --bin turbo-trace-server --release -- <trace.log>`, then open
 <https://trace.nextjs.org/>.
 
+## Rspack Configuration Alignment
+
+The Rspack adapter is constrained, where Rspack exposes a corresponding
+option, to Unpack's Implemented Webpack Surface. It uses the same `none` mode,
+Node/CommonJS output and require chunk loading, named module and chunk ids,
+resolver conditions and extensions, source-map setting, and loader rules. It
+also disables Node builtin externalization and emits without a whole-bundle
+IIFE or compare-before-write optimization.
+
+Rspack optimizations that Unpack does not implement are disabled: split-chunks
+extraction, generic duplicate-chunk merging, side-effect pruning, used-export
+analysis, inner-graph analysis, module concatenation, export mangling and
+inlining, minimization, and separate runtime chunks. Provided-export analysis
+remains enabled to match Unpack's minimal Exports Info, and empty-chunk removal
+remains enabled because Unpack avoids materializing Async Chunks whose targets
+are already available from their parent. CommonJS, AMD, `import.meta`, URL,
+worker, and async WebAssembly dependency surfaces are disabled where Rspack
+provides parser or output switches. Dynamic Import Dependencies with statically
+known specifiers remain enabled for Async Split Points; Rspack cannot reject
+only Context Modules without also disabling that implemented surface.
+
+For persistent-cache measurements, Rspack uses its own package root as the only
+managed path, mirroring the Unpack adapter instead of accepting Rspack's broader
+`node_modules` default. Warm builds keep that cache read-only, while no-cache
+builds set `cache: false`. These settings improve workload comparability; they
+do not make the benchmark a compatibility claim.
+
 ## Result Shape
 
 The runner emits a Markdown summary with the loader results in the first table and the results without loaders in a separate second table. It can also write the raw JSON report with `--output-json`.

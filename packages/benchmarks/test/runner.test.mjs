@@ -38,6 +38,37 @@ test("summary renders loader results before a separate non-loader table", () => 
   assert.doesNotMatch(summary.slice(nonLoaderHeading), /\| loader \|/);
 });
 
+test("summary compares measurements with matching latest main results", () => {
+  const current = summaryResult({ fixture: "large", bundler: "unpack" });
+  const baseline = {
+    ...current,
+    cold_build_ms: 8,
+    warm_build_ms: 2.5,
+    no_cache_build_ms: 10,
+    output_bytes: 200
+  };
+  const summary = toSummaryMarkdown(
+    { results: [current] },
+    { results: [baseline] }
+  );
+
+  assert.match(summary, /cold_delta_vs_main/);
+  assert.match(summary, /warm_delta_vs_main/);
+  assert.match(summary, /no_cache_delta_vs_main/);
+  assert.match(summary, /output_delta_vs_main/);
+  assert.match(summary, /\| \+25\.0% \| \+100\.0% \| -20\.0% \| -50\.0% \| success \|/);
+  assert.match(summary, /Positive timing deltas mean slower than the latest main result/);
+});
+
+test("summary displays unavailable deltas when main has no matching result", () => {
+  const summary = toSummaryMarkdown(
+    { results: [summaryResult({ fixture: "large", bundler: "unpack" })] },
+    { results: [summaryResult({ fixture: "loader", bundler: "unpack" })] }
+  );
+
+  assert.match(summary, /\| — \| — \| — \| — \| success \|/);
+});
+
 test("runner emits persistent-cache and no-cache measurements for a verified bundle", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
   const calls = [];

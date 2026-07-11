@@ -709,8 +709,11 @@ test("filesystem cache flushes after the initial-store timeout", async () => {
     assert.equal(result.err, null);
     await assert.rejects(stat(join(cacheLocation, "index.pack")));
 
-    await delay(100);
-    assert.ok(await stat(join(cacheLocation, "index.pack")));
+    await waitForObservation(
+      () => stat(join(cacheLocation, "index.pack")),
+      () => true,
+      "initial PackFile publication"
+    );
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
@@ -738,8 +741,11 @@ test("repeated run uses the ordinary idle cache timeout", async () => {
 
   try {
     assert.equal((await runExistingCompiler(compiler)).err, null);
-    await delay(120);
-    const firstRevision = await readFile(indexPath);
+    const firstRevision = await waitForObservation(
+      () => readFile(indexPath),
+      () => true,
+      "initial PackFile revision"
+    );
 
     await writeFile(entry, "export const value = 'after';", "utf8");
     const changedTime = new Date(Date.now() + 2000);
@@ -748,8 +754,12 @@ test("repeated run uses the ordinary idle cache timeout", async () => {
 
     await delay(60);
     assert.deepEqual(await readFile(indexPath), firstRevision);
-    await delay(180);
-    assert.notDeepEqual(await readFile(indexPath), firstRevision);
+    const nextRevision = await waitForObservation(
+      () => readFile(indexPath),
+      (revision) => !revision.equals(firstRevision),
+      "ordinary-idle PackFile revision"
+    );
+    assert.notDeepEqual(nextRevision, firstRevision);
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
@@ -1893,6 +1903,28 @@ function collectWatchResults() {
 function delay(ms: number) {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
+  });
+}
+
+async function waitForObservation<T>(
+  observe: () => Promise<T>,
+  isReady: (value: T) => boolean,
+  description: string
+): Promise<T> {
+  const deadline = Date.now() + 10_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const value = await observe();
+      if (isReady(value)) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(20);
+  }
+
+  throw new Error(`timed out waiting for ${description}`, {
+    cause: lastError
   });
 }
 

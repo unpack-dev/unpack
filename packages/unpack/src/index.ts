@@ -381,13 +381,12 @@ interface NativeStatsJson {
   output_path?: string;
   watchDependencies?: WatchDependencySets;
   watch_dependencies?: WatchDependencySets;
-  moduleGraph?: NativeModuleGraph;
-  module_graph?: NativeModuleGraph;
 }
 
-interface NativeModuleGraph {
-  modules: NativeModule[];
-  connections: NativeModuleGraphConnection[];
+interface NativeCompilation {
+  modules(): NativeModule[];
+  incomingConnections(moduleId: number): NativeModuleGraphConnection[];
+  outgoingConnections(moduleId: number): NativeModuleGraphConnection[];
 }
 
 interface NativeModule {
@@ -399,6 +398,7 @@ interface NativeModule {
 }
 
 interface NativeModuleGraphConnection {
+  id: number;
   originModule?: number | null;
   origin_module?: number | null;
   module: number;
@@ -410,17 +410,13 @@ interface NativeModuleGraphConnection {
   parent_block_index?: number;
 }
 
-interface NormalizedNativeStats {
-  json: StatsJson;
-  moduleGraph: NativeModuleGraph;
-}
-
 interface NativeRunResult {
   error?: {
     name: string;
     message: string;
   } | null;
   stats?: NativeStatsJson | null;
+  compilation?: NativeCompilation | null;
   logs?: InfrastructureLogEvent[] | null;
 }
 
@@ -772,7 +768,10 @@ class CompilerImpl implements Compiler {
         );
         this.#hasCompletedFilesystemCompilation = true;
         this.#emitInfrastructureLog("info", "unpack.Compiler", "run completed");
-        const stats = new StatsImpl(normalizeNativeStats(result.stats));
+        const stats = new StatsImpl(
+          normalizeNativeStats(result.stats),
+          result.compilation
+        );
         void this.hooks.done.promise(stats).then(
           () => this.#deliverRunCallback(callback, null, stats),
           (error: unknown) =>
@@ -958,7 +957,10 @@ class CompilerImpl implements Compiler {
       );
       this.#hasCompletedFilesystemCompilation = true;
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation completed");
-      const stats = new StatsImpl(normalizeNativeStats(result.stats));
+      const stats = new StatsImpl(
+        normalizeNativeStats(result.stats),
+        result.compilation
+      );
       try {
         await this.hooks.done.promise(stats);
       } catch (error) {
@@ -1284,9 +1286,9 @@ class StatsImpl implements Stats {
   readonly compilation: Compilation;
   readonly #json: StatsJson;
 
-  constructor(stats: NormalizedNativeStats) {
-    this.#json = stats.json;
-    this.compilation = new CompilationImpl(stats.moduleGraph);
+  constructor(json: StatsJson, compilation: NativeCompilation | null | undefined) {
+    this.#json = json;
+    this.compilation = new CompilationImpl(compilation);
   }
 
   hasErrors(): boolean {
@@ -1305,10 +1307,12 @@ class StatsImpl implements Stats {
 }
 
 class ModuleImpl implements Module {
-  dependencies: readonly Dependency[] = [];
   readonly #identifier: string;
+  #moduleGraph: ModuleGraphImpl | undefined;
+  #dependencies: readonly Dependency[] | undefined;
 
   constructor(
+    readonly nativeId: number,
     readonly resource: string,
     readonly type: string,
     readonly providedExports: readonly string[],
@@ -1329,8 +1333,19 @@ class ModuleImpl implements Module {
     return this.resource;
   }
 
-  setDependencies(dependencies: readonly Dependency[]): void {
-    this.dependencies = dependencies;
+  get dependencies(): readonly Dependency[] {
+    if (!this.#dependencies) {
+      this.#dependencies = this.#moduleGraph
+        ? [...this.#moduleGraph.getOutgoingConnections(this)].map(
+            (connection) => connection.dependency
+          )
+        : [];
+    }
+    return this.#dependencies;
+  }
+
+  bindModuleGraph(moduleGraph: ModuleGraphImpl): void {
+    this.#moduleGraph = moduleGraph;
   }
 }
 
@@ -1429,6 +1444,9 @@ const EMPTY_OPTIMIZATION_BAILOUTS: readonly string[] = [];
 const EMPTY_EXPORTS_INFO = new ExportsInfoImpl([]);
 
 class ModuleGraphImpl implements ModuleGraph {
+  readonly #nativeCompilation: NativeCompilation | undefined;
+  readonly #modulesById: ReadonlyMap<number, ModuleImpl>;
+  readonly #connectionById = new Map<number, ModuleGraphConnectionImpl>();
   readonly #connectionByDependency = new Map<Dependency, ModuleGraphConnectionImpl>();
   readonly #incoming = new Map<Module, Set<ModuleGraphConnection>>();
   readonly #outgoing = new Map<Module, Set<ModuleGraphConnection>>();
@@ -1441,56 +1459,66 @@ class ModuleGraphImpl implements ModuleGraph {
     ReadonlyMap<Module, readonly ModuleGraphConnection[]>
   >();
   readonly #issuers = new Map<Module, Module | null>();
+  readonly #loadedIncoming = new Set<Module>();
+  readonly #loadedOutgoing = new Set<Module>();
   readonly #exports = new Map<Module, ExportsInfoImpl>();
 
   constructor(
-    modulesById: ReadonlyMap<number, ModuleImpl>,
-    connections: readonly NativeModuleGraphConnection[]
+    nativeCompilation: NativeCompilation | undefined,
+    modulesById: ReadonlyMap<number, ModuleImpl>
   ) {
+    this.#nativeCompilation = nativeCompilation;
+    this.#modulesById = modulesById;
     for (const module of modulesById.values()) {
       this.#exports.set(module, new ExportsInfoImpl(module.providedExports));
     }
-    for (const nativeConnection of connections) {
-      const target = modulesById.get(nativeConnection.module);
-      if (!target) continue;
-      const originId = nativeConnection.originModule ?? nativeConnection.origin_module;
-      const origin = originId == null ? null : modulesById.get(originId) ?? null;
-      const dependency = new DependencyImpl(
-        nativeConnection.dependencyType ?? nativeConnection.dependency_type ?? "unknown",
-        nativeConnection.request ?? undefined,
-        nativeConnection.weak,
-        nativeConnection.parentBlockIndex ?? nativeConnection.parent_block_index ?? -1
-      );
-      const connection = new ModuleGraphConnectionImpl(
-        origin,
-        dependency,
-        target,
-        nativeConnection.weak
-      );
-      this.#connectionByDependency.set(dependency, connection);
-      addToSetMap(this.#incoming, target, connection);
-      if (origin) addToSetMap(this.#outgoing, origin, connection);
+  }
+
+  #materializeConnection(
+    nativeConnection: NativeModuleGraphConnection
+  ): ModuleGraphConnectionImpl | undefined {
+    const existing = this.#connectionById.get(nativeConnection.id);
+    if (existing) return existing;
+    const target = this.#modulesById.get(nativeConnection.module);
+    if (!target) return undefined;
+    const originId = nativeConnection.originModule ?? nativeConnection.origin_module;
+    const origin = originId == null ? null : this.#modulesById.get(originId) ?? null;
+    const dependency = new DependencyImpl(
+      nativeConnection.dependencyType ?? nativeConnection.dependency_type ?? "unknown",
+      nativeConnection.request ?? undefined,
+      nativeConnection.weak,
+      nativeConnection.parentBlockIndex ?? nativeConnection.parent_block_index ?? -1
+    );
+    const connection = new ModuleGraphConnectionImpl(
+      origin,
+      dependency,
+      target,
+      nativeConnection.weak
+    );
+    this.#connectionById.set(nativeConnection.id, connection);
+    this.#connectionByDependency.set(dependency, connection);
+    addToSetMap(this.#incoming, target, connection);
+    if (origin) addToSetMap(this.#outgoing, origin, connection);
+    return connection;
+  }
+
+  #loadIncoming(module: Module): void {
+    if (this.#loadedIncoming.has(module)) return;
+    this.#loadedIncoming.add(module);
+    if (!(module instanceof ModuleImpl)) return;
+    for (const connection of
+      this.#nativeCompilation?.incomingConnections(module.nativeId) ?? []) {
+      this.#materializeConnection(connection);
     }
-    for (const module of modulesById.values()) {
-      const incoming = this.#incoming.get(module);
-      if (incoming) {
-        this.#incomingByOrigin.set(
-          module,
-          groupConnections(incoming, (connection) => connection.originModule)
-        );
-        this.#issuers.set(
-          module,
-          [...incoming].find((connection) => connection.originModule !== null)
-            ?.originModule ?? null
-        );
-      }
-      const outgoing = this.#outgoing.get(module);
-      if (outgoing) {
-        this.#outgoingByModule.set(
-          module,
-          groupConnections(outgoing, (connection) => connection.module)
-        );
-      }
+  }
+
+  #loadOutgoing(module: Module): void {
+    if (this.#loadedOutgoing.has(module)) return;
+    this.#loadedOutgoing.add(module);
+    if (!(module instanceof ModuleImpl)) return;
+    for (const connection of
+      this.#nativeCompilation?.outgoingConnections(module.nativeId) ?? []) {
+      this.#materializeConnection(connection);
     }
   }
 
@@ -1527,26 +1555,53 @@ class ModuleGraphImpl implements ModuleGraph {
   }
 
   getIncomingConnections(module: Module): ReadonlySet<ModuleGraphConnection> {
+    this.#loadIncoming(module);
     return this.#incoming.get(module) ?? EMPTY_CONNECTIONS;
   }
 
   getOutgoingConnections(module: Module): ReadonlySet<ModuleGraphConnection> {
+    this.#loadOutgoing(module);
     return this.#outgoing.get(module) ?? EMPTY_CONNECTIONS;
   }
 
   getIncomingConnectionsByOriginModule(
     module: Module
   ): ReadonlyMap<Module | null, readonly ModuleGraphConnection[]> {
-    return this.#incomingByOrigin.get(module) ?? EMPTY_INCOMING_CONNECTION_GROUPS;
+    let groups = this.#incomingByOrigin.get(module);
+    if (!groups) {
+      groups = groupConnections(
+        this.getIncomingConnections(module),
+        (connection) => connection.originModule
+      );
+      this.#incomingByOrigin.set(module, groups);
+    }
+    return groups ?? EMPTY_INCOMING_CONNECTION_GROUPS;
   }
 
   getOutgoingConnectionsByModule(
     module: Module
   ): ReadonlyMap<Module, readonly ModuleGraphConnection[]> | undefined {
-    return this.#outgoingByModule.get(module);
+    this.#loadOutgoing(module);
+    const outgoing = this.#outgoing.get(module);
+    if (!outgoing) return undefined;
+    let groups = this.#outgoingByModule.get(module);
+    if (!groups) {
+      groups = groupConnections(outgoing, (connection) => connection.module);
+      this.#outgoingByModule.set(module, groups);
+    }
+    return groups;
   }
 
   getIssuer(module: Module): Module | null | undefined {
+    if (!this.#issuers.has(module)) {
+      const incoming = this.getIncomingConnections(module);
+      if (incoming.size === 0) return undefined;
+      this.#issuers.set(
+        module,
+        [...incoming].find((connection) => connection.originModule !== null)
+          ?.originModule ?? null
+      );
+    }
     return this.#issuers.get(module);
   }
 
@@ -1593,11 +1648,12 @@ class CompilationImpl implements Compilation {
   readonly moduleGraph: ModuleGraph;
   readonly modules: ReadonlySet<Module>;
 
-  constructor(graph: NativeModuleGraph) {
+  constructor(compilation: NativeCompilation | null | undefined) {
     const modulesById = new Map(
-      graph.modules.map((module) => [
+      (compilation?.modules() ?? []).map((module) => [
         module.id,
         new ModuleImpl(
+          module.id,
           module.resource,
           module.type,
           module.providedExports,
@@ -1605,13 +1661,9 @@ class CompilationImpl implements Compilation {
         )
       ])
     );
-    const moduleGraph = new ModuleGraphImpl(modulesById, graph.connections);
+    const moduleGraph = new ModuleGraphImpl(compilation ?? undefined, modulesById);
     for (const module of modulesById.values()) {
-      module.setDependencies(
-        [...moduleGraph.getOutgoingConnections(module)].map(
-          (connection) => connection.dependency
-        )
-      );
+      module.bindModuleGraph(moduleGraph);
     }
     this.moduleGraph = moduleGraph;
     this.modules = new Set(modulesById.values());
@@ -2341,38 +2393,25 @@ function normalizeWatchPoll(value: unknown): number | undefined {
   throw new TypeError("watchOptions.poll must be true or a positive integer");
 }
 
-function normalizeNativeStats(
-  stats: NativeStatsJson | null | undefined
-): NormalizedNativeStats {
+function normalizeNativeStats(stats: NativeStatsJson | null | undefined): StatsJson {
   if (!stats) {
     return {
-      json: {
-        errors: [],
-        warnings: [],
-        assets: [],
-        outputPath: "",
-        watchDependencies: emptyWatchDependencies()
-      },
-      moduleGraph: emptyNativeModuleGraph()
+      errors: [],
+      warnings: [],
+      assets: [],
+      outputPath: "",
+      watchDependencies: emptyWatchDependencies()
     };
   }
   return {
-    json: {
-      errors: stats.errors.map(cloneStatsError),
-      warnings: (stats.warnings ?? []).map(cloneStatsError),
-      assets: stats.assets.map((asset) => ({ ...asset })),
-      outputPath: stats.outputPath ?? stats.output_path ?? "",
-      watchDependencies: cloneWatchDependencies(
-        stats.watchDependencies ?? stats.watch_dependencies ?? emptyWatchDependencies()
-      )
-    },
-    moduleGraph:
-      stats.moduleGraph ?? stats.module_graph ?? emptyNativeModuleGraph()
+    errors: stats.errors.map(cloneStatsError),
+    warnings: (stats.warnings ?? []).map(cloneStatsError),
+    assets: stats.assets.map((asset) => ({ ...asset })),
+    outputPath: stats.outputPath ?? stats.output_path ?? "",
+    watchDependencies: cloneWatchDependencies(
+      stats.watchDependencies ?? stats.watch_dependencies ?? emptyWatchDependencies()
+    )
   };
-}
-
-function emptyNativeModuleGraph(): NativeModuleGraph {
-  return { modules: [], connections: [] };
 }
 
 function cloneStatsError(error: StatsError): StatsError {

@@ -64,6 +64,10 @@ impl Compilation {
         &self.module_graph
     }
 
+    pub fn into_module_graph(self) -> ModuleGraph {
+        self.module_graph
+    }
+
     pub fn chunk_graph(&self) -> &ChunkGraph {
         &self.chunk_graph
     }

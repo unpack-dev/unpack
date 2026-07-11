@@ -174,14 +174,6 @@ pub struct NativeStatsJson {
     pub output_path: String,
     #[napi(js_name = "watchDependencies")]
     pub watch_dependencies: NativeWatchDependencies,
-    #[napi(js_name = "moduleGraph")]
-    pub module_graph: NativeModuleGraph,
-}
-
-#[napi(object)]
-pub struct NativeModuleGraph {
-    pub modules: Vec<NativeModule>,
-    pub connections: Vec<NativeModuleGraphConnection>,
 }
 
 #[napi(object)]
@@ -197,6 +189,7 @@ pub struct NativeModule {
 
 #[napi(object)]
 pub struct NativeModuleGraphConnection {
+    pub id: u32,
     #[napi(js_name = "originModule")]
     pub origin_module: Option<u32>,
     pub module: u32,
@@ -228,11 +221,53 @@ pub struct NativeInfrastructureLogEvent {
     pub message: String,
 }
 
-#[napi(object)]
+#[napi(object, object_from_js = false)]
 pub struct NativeRunResult {
     pub error: Option<NativeInfrastructureError>,
     pub stats: Option<NativeStatsJson>,
+    pub compilation: Option<NativeCompilation>,
     pub logs: Vec<NativeInfrastructureLogEvent>,
+}
+
+#[napi]
+pub struct NativeCompilation {
+    module_graph: Arc<unpack_core::ModuleGraph>,
+}
+
+#[napi]
+impl NativeCompilation {
+    #[napi]
+    pub fn modules(&self) -> Vec<NativeModule> {
+        self.module_graph
+            .modules()
+            .iter()
+            .map(native_module)
+            .collect()
+    }
+
+    #[napi(js_name = "incomingConnections")]
+    pub fn incoming_connections(&self, module_id: u32) -> Vec<NativeModuleGraphConnection> {
+        let module_id = unpack_core::ModuleId::new(module_id as usize);
+        if self.module_graph.module(module_id).is_none() {
+            return Vec::new();
+        }
+        self.module_graph
+            .incoming_connections(module_id)
+            .map(native_module_graph_connection)
+            .collect()
+    }
+
+    #[napi(js_name = "outgoingConnections")]
+    pub fn outgoing_connections(&self, module_id: u32) -> Vec<NativeModuleGraphConnection> {
+        let module_id = unpack_core::ModuleId::new(module_id as usize);
+        if self.module_graph.module(module_id).is_none() {
+            return Vec::new();
+        }
+        self.module_graph
+            .outgoing_connections(module_id)
+            .map(native_module_graph_connection)
+            .collect()
+    }
 }
 
 #[napi(object)]
@@ -604,39 +639,37 @@ async fn run_compiler_inner(
         return infrastructure_error_with_logs("OutputWriteError", error, logs);
     }
     let compilation = pending.finish();
+    let stats = NativeStatsJson {
+        errors: compilation.errors().iter().map(stats_error).collect(),
+        warnings: Vec::new(),
+        assets: compilation.assets().iter().map(asset_stats).collect(),
+        output_path: output_path.to_string_lossy().into_owned(),
+        watch_dependencies: watch_dependencies(compilation.watch_dependencies()),
+    };
+    let module_graph = Arc::new(compilation.into_module_graph());
 
     NativeRunResult {
         error: None,
-        stats: Some(NativeStatsJson {
-            errors: compilation.errors().iter().map(stats_error).collect(),
-            warnings: Vec::new(),
-            assets: compilation.assets().iter().map(asset_stats).collect(),
-            output_path: output_path.to_string_lossy().into_owned(),
-            watch_dependencies: watch_dependencies(compilation.watch_dependencies()),
-            module_graph: module_graph(compilation.module_graph()),
-        }),
+        stats: Some(stats),
+        compilation: Some(NativeCompilation { module_graph }),
         logs,
     }
 }
 
-fn module_graph(graph: &unpack_core::ModuleGraph) -> NativeModuleGraph {
-    NativeModuleGraph {
-        modules: graph.modules().iter().map(native_module).collect(),
-        connections: graph
-            .connections()
-            .iter()
-            .map(|connection| NativeModuleGraphConnection {
-                origin_module: connection.origin_module.map(native_module_id),
-                module: native_module_id(connection.module),
-                dependency_type: dependency_type(&connection.dependency).to_string(),
-                request: connection.dependency.request().map(str::to_string),
-                weak: dependency_is_weak(&connection.dependency),
-                parent_block_index: connection
-                    .origin_dependency_id
-                    .and_then(|id| i32::try_from(id.index()).ok())
-                    .unwrap_or(-1),
-            })
-            .collect(),
+fn native_module_graph_connection(
+    connection: &unpack_core::ModuleGraphConnection,
+) -> NativeModuleGraphConnection {
+    NativeModuleGraphConnection {
+        id: connection.id.index().try_into().unwrap_or(u32::MAX),
+        origin_module: connection.origin_module.map(native_module_id),
+        module: native_module_id(connection.module),
+        dependency_type: dependency_type(&connection.dependency).to_string(),
+        request: connection.dependency.request().map(str::to_string),
+        weak: dependency_is_weak(&connection.dependency),
+        parent_block_index: connection
+            .origin_dependency_id
+            .and_then(|id| i32::try_from(id.index()).ok())
+            .unwrap_or(-1),
     }
 }
 
@@ -746,6 +779,7 @@ fn infrastructure_error_with_logs(
             message: message.into(),
         }),
         stats: None,
+        compilation: None,
         logs,
     }
 }

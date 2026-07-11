@@ -34,6 +34,40 @@ test("emits assets through the ESM default API", async () => {
   }
 });
 
+test("Stats.toJson returns an isolated baseline snapshot", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 42;"
+  });
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js"
+    });
+
+    assert.equal(err, null);
+    assert.ok(stats);
+    const expected = stats.toJson();
+    const mutated = stats.toJson();
+    assert.notStrictEqual(mutated, expected);
+    assert.notStrictEqual(mutated.assets, expected.assets);
+    assert.notStrictEqual(mutated.errors, expected.errors);
+    assert.notStrictEqual(mutated.warnings, expected.warnings);
+    assert.notStrictEqual(mutated.watchDependencies, expected.watchDependencies);
+
+    const firstAsset = mutated.assets[0];
+    assert.ok(firstAsset);
+    firstAsset.name = "changed.js";
+    mutated.errors.push({ message: "changed error" });
+    mutated.warnings.push({ message: "changed warning" });
+    mutated.watchDependencies.files.push("changed dependency");
+
+    assert.deepEqual(stats.toJson(), expected);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 // Ported from webpack 5.108.1's DefinePropertyGettersRuntimeModule,
 // HasOwnPropertyRuntimeModule, and MakeNamespaceObjectRuntimeModule behavior.
 test("static ESM emits only the runtime capabilities used by generated code", async () => {
@@ -194,7 +228,7 @@ test("can disable sourcemap emission", async () => {
   }
 });
 
-test("unpack options callback closes the returned compiler", async () => {
+test("unpack options callback returns a reusable compiler", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;"
   });
@@ -203,13 +237,15 @@ test("unpack options callback closes the returned compiler", async () => {
     let compiler!: ReturnType<typeof unpack>;
     const callbackResult = new Promise<{ err: Error | null; stats?: Stats }>(
       (resolve) => {
-        compiler = unpack(
+        const returnedCompiler = unpack(
           {
             context: fixture,
             entry: "./src/index.js"
           },
           (err, stats) => resolve({ err, stats })
         );
+        assert.ok(returnedCompiler);
+        compiler = returnedCompiler;
       }
     );
 
@@ -217,7 +253,9 @@ test("unpack options callback closes the returned compiler", async () => {
     assert.equal(err, null);
     assert.equal(stats?.hasErrors(), false);
     const rerun = await runExistingCompiler(compiler);
-    assert.equal(rerun.err?.name, "CompilerClosedError");
+    assert.equal(rerun.err, null);
+    assert.equal(rerun.stats?.hasErrors(), false);
+    await closeCompiler(compiler);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

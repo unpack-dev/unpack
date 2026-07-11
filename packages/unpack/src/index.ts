@@ -836,19 +836,34 @@ class StatsImpl implements Stats {
 
 export default function unpack(
   options: UnpackOptions,
+  callback: RunCallback
+): Compiler | null;
+export default function unpack(
+  options: UnpackOptions,
+  callback?: undefined
+): Compiler;
+export default function unpack(
+  options: UnpackOptions,
   callback?: RunCallback
-): Compiler {
+): Compiler | null {
   if (callback !== undefined) {
     assertFunction(callback, "callback");
   }
 
-  const compiler = new CompilerImpl(normalizeOptions(options));
+  let compiler: Compiler;
+  try {
+    compiler = new CompilerImpl(normalizeOptions(options));
+  } catch (error) {
+    if (callback === undefined) {
+      throw error;
+    }
+
+    const constructionError = toError(error, "InfrastructureError");
+    defer(() => callback(constructionError));
+    return null;
+  }
   if (callback) {
-    compiler.run((runErr, stats) => {
-      compiler.close((closeErr) => {
-        callback(runErr ?? closeErr, stats);
-      });
-    });
+    compiler.run(callback);
   }
   return compiler;
 }

@@ -31,7 +31,6 @@ test("observes top-level callback validation error timing", async () => {
       })
     );
     const webpackValidation = await observeWebpackInvalidModeCallback(webpackFixture);
-    let unpackCallbackCalled = false;
     const unpackNoCallbackError = captureSynchronousThrow(() =>
       unpack({
         context: unpackFixture,
@@ -40,19 +39,7 @@ test("observes top-level callback validation error timing", async () => {
         mode: "staging"
       })
     );
-    const unpackError = captureSynchronousThrow(() =>
-      unpack(
-        {
-          context: unpackFixture,
-          entry: "./src/index.js",
-          // @ts-expect-error intentionally observing runtime validation
-          mode: "staging"
-        },
-        () => {
-          unpackCallbackCalled = true;
-        }
-      )
-    );
+    const unpackValidation = await observeUnpackInvalidModeCallback(unpackFixture);
 
     assert.equal(webpackNoCallbackError?.name, "ValidationError");
     assert.match(webpackNoCallbackError?.message ?? "", /Invalid configuration object/);
@@ -63,13 +50,32 @@ test("observes top-level callback validation error timing", async () => {
     assert.equal(webpackValidation.hasStats, false);
     assert.equal(unpackNoCallbackError?.name, "TypeError");
     assert.match(unpackNoCallbackError?.message ?? "", /options.mode must be/);
-    assert.equal(unpackError?.name, "TypeError");
-    assert.match(unpackError?.message ?? "", /options.mode must be/);
-    await delay(0);
-    assert.equal(unpackCallbackCalled, false);
+    assert.equal(unpackValidation.returnedCompiler, false);
+    assert.equal(unpackValidation.calledSynchronously, false);
+    assert.equal(unpackValidation.err?.name, "TypeError");
+    assert.match(unpackValidation.err?.message ?? "", /options.mode must be/);
+    assert.equal(unpackValidation.hasStats, false);
   } finally {
     await rm(webpackFixture, { recursive: true, force: true });
     await rm(unpackFixture, { recursive: true, force: true });
+  }
+});
+
+test("delivers top-level Compiler initialization failures asynchronously", async () => {
+  const fixture = await createFixture("unpack-initialization-lifecycle-", {
+    "src/index.js": "export const value = 1;"
+  });
+
+  try {
+    const observation = await observeUnpackInitializationFailureCallback(fixture);
+
+    assert.equal(observation.returnedCompiler, false);
+    assert.equal(observation.calledSynchronously, false);
+    assert.equal(observation.err?.name, "InfrastructureError");
+    assert.match(observation.err?.message ?? "", /not supported by Rust regex/);
+    assert.equal(observation.hasStats, false);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
   }
 });
 
@@ -101,8 +107,9 @@ test("observes top-level callback timing and returned compiler lifecycle", async
     assert.equal(unpackObservation.hasErrors, false);
 
     const unpackRerun = await runUnpackCompiler(unpackObservation.compiler);
-    assert.equal(unpackRerun.err?.name, "CompilerClosedError");
-    assert.equal(unpackRerun.hasStats, false);
+    assert.equal(unpackRerun.err, null);
+    assert.equal(unpackRerun.hasStats, true);
+    assert.equal(unpackRerun.hasErrors, false);
     await closeUnpackCompiler(unpackObservation.compiler);
   } finally {
     await rm(webpackFixture, { recursive: true, force: true });
@@ -110,28 +117,61 @@ test("observes top-level callback timing and returned compiler lifecycle", async
   }
 });
 
-test("observes compiler.run callback timing and parse error stats semantics", async () => {
+test("aligns compiler.run callback timing and baseline Stats semantics", async () => {
   const webpackFixture = await createFixture("webpack-run-lifecycle-", {
-    "src/index.js": "import {"
+    "src/index.js": "export const value = 1;"
   });
   const unpackFixture = await createFixture("unpack-run-lifecycle-", {
-    "src/index.js": "import {"
+    "src/index.js": "export const value = 1;"
   });
   const webpackCompiler = webpack(webpackOptions(webpackFixture)) as WebpackCompiler;
   const unpackCompiler = unpack(unpackOptions(unpackFixture));
 
   try {
-    const webpackRun = await runWebpackCompiler(webpackCompiler);
-    assert.equal(webpackRun.calledSynchronously, false);
-    assert.equal(webpackRun.err, null);
-    assert.equal(webpackRun.hasStats, true);
-    assert.equal(webpackRun.hasErrors, true);
+    const webpackSuccess = await runWebpackCompiler(webpackCompiler);
+    assert.equal(webpackSuccess.calledSynchronously, false);
+    assert.equal(webpackSuccess.err, null);
+    assert.equal(webpackSuccess.hasStats, true);
+    assertBaselineWebpackStats(
+      webpackSuccess.stats as WebpackStats | undefined,
+      join(webpackFixture, "dist"),
+      0
+    );
 
-    const unpackRun = await runUnpackCompiler(unpackCompiler);
-    assert.equal(unpackRun.calledSynchronously, false);
-    assert.equal(unpackRun.err, null);
-    assert.equal(unpackRun.hasStats, true);
-    assert.equal(unpackRun.hasErrors, true);
+    const unpackSuccess = await runUnpackCompiler(unpackCompiler);
+    assert.equal(unpackSuccess.calledSynchronously, false);
+    assert.equal(unpackSuccess.err, null);
+    assert.equal(unpackSuccess.hasStats, true);
+    assertBaselineUnpackStats(
+      unpackSuccess.stats as UnpackStats | undefined,
+      join(unpackFixture, "dist"),
+      0
+    );
+
+    await Promise.all([
+      writeFile(join(webpackFixture, "src/index.js"), "import {", "utf8"),
+      writeFile(join(unpackFixture, "src/index.js"), "import {", "utf8")
+    ]);
+
+    const webpackError = await runWebpackCompiler(webpackCompiler);
+    assert.equal(webpackError.calledSynchronously, false);
+    assert.equal(webpackError.err, null);
+    assert.equal(webpackError.hasStats, true);
+    assertBaselineWebpackStats(
+      webpackError.stats as WebpackStats | undefined,
+      join(webpackFixture, "dist"),
+      1
+    );
+
+    const unpackError = await runUnpackCompiler(unpackCompiler);
+    assert.equal(unpackError.calledSynchronously, false);
+    assert.equal(unpackError.err, null);
+    assert.equal(unpackError.hasStats, true);
+    assertBaselineUnpackStats(
+      unpackError.stats as UnpackStats | undefined,
+      join(unpackFixture, "dist"),
+      1
+    );
   } finally {
     await closeWebpackCompiler(webpackCompiler);
     await closeUnpackCompiler(unpackCompiler);
@@ -145,6 +185,7 @@ function webpackOptions(context: string): WebpackOptions {
     context,
     entry: "./src/index.js",
     mode: "none",
+    devtool: false,
     output: {
       path: join(context, "dist")
     }
@@ -156,6 +197,7 @@ function unpackOptions(context: string): Parameters<typeof unpack>[0] {
     context,
     entry: "./src/index.js",
     mode: "none",
+    sourcemap: false,
     output: {
       path: join(context, "dist")
     }
@@ -178,28 +220,78 @@ async function observeUnpackTopLevelCallback(context: string) {
   let compiler!: UnpackCompiler;
   let calledSynchronously = true;
   const result = await new Promise<RunObservation>((resolve) => {
-    compiler = unpack(unpackOptions(context), (err, stats) => {
+    const returnedCompiler = unpack(unpackOptions(context), (err, stats) => {
       resolve(runObservation(calledSynchronously, err, stats));
     });
+    assert.ok(returnedCompiler);
+    compiler = returnedCompiler;
     calledSynchronously = false;
   });
   return { compiler, ...result };
 }
 
 async function observeWebpackInvalidModeCallback(context: string) {
-  let calledSynchronously = true;
-  let returnedCompiler = false;
-  const result = await new Promise<RunObservation>((resolve) => {
-    const compiler = webpack(
+  return observeCallbackEntry((callback) =>
+    webpack(
       {
         context,
         entry: "./src/index.js",
         mode: "staging" as WebpackOptions["mode"]
       },
       (err, stats) => {
-        resolve(runObservation(calledSynchronously, err ?? null, stats));
+        callback(err ?? null, stats);
       }
-    ) as WebpackCompiler | null | undefined;
+    )
+  );
+}
+
+async function observeUnpackInvalidModeCallback(context: string) {
+  return observeCallbackEntry((callback) =>
+    unpack(
+      {
+        context,
+        entry: "./src/index.js",
+        // @ts-expect-error intentionally observing runtime validation
+        mode: "staging"
+      },
+      (err, stats) => {
+        callback(err, stats);
+      }
+    )
+  );
+}
+
+async function observeUnpackInitializationFailureCallback(context: string) {
+  return observeCallbackEntry((callback) =>
+    unpack(
+      {
+        context,
+        entry: "./src/index.js",
+        snapshot: {
+          managedPaths: [/(?=node_modules)/]
+        }
+      },
+      (err, stats) => {
+        callback(err, stats);
+      }
+    )
+  );
+}
+
+async function observeCallbackEntry(
+  invoke: (
+    callback: (
+      err: Error | null | undefined,
+      stats: WebpackStats | UnpackStats | undefined
+    ) => void
+  ) => unknown
+) {
+  let calledSynchronously = true;
+  let returnedCompiler = false;
+  const result = await new Promise<RunObservation>((resolve) => {
+    const compiler = invoke((err, stats) => {
+      resolve(runObservation(calledSynchronously, err, stats));
+    });
     returnedCompiler = compiler != null;
     calledSynchronously = false;
   });
@@ -257,6 +349,7 @@ interface RunObservation {
   err: Error | null;
   hasStats: boolean;
   hasErrors: boolean | undefined;
+  stats: WebpackStats | UnpackStats | undefined;
 }
 
 function runObservation(
@@ -268,8 +361,65 @@ function runObservation(
     calledSynchronously,
     err: err ?? null,
     hasStats: stats !== undefined,
-    hasErrors: stats?.hasErrors()
+    hasErrors: stats?.hasErrors(),
+    stats
   };
+}
+
+function assertBaselineWebpackStats(
+  stats: WebpackStats | undefined,
+  outputPath: string,
+  errorCount: number
+): void {
+  assert.ok(stats);
+  const json = stats.toJson({
+    all: false,
+    assets: true,
+    errors: true,
+    outputPath: true,
+    warnings: true
+  });
+  assertBaselineStats(stats.hasErrors(), json, outputPath, errorCount);
+}
+
+function assertBaselineUnpackStats(
+  stats: UnpackStats | undefined,
+  outputPath: string,
+  errorCount: number
+): void {
+  assert.ok(stats);
+  assertBaselineStats(stats.hasErrors(), stats.toJson(), outputPath, errorCount);
+}
+
+function assertBaselineStats(
+  hasErrors: boolean,
+  json: {
+    assets?: readonly { name?: string; size?: number }[];
+    errors?: readonly unknown[];
+    outputPath?: string;
+    warnings?: readonly unknown[];
+  },
+  outputPath: string,
+  errorCount: number
+): void {
+  assert.equal(hasErrors, errorCount > 0);
+  assert.equal(json.errors?.length, errorCount);
+  assert.equal(json.warnings?.length, 0);
+  assert.equal(json.outputPath, outputPath);
+  const asset = json.assets?.find(({ name }) => name === "main.js");
+  assert.ok(asset);
+  assert.equal(Number.isInteger(asset.size), true);
+  assert.ok((asset.size ?? 0) > 0);
+
+  if (errorCount > 0) {
+    const [error] = json.errors ?? [];
+    const message =
+      typeof error === "object" && error !== null && "message" in error
+        ? (error as { message?: unknown }).message
+        : error;
+    assert.ok(typeof message === "string");
+    assert.ok(message.length > 0);
+  }
 }
 
 function captureSynchronousThrow(callback: () => unknown): Error | null {

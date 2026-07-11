@@ -178,7 +178,7 @@ pub struct NativeStatsJson {
 
 #[napi(object)]
 pub struct NativeModule {
-    pub id: u32,
+    pub handle: u32,
     pub identifier: String,
     pub resource: String,
     #[napi(js_name = "type")]
@@ -189,10 +189,11 @@ pub struct NativeModule {
 
 #[napi(object)]
 pub struct NativeModuleGraphConnection {
-    pub id: u32,
-    #[napi(js_name = "originModule")]
-    pub origin_module: Option<u32>,
-    pub module: u32,
+    pub handle: u32,
+    #[napi(js_name = "originModuleHandle")]
+    pub origin_module_handle: Option<u32>,
+    #[napi(js_name = "moduleHandle")]
+    pub module_handle: u32,
     #[napi(js_name = "dependencyType")]
     pub dependency_type: String,
     pub request: Option<String>,
@@ -203,7 +204,7 @@ pub struct NativeModuleGraphConnection {
 
 #[napi(object)]
 pub struct NativeChunk {
-    pub id: u32,
+    pub handle: u32,
     pub name: Option<String>,
     #[napi(js_name = "renderId")]
     pub render_id: Option<Either<String, u32>>,
@@ -284,7 +285,7 @@ impl NativeCompilation {
             .chunks()
             .iter()
             .map(|chunk| NativeChunk {
-                id: chunk.handle().index().try_into().unwrap_or(u32::MAX),
+                handle: chunk.handle().index().try_into().unwrap_or(u32::MAX),
                 name: chunk.name().map(str::to_string),
                 render_id: native_render_id(chunk.render_id_string(), chunk.render_id_number()),
             })
@@ -733,9 +734,9 @@ fn native_module_graph_connection(
     connection: &unpack_core::ModuleGraphConnection,
 ) -> NativeModuleGraphConnection {
     NativeModuleGraphConnection {
-        id: connection.handle.index().try_into().unwrap_or(u32::MAX),
-        origin_module: connection.origin_module.map(native_module_handle),
-        module: native_module_handle(connection.module),
+        handle: connection.handle.index().try_into().unwrap_or(u32::MAX),
+        origin_module_handle: connection.origin_module.map(native_module_handle),
+        module_handle: native_module_handle(connection.module),
         dependency_type: dependency_type(&connection.dependency).to_string(),
         request: connection.dependency.request().map(str::to_string),
         weak: dependency_is_weak(&connection.dependency),
@@ -764,7 +765,7 @@ fn native_module(module: &Module) -> NativeModule {
     };
 
     NativeModule {
-        id: native_module_handle(module.handle()),
+        handle: native_module_handle(module.handle()),
         identifier: format!("{module_type}|{request}"),
         resource,
         module_type: module_type.to_string(),

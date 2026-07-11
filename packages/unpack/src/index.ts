@@ -414,16 +414,16 @@ interface NativeStatsJson {
 
 interface NativeCompilation {
   modules(): NativeModule[];
-  incomingConnections(moduleId: number): NativeModuleGraphConnection[];
-  outgoingConnections(moduleId: number): NativeModuleGraphConnection[];
+  incomingConnections(moduleHandle: number): NativeModuleGraphConnection[];
+  outgoingConnections(moduleHandle: number): NativeModuleGraphConnection[];
   chunks(): NativeChunk[];
-  chunkModules(chunkId: number): number[];
-  moduleChunks(moduleId: number): number[];
-  moduleId(moduleId: number): string | number | null;
+  chunkModules(chunkHandle: number): number[];
+  moduleChunks(moduleHandle: number): number[];
+  moduleId(moduleHandle: number): string | number | null;
 }
 
 interface NativeModule {
-  id: number;
+  handle: number;
   identifier: string;
   resource: string;
   type: string;
@@ -431,10 +431,9 @@ interface NativeModule {
 }
 
 interface NativeModuleGraphConnection {
-  id: number;
-  originModule?: number | null;
-  origin_module?: number | null;
-  module: number;
+  handle: number;
+  originModuleHandle?: number | null;
+  moduleHandle: number;
   dependencyType?: string;
   dependency_type?: string;
   request?: string | null;
@@ -444,7 +443,7 @@ interface NativeModuleGraphConnection {
 }
 
 interface NativeChunk {
-  id: number;
+  handle: number;
   name?: string | null;
   renderId?: string | number | null;
   render_id?: string | number | null;
@@ -1351,7 +1350,7 @@ class ModuleImpl implements Module {
   #dependencies: readonly Dependency[] | undefined;
 
   constructor(
-    readonly nativeId: number,
+    readonly nativeHandle: number,
     readonly resource: string,
     readonly type: string,
     readonly providedExports: readonly string[],
@@ -1484,8 +1483,8 @@ const EMPTY_EXPORTS_INFO = new ExportsInfoImpl([]);
 
 class ModuleGraphImpl implements ModuleGraph {
   readonly #nativeCompilation: NativeCompilation | undefined;
-  readonly #modulesById: ReadonlyMap<number, ModuleImpl>;
-  readonly #connectionById = new Map<number, ModuleGraphConnectionImpl>();
+  readonly #modulesByHandle: ReadonlyMap<number, ModuleImpl>;
+  readonly #connectionByHandle = new Map<number, ModuleGraphConnectionImpl>();
   readonly #connectionByDependency = new Map<Dependency, ModuleGraphConnectionImpl>();
   readonly #incoming = new Map<Module, Set<ModuleGraphConnection>>();
   readonly #outgoing = new Map<Module, Set<ModuleGraphConnection>>();
@@ -1504,11 +1503,11 @@ class ModuleGraphImpl implements ModuleGraph {
 
   constructor(
     nativeCompilation: NativeCompilation | undefined,
-    modulesById: ReadonlyMap<number, ModuleImpl>
+    modulesByHandle: ReadonlyMap<number, ModuleImpl>
   ) {
     this.#nativeCompilation = nativeCompilation;
-    this.#modulesById = modulesById;
-    for (const module of modulesById.values()) {
+    this.#modulesByHandle = modulesByHandle;
+    for (const module of modulesByHandle.values()) {
       this.#exports.set(module, new ExportsInfoImpl(module.providedExports));
     }
   }
@@ -1516,12 +1515,14 @@ class ModuleGraphImpl implements ModuleGraph {
   #materializeConnection(
     nativeConnection: NativeModuleGraphConnection
   ): ModuleGraphConnectionImpl | undefined {
-    const existing = this.#connectionById.get(nativeConnection.id);
+    const existing = this.#connectionByHandle.get(nativeConnection.handle);
     if (existing) return existing;
-    const target = this.#modulesById.get(nativeConnection.module);
+    const target = this.#modulesByHandle.get(nativeConnection.moduleHandle);
     if (!target) return undefined;
-    const originId = nativeConnection.originModule ?? nativeConnection.origin_module;
-    const origin = originId == null ? null : this.#modulesById.get(originId) ?? null;
+    const originHandle = nativeConnection.originModuleHandle;
+    const origin = originHandle == null
+      ? null
+      : this.#modulesByHandle.get(originHandle) ?? null;
     const dependency = new DependencyImpl(
       nativeConnection.dependencyType ?? nativeConnection.dependency_type ?? "unknown",
       nativeConnection.request ?? undefined,
@@ -1534,7 +1535,7 @@ class ModuleGraphImpl implements ModuleGraph {
       target,
       nativeConnection.weak
     );
-    this.#connectionById.set(nativeConnection.id, connection);
+    this.#connectionByHandle.set(nativeConnection.handle, connection);
     this.#connectionByDependency.set(dependency, connection);
     addToSetMap(this.#incoming, target, connection);
     if (origin) addToSetMap(this.#outgoing, origin, connection);
@@ -1546,7 +1547,7 @@ class ModuleGraphImpl implements ModuleGraph {
     this.#loadedIncoming.add(module);
     if (!(module instanceof ModuleImpl)) return;
     for (const connection of
-      this.#nativeCompilation?.incomingConnections(module.nativeId) ?? []) {
+      this.#nativeCompilation?.incomingConnections(module.nativeHandle) ?? []) {
       this.#materializeConnection(connection);
     }
   }
@@ -1556,7 +1557,7 @@ class ModuleGraphImpl implements ModuleGraph {
     this.#loadedOutgoing.add(module);
     if (!(module instanceof ModuleImpl)) return;
     for (const connection of
-      this.#nativeCompilation?.outgoingConnections(module.nativeId) ?? []) {
+      this.#nativeCompilation?.outgoingConnections(module.nativeHandle) ?? []) {
       this.#materializeConnection(connection);
     }
   }
@@ -1685,7 +1686,7 @@ class ModuleGraphImpl implements ModuleGraph {
 
 class ChunkImpl implements Chunk {
   constructor(
-    readonly nativeId: number,
+    readonly nativeHandle: number,
     readonly id: string | number | null,
     readonly name: string | undefined
   ) {}
@@ -1711,8 +1712,8 @@ const EMPTY_MODULE_ITERABLE: SortableSetView<Module> = new SortableSetView();
 
 class ChunkGraphImpl implements ChunkGraph {
   readonly #nativeCompilation: NativeCompilation | undefined;
-  readonly #modulesById: ReadonlyMap<number, ModuleImpl>;
-  readonly #chunksById: ReadonlyMap<number, ChunkImpl>;
+  readonly #modulesByHandle: ReadonlyMap<number, ModuleImpl>;
+  readonly #chunksByHandle: ReadonlyMap<number, ChunkImpl>;
   readonly #moduleIds = new Map<Module, string | number | null>();
   readonly #moduleChunks = new Map<Module, readonly Chunk[]>();
   readonly #chunkModules = new Map<Chunk, readonly Module[]>();
@@ -1725,12 +1726,12 @@ class ChunkGraphImpl implements ChunkGraph {
 
   constructor(
     nativeCompilation: NativeCompilation | undefined,
-    modulesById: ReadonlyMap<number, ModuleImpl>,
-    chunksById: ReadonlyMap<number, ChunkImpl>
+    modulesByHandle: ReadonlyMap<number, ModuleImpl>,
+    chunksByHandle: ReadonlyMap<number, ChunkImpl>
   ) {
     this.#nativeCompilation = nativeCompilation;
-    this.#modulesById = modulesById;
-    this.#chunksById = chunksById;
+    this.#modulesByHandle = modulesByHandle;
+    this.#chunksByHandle = chunksByHandle;
   }
 
   #loadModuleChunks(module: Module): SortableSetView<Chunk> {
@@ -1738,9 +1739,9 @@ class ChunkGraphImpl implements ChunkGraph {
     if (loaded) return loaded;
     if (!(module instanceof ModuleImpl)) return EMPTY_CHUNK_ITERABLE;
     const chunks = (
-      this.#nativeCompilation?.moduleChunks(module.nativeId) ?? []
-    ).flatMap((id) => {
-        const chunk = this.#chunksById.get(id);
+      this.#nativeCompilation?.moduleChunks(module.nativeHandle) ?? []
+    ).flatMap((handle) => {
+        const chunk = this.#chunksByHandle.get(handle);
         return chunk ? [chunk] : [];
       });
     const iterable = new SortableSetView<Chunk>(chunks);
@@ -1753,9 +1754,9 @@ class ChunkGraphImpl implements ChunkGraph {
     const loaded = this.#chunkModuleIterables.get(chunk);
     if (loaded) return loaded;
     if (!(chunk instanceof ChunkImpl)) return EMPTY_MODULE_ITERABLE;
-    const modules = (this.#nativeCompilation?.chunkModules(chunk.nativeId) ?? [])
-      .flatMap((id) => {
-        const module = this.#modulesById.get(id);
+    const modules = (this.#nativeCompilation?.chunkModules(chunk.nativeHandle) ?? [])
+      .flatMap((handle) => {
+        const module = this.#modulesByHandle.get(handle);
         return module ? [module] : [];
       });
     const iterable = new SortableSetView<Module>(modules);
@@ -1767,7 +1768,7 @@ class ChunkGraphImpl implements ChunkGraph {
   getModuleId(module: Module): string | number | null {
     if (!this.#moduleIds.has(module)) {
       const id = module instanceof ModuleImpl
-        ? this.#nativeCompilation?.moduleId(module.nativeId) ?? null
+        ? this.#nativeCompilation?.moduleId(module.nativeHandle) ?? null
         : null;
       this.#moduleIds.set(module, id);
     }
@@ -1848,11 +1849,11 @@ class CompilationImpl implements Compilation {
   readonly modules: ReadonlySet<Module>;
 
   constructor(compilation: NativeCompilation | null | undefined) {
-    const modulesById = new Map(
+    const modulesByHandle = new Map(
       (compilation?.modules() ?? []).map((module) => [
-        module.id,
+        module.handle,
         new ModuleImpl(
-          module.id,
+          module.handle,
           module.resource,
           module.type,
           module.providedExports,
@@ -1860,15 +1861,15 @@ class CompilationImpl implements Compilation {
         )
       ])
     );
-    const moduleGraph = new ModuleGraphImpl(compilation ?? undefined, modulesById);
-    for (const module of modulesById.values()) {
+    const moduleGraph = new ModuleGraphImpl(compilation ?? undefined, modulesByHandle);
+    for (const module of modulesByHandle.values()) {
       module.bindModuleGraph(moduleGraph);
     }
-    const chunksById = new Map(
+    const chunksByHandle = new Map(
       (compilation?.chunks() ?? []).map((chunk) => [
-        chunk.id,
+        chunk.handle,
         new ChunkImpl(
-          chunk.id,
+          chunk.handle,
           chunk.renderId ?? chunk.render_id ?? null,
           chunk.name ?? undefined
         )
@@ -1877,10 +1878,10 @@ class CompilationImpl implements Compilation {
     this.moduleGraph = moduleGraph;
     this.chunkGraph = new ChunkGraphImpl(
       compilation ?? undefined,
-      modulesById,
-      chunksById
+      modulesByHandle,
+      chunksByHandle
     );
-    this.modules = new Set(modulesById.values());
+    this.modules = new Set(modulesByHandle.values());
   }
 }
 

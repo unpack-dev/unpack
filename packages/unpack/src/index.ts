@@ -293,6 +293,7 @@ interface NativeFlushResult {
 interface NativeCompiler {
   run(): Promise<NativeRunResult>;
   settleCache(): Promise<NativeFlushResult>;
+  shutdown(): Promise<NativeFlushResult>;
   close(): void;
 }
 
@@ -422,8 +423,13 @@ class LoaderRuntime {
   };
 }
 
+type CompilerLifecycle =
+  | { kind: "open" }
+  | { kind: "closing"; operation: Promise<Error | null> }
+  | { kind: "closed" };
+
 class CompilerImpl implements Compiler {
-  #closed = false;
+  #lifecycle: CompilerLifecycle = { kind: "open" };
   #running = false;
   #watching: WatchingImpl | undefined;
   #idleFlushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -455,8 +461,11 @@ class CompilerImpl implements Compiler {
   run(callback: RunCallback): void {
     assertFunction(callback, "callback");
 
-    if (this.#closed) {
-      const error = namedError("CompilerClosedError", "compiler is closed");
+    if (this.#lifecycle.kind !== "open") {
+      const error = namedError(
+        "CompilerClosedError",
+        `compiler is ${this.#lifecycle.kind}`
+      );
       this.#emitInfrastructureLog("error", "unpack.Compiler", error.message);
       defer(() => callback(error));
       return;
@@ -482,21 +491,22 @@ class CompilerImpl implements Compiler {
       this.#emitInfrastructureLog("info", "unpack.Compiler", "run started");
       run = this.#runNativeCompilation();
     } catch (error) {
-      this.#running = false;
       const infrastructureError = toError(error, "InfrastructureError");
       this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
-      defer(() => callback(infrastructureError));
+      defer(() => {
+        this.#running = false;
+        callback(infrastructureError);
+      });
       return;
     }
 
     run.then(
       (result) => {
-        this.#running = false;
         this.#emitInfrastructureLogs(result.logs);
         if (result.error) {
           const error = namedError(result.error.name, result.error.message);
           this.#emitInfrastructureLog("error", "unpack.Compiler", error.message);
-          callback(error);
+          this.#deliverRunCallback(callback, error);
           return;
         }
 
@@ -507,13 +517,16 @@ class CompilerImpl implements Compiler {
         );
         this.#hasCompletedFilesystemCompilation = true;
         this.#emitInfrastructureLog("info", "unpack.Compiler", "run completed");
-        callback(null, new StatsImpl(normalizeNativeStats(result.stats)));
+        this.#deliverRunCallback(
+          callback,
+          null,
+          new StatsImpl(normalizeNativeStats(result.stats))
+        );
       },
       (error: unknown) => {
-        this.#running = false;
         const infrastructureError = toError(error, "InfrastructureError");
         this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
-        callback(infrastructureError);
+        this.#deliverRunCallback(callback, infrastructureError);
       }
     );
   }
@@ -522,8 +535,11 @@ class CompilerImpl implements Compiler {
     const normalizedWatchOptions = normalizeWatchOptions(watchOptions);
     assertFunction(handler, "handler");
 
-    if (this.#closed) {
-      const error = namedError("CompilerClosedError", "compiler is closed");
+    if (this.#lifecycle.kind !== "open") {
+      const error = namedError(
+        "CompilerClosedError",
+        `compiler is ${this.#lifecycle.kind}`
+      );
       this.#emitInfrastructureLog("error", "unpack.Watch", error.message);
       const watching = new WatchingImpl(
         (watchHandler) => {
@@ -570,6 +586,16 @@ class CompilerImpl implements Compiler {
   close(callback: CloseCallback): void {
     assertFunction(callback, "callback");
 
+    if (this.#lifecycle.kind === "closed") {
+      defer(() => callback(null));
+      return;
+    }
+
+    if (this.#lifecycle.kind === "closing") {
+      this.#deliverCloseCallback(this.#lifecycle.operation, callback);
+      return;
+    }
+
     if (this.#running) {
       const error = namedError(
         "CompilerRunningError",
@@ -590,24 +616,61 @@ class CompilerImpl implements Compiler {
       return;
     }
 
+    const closeOperation = this.#closeNativeCompiler();
+    this.#lifecycle = { kind: "closing", operation: closeOperation };
+    this.#deliverCloseCallback(closeOperation, callback);
+  }
+
+  #deliverRunCallback(
+    callback: RunCallback,
+    error: Error | null,
+    stats?: Stats
+  ): void {
+    this.#running = false;
+    callback(error, stats);
+  }
+
+  #deliverCloseCallback(
+    closeOperation: Promise<Error | null>,
+    callback: CloseCallback
+  ): void {
+    void closeOperation.then(
+      (error) => {
+        defer(() => callback(error));
+      },
+      (error: unknown) => {
+        defer(() => callback(toError(error, "InfrastructureError")));
+      }
+    );
+  }
+
+  async #closeNativeCompiler(): Promise<Error | null> {
+    let closeError: Error | null = null;
+    this.#clearIdleFlushTimer();
+    await this.#flushCacheNow();
+
     try {
-      this.#clearIdleFlushTimer();
-      this.#flushCacheNow().then(() => {
-        try {
-          this.#nativeCompiler.close();
-          this.#closed = true;
-          callback(null);
-        } catch (error) {
-          const infrastructureError = toError(error, "InfrastructureError");
-          this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
-          callback(infrastructureError);
-        }
-      });
+      const result = await this.#nativeCompiler.shutdown();
+      this.#emitInfrastructureLogs(result.logs);
+      if (result.error) {
+        const error = namedError(result.error.name, result.error.message);
+        this.#emitInfrastructureLog("warn", "unpack.Cache", error.message);
+      }
+    } catch (error) {
+      closeError = toError(error, "InfrastructureError");
+      this.#emitInfrastructureLog("error", "unpack.Compiler", closeError.message);
+    }
+
+    try {
+      this.#nativeCompiler.close();
     } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
       this.#emitInfrastructureLog("error", "unpack.Compiler", infrastructureError.message);
-      defer(() => callback(infrastructureError));
+      closeError ??= infrastructureError;
     }
+
+    this.#lifecycle = { kind: "closed" };
+    return closeError;
   }
 
   async #runWatchCompilation(handler: WatchHandler): Promise<void> {
@@ -653,7 +716,7 @@ class CompilerImpl implements Compiler {
   }
 
   #scheduleIdleCacheFlush(delay: number): void {
-    if (!this.#writableFilesystemCache || this.#closed) return;
+    if (!this.#writableFilesystemCache || this.#lifecycle.kind !== "open") return;
     this.#clearIdleFlushTimer();
     this.#idleFlushTimer = setTimeout(() => {
       this.#idleFlushTimer = undefined;

@@ -1959,13 +1959,16 @@ impl BuildCache {
     }
 
     pub(crate) fn store_build_dependencies(&self) {
-        if self.options.kind != CacheKind::Filesystem || self.options.readonly {
+        if !self.is_writable_filesystem_cache() {
             return;
         }
         // `prepare_for_compilation` records the resolved Build Dependency guard before work begins.
     }
 
     pub(crate) fn pending_generation(&self) -> Option<u64> {
+        if !self.is_writable_filesystem_cache() {
+            return None;
+        }
         let inner = self
             .inner
             .lock()
@@ -1981,7 +1984,7 @@ impl BuildCache {
     }
 
     pub(crate) fn publish_generation(&self, target_generation: u64) -> io::Result<()> {
-        if self.options.kind != CacheKind::Filesystem || self.options.readonly {
+        if !self.is_writable_filesystem_cache() {
             return Ok(());
         }
         let mut inner = self
@@ -2018,6 +2021,10 @@ impl BuildCache {
         inner.published_generation = inner.published_generation.max(target_generation);
         inner.initial_store_pending = false;
         Ok(())
+    }
+
+    fn is_writable_filesystem_cache(&self) -> bool {
+        self.options.kind == CacheKind::Filesystem && !self.options.readonly
     }
 
     #[cfg(test)]
@@ -2147,9 +2154,7 @@ where
         // Access timestamps only matter for the filesystem layer. Avoid a clock
         // syscall for memory caches and read-only persistent caches, which never
         // record access updates.
-        let stamp = if self.build_cache.options.kind == CacheKind::Filesystem
-            && !self.build_cache.options.readonly
-        {
+        let stamp = if self.build_cache.is_writable_filesystem_cache() {
             self.build_cache.clock.now()
         } else {
             AccessStamp::from_millis(0)

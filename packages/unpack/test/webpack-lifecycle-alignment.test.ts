@@ -180,6 +180,278 @@ test("aligns compiler.run callback timing and baseline Stats semantics", async (
   }
 });
 
+test("records the concurrent run callback deviation without corrupting the active run", async () => {
+  const webpackFixture = await createFixture("webpack-concurrent-run-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const unpackFixture = await createFixture("unpack-concurrent-run-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const webpackCompiler = webpack(webpackOptions(webpackFixture)) as WebpackCompiler;
+  const unpackCompiler = unpack(unpackOptions(unpackFixture));
+
+  try {
+    const webpackObservation = await observeConcurrentRuns((callback) => {
+      webpackCompiler.run((err, stats) => callback(err, stats));
+    });
+    assert.equal(webpackObservation.first.err, null);
+    assert.equal(webpackObservation.first.hasStats, true);
+    assert.equal(webpackObservation.firstCalls, 1);
+    assert.equal(webpackObservation.conflict.calledSynchronously, true);
+    assert.equal(webpackObservation.conflict.err?.name, "ConcurrentCompilationError");
+    assert.equal(webpackObservation.conflict.hasStats, false);
+    assert.equal(webpackObservation.conflictCalls, 1);
+
+    const unpackObservation = await observeConcurrentRuns((callback) => {
+      unpackCompiler.run((err, stats) => callback(err, stats));
+    });
+    assert.equal(unpackObservation.first.err, null);
+    assert.equal(unpackObservation.first.hasStats, true);
+    assert.equal(unpackObservation.firstCalls, 1);
+    assert.equal(unpackObservation.conflict.calledSynchronously, false);
+    assert.equal(unpackObservation.conflict.err?.name, "ConcurrentRunError");
+    assert.equal(unpackObservation.conflict.hasStats, false);
+    assert.equal(unpackObservation.conflictCalls, 1);
+
+    const laterRun = await runUnpackCompiler(unpackCompiler);
+    assert.equal(laterRun.err, null);
+    assert.equal(laterRun.hasStats, true);
+  } finally {
+    await closeWebpackCompiler(webpackCompiler);
+    await closeUnpackCompiler(unpackCompiler);
+    await rm(webpackFixture, { recursive: true, force: true });
+    await rm(unpackFixture, { recursive: true, force: true });
+  }
+});
+
+test("records the active-run watch conflict deviation without corrupting the run", async () => {
+  const webpackFixture = await createFixture("webpack-run-watch-conflict-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const unpackFixture = await createFixture("unpack-run-watch-conflict-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const webpackCompiler = webpack(webpackOptions(webpackFixture)) as WebpackCompiler;
+  const unpackCompiler = unpack(unpackOptions(unpackFixture));
+
+  try {
+    const webpackObservation = await observeConcurrentRuns(
+      (callback) => {
+        webpackCompiler.run((err, stats) => callback(err, stats));
+      },
+      (callback) => {
+        webpackCompiler.watch({}, (err, stats) => callback(err, stats));
+      }
+    );
+    assert.equal(webpackObservation.first.err, null);
+    assert.equal(webpackObservation.first.hasStats, true);
+    assert.equal(webpackObservation.firstCalls, 1);
+    assert.equal(webpackObservation.conflict.calledSynchronously, true);
+    assert.equal(webpackObservation.conflict.err?.name, "ConcurrentCompilationError");
+    assert.equal(webpackObservation.conflict.hasStats, false);
+    assert.equal(webpackObservation.conflictCalls, 1);
+
+    const unpackObservation = await observeConcurrentRuns(
+      (callback) => {
+        unpackCompiler.run((err, stats) => callback(err, stats));
+      },
+      (callback) => {
+        unpackCompiler.watch({}, (err, stats) => callback(err, stats));
+      }
+    );
+    assert.equal(unpackObservation.first.err, null);
+    assert.equal(unpackObservation.first.hasStats, true);
+    assert.equal(unpackObservation.firstCalls, 1);
+    assert.equal(unpackObservation.conflict.calledSynchronously, false);
+    assert.equal(unpackObservation.conflict.err?.name, "ConcurrentRunError");
+    assert.equal(unpackObservation.conflict.hasStats, false);
+    assert.equal(unpackObservation.conflictCalls, 1);
+
+    const laterRun = await runUnpackCompiler(unpackCompiler);
+    assert.equal(laterRun.err, null);
+    assert.equal(laterRun.hasStats, true);
+  } finally {
+    await closeWebpackCompiler(webpackCompiler);
+    await closeUnpackCompiler(unpackCompiler);
+    await rm(webpackFixture, { recursive: true, force: true });
+    await rm(unpackFixture, { recursive: true, force: true });
+  }
+});
+
+test("aligns successful run callback reentry", async () => {
+  const webpackFixture = await createFixture("webpack-run-reentry-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const unpackFixture = await createFixture("unpack-run-reentry-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const webpackCompiler = webpack(webpackOptions(webpackFixture)) as WebpackCompiler;
+  const unpackCompiler = unpack(unpackOptions(unpackFixture));
+
+  try {
+    const webpackObservation = await observeRunReentry((callback) => {
+      webpackCompiler.run((err, stats) => callback(err, stats));
+    });
+    assertRunReentry(webpackObservation);
+
+    const unpackObservation = await observeRunReentry((callback) => {
+      unpackCompiler.run((err, stats) => callback(err, stats));
+    });
+    assertRunReentry(unpackObservation);
+  } finally {
+    await closeWebpackCompiler(webpackCompiler);
+    await closeUnpackCompiler(unpackCompiler);
+    await rm(webpackFixture, { recursive: true, force: true });
+    await rm(unpackFixture, { recursive: true, force: true });
+  }
+});
+
+test("aligns infrastructure failure delivery and releases the active run", async () => {
+  const webpackFixture = await createFixture("webpack-run-infrastructure-error-", {
+    "src/index.js": "export const value = 1;",
+    output: "not a directory"
+  });
+  const unpackFixture = await createFixture("unpack-run-infrastructure-error-", {
+    "src/index.js": "export const value = 1;",
+    output: "not a directory"
+  });
+  const webpackCompiler = webpack({
+    ...webpackOptions(webpackFixture),
+    output: { path: join(webpackFixture, "output") }
+  }) as WebpackCompiler;
+  const unpackCompiler = unpack({
+    ...unpackOptions(unpackFixture),
+    output: { path: join(unpackFixture, "output") }
+  });
+
+  try {
+    const webpackObservation = await observeSingleRun((callback) => {
+      webpackCompiler.run((err, stats) => callback(err, stats));
+    });
+    assert.equal(webpackObservation.calledSynchronously, false);
+    assert.ok(webpackObservation.err);
+    assert.equal(webpackObservation.hasStats, false);
+    assert.equal(webpackObservation.calls, 1);
+
+    const unpackObservation = await observeSingleRun((callback) => {
+      unpackCompiler.run((err, stats) => callback(err, stats));
+    });
+    assert.equal(unpackObservation.calledSynchronously, false);
+    assert.equal(unpackObservation.err?.name, "OutputWriteError");
+    assert.equal(unpackObservation.hasStats, false);
+    assert.equal(unpackObservation.calls, 1);
+
+    const unpackClose = await observeClose((callback) => {
+      unpackCompiler.close(callback);
+    });
+    assert.equal(unpackClose.err, null);
+    assert.equal(unpackClose.calls, 1);
+  } finally {
+    await closeWebpackCompiler(webpackCompiler);
+    await closeUnpackCompiler(unpackCompiler);
+    await rm(webpackFixture, { recursive: true, force: true });
+    await rm(unpackFixture, { recursive: true, force: true });
+  }
+});
+
+test("records the asynchronous terminal close lifecycle deviation", async () => {
+  const webpackFixture = await createFixture("webpack-terminal-close-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const unpackFixture = await createFixture("unpack-terminal-close-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const webpackCompiler = webpack(webpackOptions(webpackFixture)) as WebpackCompiler;
+  const unpackCompiler = unpack(unpackOptions(unpackFixture));
+
+  try {
+    const webpackClose = await observeClose((callback) => {
+      webpackCompiler.close(callback);
+    });
+    assert.equal(webpackClose.calledSynchronously, true);
+    assert.equal(webpackClose.err, null);
+    assert.equal(webpackClose.calls, 1);
+    const webpackRun = await runWebpackCompiler(webpackCompiler);
+    assert.equal(webpackRun.err, null);
+    assert.equal(webpackRun.hasStats, true);
+
+    const unpackClose = await observeClose((callback) => {
+      unpackCompiler.close(callback);
+    });
+    assert.equal(unpackClose.calledSynchronously, false);
+    assert.equal(unpackClose.err, null);
+    assert.equal(unpackClose.calls, 1);
+    const unpackRun = await runUnpackCompiler(unpackCompiler);
+    assert.equal(unpackRun.calledSynchronously, false);
+    assert.equal(unpackRun.err?.name, "CompilerClosedError");
+    assert.equal(unpackRun.hasStats, false);
+
+    const webpackRepeatedClose = await observeClose((callback) => {
+      webpackCompiler.close(callback);
+    });
+    assert.equal(webpackRepeatedClose.calledSynchronously, true);
+    assert.equal(webpackRepeatedClose.err, null);
+    assert.equal(webpackRepeatedClose.calls, 1);
+    const unpackRepeatedClose = await observeClose((callback) => {
+      unpackCompiler.close(callback);
+    });
+    assert.equal(unpackRepeatedClose.calledSynchronously, false);
+    assert.equal(unpackRepeatedClose.err, null);
+    assert.equal(unpackRepeatedClose.calls, 1);
+  } finally {
+    await closeWebpackCompiler(webpackCompiler);
+    await closeUnpackCompiler(unpackCompiler);
+    await rm(webpackFixture, { recursive: true, force: true });
+    await rm(unpackFixture, { recursive: true, force: true });
+  }
+});
+
+test("records the close-during-run safety deviation without corrupting the run", async () => {
+  const webpackFixture = await createFixture("webpack-active-close-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const unpackFixture = await createFixture("unpack-active-close-", {
+    "src/index.js": "export const value = 1;"
+  });
+  const webpackCompiler = webpack(webpackOptions(webpackFixture)) as WebpackCompiler;
+  const unpackCompiler = unpack(unpackOptions(unpackFixture));
+
+  try {
+    const webpackRunPromise = runWebpackCompiler(webpackCompiler);
+    const webpackClose = await observeClose((callback) => {
+      webpackCompiler.close(callback);
+    });
+    assert.equal(webpackClose.calledSynchronously, true);
+    assert.equal(webpackClose.err, null);
+    assert.equal(webpackClose.calls, 1);
+    const webpackRun = await webpackRunPromise;
+    assert.equal(webpackRun.err, null);
+    assert.equal(webpackRun.hasStats, true);
+
+    const unpackRunPromise = runUnpackCompiler(unpackCompiler);
+    const unpackClose = await observeClose((callback) => {
+      unpackCompiler.close(callback);
+    });
+    assert.equal(unpackClose.calledSynchronously, false);
+    assert.equal(unpackClose.err?.name, "CompilerRunningError");
+    assert.equal(unpackClose.calls, 1);
+    const unpackRun = await unpackRunPromise;
+    assert.equal(unpackRun.err, null);
+    assert.equal(unpackRun.hasStats, true);
+
+    const finalClose = await observeClose((callback) => {
+      unpackCompiler.close(callback);
+    });
+    assert.equal(finalClose.err, null);
+    assert.equal(finalClose.calls, 1);
+  } finally {
+    await closeWebpackCompiler(webpackCompiler);
+    await closeUnpackCompiler(unpackCompiler);
+    await rm(webpackFixture, { recursive: true, force: true });
+    await rm(unpackFixture, { recursive: true, force: true });
+  }
+});
+
 function webpackOptions(context: string): WebpackOptions {
   return {
     context,
@@ -420,6 +692,140 @@ function assertBaselineStats(
     assert.ok(typeof message === "string");
     assert.ok(message.length > 0);
   }
+}
+
+type ObservedRunCallback = (
+  err: Error | null | undefined,
+  stats: WebpackStats | UnpackStats | undefined
+) => void;
+
+type RunInvoker = (callback: ObservedRunCallback) => void;
+
+async function observeConcurrentRuns(
+  invoke: RunInvoker,
+  invokeConflict: RunInvoker = invoke
+) {
+  let firstCalledSynchronously = true;
+  let conflictCalledSynchronously = true;
+  let firstCalls = 0;
+  let conflictCalls = 0;
+  const first = new Promise<RunObservation>((resolve) => {
+    invoke((err, stats) => {
+      firstCalls += 1;
+      if (firstCalls === 1) {
+        resolve(runObservation(firstCalledSynchronously, err, stats));
+      }
+    });
+    firstCalledSynchronously = false;
+  });
+  const conflict = new Promise<RunObservation>((resolve) => {
+    invokeConflict((err, stats) => {
+      conflictCalls += 1;
+      if (conflictCalls === 1) {
+        resolve(runObservation(conflictCalledSynchronously, err, stats));
+      }
+    });
+    conflictCalledSynchronously = false;
+  });
+  const [firstObservation, conflictObservation] = await Promise.all([
+    first,
+    conflict
+  ]);
+  await delay(0);
+  return {
+    first: firstObservation,
+    conflict: conflictObservation,
+    firstCalls,
+    conflictCalls
+  };
+}
+
+async function observeRunReentry(invoke: RunInvoker) {
+  let firstCalledSynchronously = true;
+  let firstCalls = 0;
+  let secondCalls = 0;
+  const result = await new Promise<{
+    first: RunObservation;
+    second: RunObservation;
+  }>((resolve) => {
+    invoke((firstError, firstStats) => {
+      firstCalls += 1;
+      const first = runObservation(
+        firstCalledSynchronously,
+        firstError,
+        firstStats
+      );
+      let secondCalledSynchronously = true;
+      invoke((secondError, secondStats) => {
+        secondCalls += 1;
+        if (secondCalls === 1) {
+          resolve({
+            first,
+            second: runObservation(
+              secondCalledSynchronously,
+              secondError,
+              secondStats
+            )
+          });
+        }
+      });
+      secondCalledSynchronously = false;
+    });
+    firstCalledSynchronously = false;
+  });
+  await delay(0);
+  return { ...result, firstCalls, secondCalls };
+}
+
+function assertRunReentry(observation: Awaited<ReturnType<typeof observeRunReentry>>) {
+  assert.equal(observation.first.calledSynchronously, false);
+  assert.equal(observation.first.err, null);
+  assert.equal(observation.first.hasStats, true);
+  assert.equal(observation.firstCalls, 1);
+  assert.equal(observation.second.calledSynchronously, false);
+  assert.equal(observation.second.err, null);
+  assert.equal(observation.second.hasStats, true);
+  assert.equal(observation.secondCalls, 1);
+}
+
+async function observeSingleRun(invoke: RunInvoker) {
+  let calledSynchronously = true;
+  let calls = 0;
+  const result = await new Promise<RunObservation>((resolve) => {
+    invoke((err, stats) => {
+      calls += 1;
+      if (calls === 1) {
+        resolve(runObservation(calledSynchronously, err, stats));
+      }
+    });
+    calledSynchronously = false;
+  });
+  await delay(0);
+  return { ...result, calls };
+}
+
+async function observeClose(
+  invoke: (callback: (err?: Error | null) => void) => void
+) {
+  let calledSynchronously = true;
+  let calls = 0;
+  const result = await new Promise<{
+    calledSynchronously: boolean;
+    err: Error | null;
+  }>((resolve) => {
+    invoke((err) => {
+      calls += 1;
+      if (calls === 1) {
+        resolve({
+          calledSynchronously,
+          err: err ?? null
+        });
+      }
+    });
+    calledSynchronously = false;
+  });
+  await delay(0);
+  return { ...result, calls };
 }
 
 function captureSynchronousThrow(callback: () => unknown): Error | null {

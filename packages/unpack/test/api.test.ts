@@ -792,6 +792,81 @@ test("compiler close waits for pending filesystem cache flush", async () => {
   }
 });
 
+test("run and watch started while the compiler is closing fail deterministically", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation: join(fixture, ".cache/unpack/closing"),
+      idleTimeout: 60_000
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+
+    const closeResult = closeCompilerResult(compiler);
+    const runResultPromise = runExistingCompiler(compiler);
+    const watchResults = collectWatchResults();
+    const watchResultPromise = watchResults.next();
+    const watching = compiler.watch({}, watchResults.handler);
+    const [runResult, watchResult] = await Promise.all([
+      runResultPromise,
+      watchResultPromise
+    ]);
+
+    assert.equal(runResult.err?.name, "CompilerClosedError");
+    assert.equal(runResult.stats, undefined);
+    assert.equal(watchResult.err?.name, "CompilerClosedError");
+    assert.equal(watchResult.stats, undefined);
+    await closeWatching(watching);
+    assert.equal(await closeResult, null);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("close coalesces concurrent callers and remains asynchronous and idempotent", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    cache: {
+      type: "filesystem",
+      cacheLocation: join(fixture, ".cache/unpack/coalesced-close"),
+      idleTimeout: 60_000
+    }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+
+    const [first, second] = await Promise.all([
+      observeCompilerClose(compiler),
+      observeCompilerClose(compiler)
+    ]);
+    for (const observation of [first, second]) {
+      assert.equal(observation.calledSynchronously, false);
+      assert.equal(observation.calls, 1);
+      assert.equal(observation.err, null);
+    }
+
+    const repeated = await observeCompilerClose(compiler);
+    assert.equal(repeated.calledSynchronously, false);
+    assert.equal(repeated.calls, 1);
+    assert.equal(repeated.err, null);
+    assert.equal((await runExistingCompiler(compiler)).err?.name, "CompilerClosedError");
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("filesystem cache publication failures are warnings and do not fail close", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 1;",
@@ -1870,6 +1945,28 @@ async function closeCompilerResult(compiler: ReturnType<typeof unpack>) {
       resolve(err);
     });
   });
+}
+
+async function observeCompilerClose(compiler: ReturnType<typeof unpack>) {
+  let calledSynchronously = true;
+  let calls = 0;
+  let callbackError: Error | null = null;
+  const firstDeliveryWasSynchronous = await new Promise<boolean>((resolve) => {
+    compiler.close((error) => {
+      calls += 1;
+      callbackError = error;
+      if (calls === 1) {
+        const synchronous = calledSynchronously;
+        setTimeout(() => resolve(synchronous), 0);
+      }
+    });
+    calledSynchronously = false;
+  });
+  return {
+    calledSynchronously: firstDeliveryWasSynchronous,
+    calls,
+    err: callbackError
+  };
 }
 
 async function closeWatching(watching: ReturnType<ReturnType<typeof unpack>["watch"]>) {

@@ -1,8 +1,9 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { copyFile, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { DEFAULT_TURBOPACK_COMMIT } from "./runner.mjs";
@@ -320,12 +321,24 @@ export const adapters = {
 
   turbopack: {
     name: "turbopack",
-    outputDir: ({ fixture }) => join(fixture.context, "dist"),
+    supportsLoaderFixture: true,
+    outputDir: ({ fixture, baseDir }) =>
+      fixture.requiresWebpackLoaders
+        ? join(baseDir, "turbopack-loader-fixture", "dist")
+        : join(fixture.context, "dist"),
     versionSource: ({ options }) => {
       if (options.turbopackBinary) {
         return `hardfist/bundler-diff@${options.turbopackCommit ?? "turbopack-cli-main"}+release-turbopack-cli`;
       }
       return `vercel/next.js@${options.turbopackCommit ?? DEFAULT_TURBOPACK_COMMIT}+benchmark-cache-flush`;
+    },
+    async prepareBuild({ fixture, outputDir, phase }) {
+      if (!fixture.requiresWebpackLoaders || phase === "warm") {
+        return;
+      }
+      const context = dirname(outputDir);
+      await rm(context, { recursive: true, force: true });
+      await cp(fixture.context, context, { recursive: true });
     },
     async prepare({ options }) {
       if (options.turbopackBinary) {
@@ -361,7 +374,7 @@ export const adapters = {
       });
       preparedTurbopackBuilds.add(prepareKey);
     },
-    async build({ fixture, cacheDir, phase, persistentCache = true, options }) {
+    async build({ fixture, outputDir, cacheDir, phase, persistentCache = true, options }) {
       const repo = options.turbopackRepo;
       const profile = options.turbopackProfile ?? "release";
       const binary = options.turbopackBinary
@@ -374,12 +387,16 @@ export const adapters = {
           "Turbopack requires --turbopack-binary or --turbopack-repo pointing at a fixed Next.js checkout"
         );
       }
+      const context = fixture.requiresWebpackLoaders
+        ? dirname(outputDir ?? join(fixture.context, "dist"))
+        : fixture.context;
+      await transformTurbopackLoaderFixture({ fixture, context, phase });
       const args = [
         "build",
         "--dir",
-        fixture.context,
+        context,
         "--root",
-        fixture.context,
+        context,
         "--target",
         "node",
         "--no-minify",
@@ -392,7 +409,7 @@ export const adapters = {
       args.push(fixture.entry);
 
       const tracingFilter = turbopackTracingFilter(options);
-      const traceSourcePath = join(fixture.context, ".turbopack", "trace.log");
+      const traceSourcePath = join(context, ".turbopack", "trace.log");
       if (tracingFilter) {
         await rm(traceSourcePath, { force: true });
       }
@@ -431,7 +448,7 @@ export const adapters = {
         }
       }
 
-      return { entryFile: join(fixture.context, "dist/index.entry.js") };
+      return { entryFile: join(context, "dist/index.entry.js") };
     }
   }
 };
@@ -542,15 +559,128 @@ function swcLoaderRule(test, syntax) {
   return {
     test,
     loader: SWC_LOADER,
-    options: {
-      jsc: {
-        parser: { syntax },
-        target: "es2022"
-      },
-      module: { type: "es6" },
-      sourceMaps: false
-    }
+    options: swcLoaderOptions(syntax)
   };
+}
+
+function swcLoaderOptions(syntax) {
+  return {
+    jsc: {
+      parser: { syntax },
+      target: "es2022"
+    },
+    module: { type: "es6" },
+    sourceMaps: false
+  };
+}
+
+async function transformTurbopackLoaderFixture({ fixture, context, phase }) {
+  if (!fixture.requiresWebpackLoaders) {
+    return;
+  }
+
+  const manifestPath = join(context, ".swc-loader-manifest.json");
+  const reset = phase !== "warm";
+  const previous = reset ? {} : await readJsonIfPresent(manifestPath);
+  const next = {};
+  for (const resourcePath of await javascriptFiles(fixture.context)) {
+    const fixturePath = relative(fixture.context, resourcePath);
+    const syntax = resourcePath.endsWith(".ts") ? "typescript" : "ecmascript";
+    const source = await readFile(resourcePath, "utf8");
+    const sourceHash = createHash("sha256").update(source).digest("hex");
+    next[fixturePath] = sourceHash;
+    if (!reset && previous[fixturePath] === sourceHash) {
+      continue;
+    }
+    const transformed = await runSwcLoader({
+      source,
+      resourcePath,
+      rootContext: fixture.context,
+      options: swcLoaderOptions(syntax)
+    });
+    const targetPath = join(context, fixturePath);
+    await mkdir(dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, transformed, "utf8");
+  }
+  await writeFile(manifestPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+}
+
+async function readJsonIfPresent(path) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {};
+    }
+    throw error;
+  }
+}
+
+async function javascriptFiles(root) {
+  const files = [];
+
+  async function visit(directory) {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === "dist" || entry.name === ".turbopack") {
+        continue;
+      }
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+      } else if (entry.isFile() && (entry.name.endsWith(".js") || entry.name.endsWith(".ts"))) {
+        files.push(path);
+      }
+    }
+  }
+
+  await visit(root);
+  files.sort();
+  return files;
+}
+
+function runSwcLoader({ source, resourcePath, rootContext, options }) {
+  const loader = require(SWC_LOADER);
+
+  return new Promise((resolve, reject) => {
+    let completed = false;
+    const callback = (error, result) => {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      if (error) {
+        reject(error);
+      } else if (typeof result !== "string") {
+        reject(new TypeError(`swc-loader returned ${typeof result} for ${resourcePath}`));
+      } else {
+        resolve(result);
+      }
+    };
+    const context = {
+      resourcePath,
+      rootContext,
+      sourceMap: false,
+      getOptions: () => options,
+      async: () => callback,
+      callback,
+      emitError: reject,
+      emitWarning() {},
+      getLogger: () => ({ debug() {}, info() {}, log() {}, warn() {}, error() {} })
+    };
+
+    try {
+      const result = loader.call(context, source);
+      if (typeof result === "string" && !completed) {
+        completed = true;
+        resolve(result);
+      } else if (result?.then) {
+        result.then((value) => callback(null, value), callback);
+      }
+    } catch (error) {
+      callback(error);
+    }
+  });
 }
 
 function assertNoWebpackLoaderFixture(fixture, bundler) {

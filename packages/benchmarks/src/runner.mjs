@@ -215,6 +215,18 @@ async function timedBuild({
   await mkdir(outputDir, { recursive: true });
   await mkdir(cacheDir, { recursive: true });
 
+  try {
+    await adapter.prepareBuild?.({ fixture, outputDir, cacheDir, phase, options });
+  } catch (error) {
+    return {
+      status: isUnsupported(error) ? "unsupported" : "build_failed",
+      build_ms: null,
+      output_bytes: null,
+      verify_ms: null,
+      message: errorMessage(error)
+    };
+  }
+
   let buildResult;
   const started = performance.now();
   try {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import {
   createRspackBenchmarkConfig
 } from "../src/adapters.mjs";
 import {
+  FIXTURE_SHAPES,
   WARM_BUILD_CHECKSUM_DELTA,
   WARM_BUILD_GRAPH_COPY
 } from "../src/fixture.mjs";
@@ -515,8 +516,125 @@ printf 'raw trace\\n' > "${sourceTraceDir}/trace.log"
   }
 });
 
-test("turbopack does not claim support for the swc-loader fixture", () => {
-  assert.equal(adapters.turbopack.supportsLoaderFixture, undefined);
+test("turbopack transforms the loader fixture with swc-loader", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const binary = join(workspace, "tools", "turbopack-cli");
+    const fixtureContext = join(workspace, "fixture");
+    const transformedContext = join(workspace, "transformed");
+    const cacheDir = join(workspace, "cache");
+
+    await mkdir(join(workspace, "tools"), { recursive: true });
+    await mkdir(join(fixtureContext, "src"), { recursive: true });
+    await writeFile(binary, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(binary, 0o755);
+    await writeFile(
+      join(fixtureContext, "src", "index.js"),
+      "const value = () => 1; export { value };\n",
+      "utf8"
+    );
+    await writeFile(
+      join(fixtureContext, "src", "rome.ts"),
+      "const value: number = 1; export { value };\n",
+      "utf8"
+    );
+
+    const fixture = {
+        name: "loader",
+        context: fixtureContext,
+        entry: "./src/index.js",
+        requiresWebpackLoaders: true
+      };
+    await adapters.turbopack.prepareBuild({
+      fixture,
+      outputDir: join(transformedContext, "dist"),
+      phase: "cold"
+    });
+    await adapters.turbopack.build({
+      fixture,
+      outputDir: join(transformedContext, "dist"),
+      cacheDir,
+      phase: "cold",
+      options: { turbopackBinary: binary }
+    });
+
+    const transformedJavascriptPath = join(transformedContext, "src", "index.js");
+    const transformedTypescriptPath = join(transformedContext, "src", "rome.ts");
+    const javascript = await readFile(transformedJavascriptPath, "utf8");
+    const typescript = await readFile(transformedTypescriptPath, "utf8");
+    assert.equal(javascript, "const value = ()=>1;\nexport { value };\n");
+    assert.doesNotMatch(typescript, /: number/);
+    assert.match(typescript, /const value = 1/);
+    assert.match(await readFile(join(fixtureContext, "src", "rome.ts"), "utf8"), /: number/);
+
+    const typescriptMtime = (await stat(transformedTypescriptPath)).mtimeMs;
+    await writeFile(
+      join(fixtureContext, "src", "index.js"),
+      "const value = () => 2; export { value };\n",
+      "utf8"
+    );
+    await adapters.turbopack.prepareBuild({
+      fixture,
+      outputDir: join(transformedContext, "dist"),
+      phase: "warm"
+    });
+    await adapters.turbopack.build({
+      fixture,
+      outputDir: join(transformedContext, "dist"),
+      cacheDir,
+      phase: "warm",
+      options: { turbopackBinary: binary }
+    });
+
+    assert.match(await readFile(transformedJavascriptPath, "utf8"), /=>2/);
+    assert.equal((await stat(transformedTypescriptPath)).mtimeMs, typescriptMtime);
+    assert.equal(adapters.turbopack.supportsLoaderFixture, true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("turbopack loader fixture reports verified cold, warm, and no-cache data", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
+
+  try {
+    const binary = join(workspace, "turbopack-cli");
+    await writeFile(
+      binary,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const context = args[args.indexOf("--dir") + 1];
+const entry = fs.readFileSync(path.join(context, "src/index.js"), "utf8");
+const checksum = entry.includes("// import * as copy${WARM_BUILD_GRAPH_COPY}")
+  ? ${FIXTURE_SHAPES.loader.expectedChecksum + WARM_BUILD_CHECKSUM_DELTA}
+  : ${FIXTURE_SHAPES.loader.expectedChecksum};
+fs.mkdirSync(path.join(context, "dist"), { recursive: true });
+fs.writeFileSync(path.join(context, "dist/index.entry.js"), "module.exports.checksum = " + checksum + ";\\n");
+`,
+      "utf8"
+    );
+    await chmod(binary, 0o755);
+
+    const report = await runBenchmark({
+      workspaceDir: join(workspace, "run"),
+      fixtures: ["loader"],
+      bundlers: ["turbopack"],
+      adapters: { turbopack: adapters.turbopack },
+      turbopackBinary: binary,
+      turbopackTracing: false
+    });
+
+    assert.equal(report.results[0].status, "success");
+    assert.equal(report.results[0].cold_status, "success");
+    assert.equal(report.results[0].warm_status, "success");
+    assert.equal(report.results[0].no_cache_status, "success");
+    assert.equal(report.results[0].verify_status, "success");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("turbopack prepare patches build shutdown to flush persistent cache", async () => {

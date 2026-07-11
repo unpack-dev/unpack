@@ -19,6 +19,25 @@ import { runBenchmark, toSummaryMarkdown } from "../src/runner.mjs";
 
 const execFileAsync = promisify(execFile);
 
+test("summary renders loader results before a separate non-loader table", () => {
+  const summary = toSummaryMarkdown({
+    results: [
+      summaryResult({ fixture: "large", bundler: "webpack" }),
+      summaryResult({ fixture: "loader", bundler: "rspack" })
+    ]
+  });
+
+  const loaderHeading = summary.indexOf("### Loader Benchmarks");
+  const nonLoaderHeading = summary.indexOf("### Benchmarks Without Loaders");
+  assert.ok(loaderHeading >= 0);
+  assert.ok(nonLoaderHeading > loaderHeading);
+  assert.equal(summary.match(/\| fixture \| bundler \|/g)?.length, 2);
+  assert.match(summary.slice(loaderHeading, nonLoaderHeading), /\| loader \| rspack \|/);
+  assert.doesNotMatch(summary.slice(loaderHeading, nonLoaderHeading), /\| large \|/);
+  assert.match(summary.slice(nonLoaderHeading), /\| large \| webpack \|/);
+  assert.doesNotMatch(summary.slice(nonLoaderHeading), /\| loader \|/);
+});
+
 test("runner emits persistent-cache and no-cache measurements for a verified bundle", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
   const calls = [];
@@ -547,6 +566,19 @@ test("turbopack prepare patches build shutdown to flush persistent cache", async
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+function summaryResult({ fixture, bundler }) {
+  return {
+    fixture,
+    bundler,
+    version_source: `${bundler}@1.0.0`,
+    cold_build_ms: 10,
+    warm_build_ms: 5,
+    no_cache_build_ms: 8,
+    output_bytes: 100,
+    status: "success"
+  };
+}
 
 function fakeAdapter({ checksumOffset = 0, error, calls, staleWarmChecksum = false } = {}) {
   let coldChecksum;

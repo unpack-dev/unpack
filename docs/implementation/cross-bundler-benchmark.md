@@ -56,7 +56,7 @@ trace server with `pnpm next internal trace <trace.log>` or
 
 ## Result Shape
 
-The runner emits a Markdown summary and can write the raw JSON report with `--output-json`.
+The runner emits a Markdown summary with the loader results in the first table and the results without loaders in a separate second table. It can also write the raw JSON report with `--output-json`.
 
 Important fields:
 

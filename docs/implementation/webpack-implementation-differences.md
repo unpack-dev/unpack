@@ -95,6 +95,15 @@ Necessity:
 
 ## Chunk graph
 
+Unpack keeps the `build_chunk_graph` planning algorithm separate from the
+`ChunkGraph` relationship store, matching webpack's `buildChunkGraph` and
+`ChunkGraph` responsibility boundary. The implementation uses a dense
+`ModuleMask` indexed by Rust `ModuleHandle` values for `min_available_modules` and
+`resulting_available_modules` intersections, while retaining ordered
+`Vec<ModuleHandle>` traversal results where output order matters. Dense arena
+keys use `*Handle` names so webpack's `Module ID` and `Chunk ID` names remain
+reserved for generated output identity.
+
 Unpack creates one entrypoint chunk group per entry, assigns statically reachable
 modules to the initial chunk, and creates or reuses async chunk groups by dynamic
 import target. A terminating worklist recursively discovers nested blocks. Each
@@ -117,6 +126,9 @@ Webpack's `buildChunkGraph` is much broader. It tracks runtime per chunk group, 
 Necessity:
 
 - Unpack's chunk group and many-to-many membership model is necessary because it preserves the shape needed for later split chunks and runtime chunks.
+- Reusing one Async Chunk plan per target Module is a staged internal deviation;
+  webpack's block-first `ChunkGroupInfo` model becomes necessary before named
+  async groups, per-block options, or full split-point identity can be claimed.
 - Intersecting parent available-module sets is necessary: excluding a module
   seen on only one path would make the shared payload unusable from another.
 - Split chunks, cache groups, min-size/min-chunks/max-request rules, runtime chunks, and named chunk options are not necessary for the first implementation.
@@ -127,8 +139,10 @@ Necessity:
 
 Unpack emits webpack-shaped Node/CommonJS output with a fixed module table,
 module cache, core `__webpack_require__`, and CommonJS entry startup. Generated
-code declares Runtime Requirements; a fixed-point resolver selects ordered
-Runtime Modules for export getters, own-property checks, namespace marking,
+code declares Runtime Requirements. Their closed set is stored as an inline
+`u16` mask rather than a general-purpose tree set, and selected Runtime Modules
+are deduplicated in an inline `u8` mask. A fixed-point resolver orders Runtime
+Modules for export getters, own-property checks, namespace marking,
 chunk ensuring, filename lookup, add-only module-factory exposure, and cohesive
 Node require chunk loading. Static-only Bundles omit all asynchronous helpers.
 For runtime trees with loadable Async Chunks, the Node loader registers payload

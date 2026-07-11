@@ -355,7 +355,7 @@ mod tests {
                 }],
                 suffix: "\n})".to_string(),
             },
-            runtime_requirements: RUNTIME_REQUIREMENT_MASK,
+            runtime_requirements: RuntimeRequirements::valid_mask(),
         };
         let registry =
             CodecRegistry::new().with_code_generation_record(CodeGenerationRecordCodec::current());
@@ -1343,7 +1343,7 @@ mod tests {
         assert_eq!(ModuleBuildRecordDto::try_from(&module_record)?, module_dto);
 
         let mut runtime_requirements = RuntimeRequirements::default();
-        for requirement in ALL_RUNTIME_REQUIREMENTS {
+        for requirement in RuntimeRequirements::all() {
             runtime_requirements.insert(requirement);
         }
         let code_generation_record =
@@ -1872,7 +1872,7 @@ use crate::{
     },
     parser::ParsedModule,
     rendered_source::RenderedSource,
-    runtime::{RuntimeRequirement, RuntimeRequirements},
+    runtime::RuntimeRequirements,
     snapshot::{PersistentManagedItemState, PersistentSnapshotEntry, Snapshot},
 };
 
@@ -2698,55 +2698,12 @@ impl CodeGenerationRecordDto {
     }
 }
 
-const ALL_RUNTIME_REQUIREMENTS: [RuntimeRequirement; 11] = [
-    RuntimeRequirement::ModuleFactories,
-    RuntimeRequirement::ModuleCache,
-    RuntimeRequirement::Require,
-    RuntimeRequirement::DefinePropertyGetters,
-    RuntimeRequirement::HasOwnProperty,
-    RuntimeRequirement::MakeNamespaceObject,
-    RuntimeRequirement::EnsureChunk,
-    RuntimeRequirement::EnsureChunkHandlers,
-    RuntimeRequirement::GetChunkFilename,
-    RuntimeRequirement::ModuleFactoriesAddOnly,
-    RuntimeRequirement::ReturnExportsFromRuntime,
-];
-
-const RUNTIME_REQUIREMENT_MASK: u16 = (1 << ALL_RUNTIME_REQUIREMENTS.len()) - 1;
-
 fn encode_runtime_requirements(requirements: &RuntimeRequirements) -> u16 {
-    requirements.iter().fold(0, |mask, requirement| {
-        mask | (1 << runtime_requirement_bit(requirement))
-    })
+    requirements.to_mask()
 }
 
 fn decode_runtime_requirements(mask: u16) -> Option<RuntimeRequirements> {
-    if mask & !RUNTIME_REQUIREMENT_MASK != 0 {
-        return None;
-    }
-    let mut requirements = RuntimeRequirements::default();
-    for requirement in ALL_RUNTIME_REQUIREMENTS {
-        if mask & (1 << runtime_requirement_bit(requirement)) != 0 {
-            requirements.insert(requirement);
-        }
-    }
-    Some(requirements)
-}
-
-const fn runtime_requirement_bit(requirement: RuntimeRequirement) -> u16 {
-    match requirement {
-        RuntimeRequirement::ModuleFactories => 0,
-        RuntimeRequirement::ModuleCache => 1,
-        RuntimeRequirement::Require => 2,
-        RuntimeRequirement::DefinePropertyGetters => 3,
-        RuntimeRequirement::HasOwnProperty => 4,
-        RuntimeRequirement::MakeNamespaceObject => 5,
-        RuntimeRequirement::EnsureChunk => 6,
-        RuntimeRequirement::GetChunkFilename => 7,
-        RuntimeRequirement::ReturnExportsFromRuntime => 8,
-        RuntimeRequirement::EnsureChunkHandlers => 9,
-        RuntimeRequirement::ModuleFactoriesAddOnly => 10,
-    }
+    RuntimeRequirements::from_mask(mask)
 }
 
 impl From<&RenderedSource> for AssetRenderRecordDto {
@@ -3445,7 +3402,7 @@ impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
 }
 
 fn validate_code_generation_record(record: &CodeGenerationRecordDto) -> io::Result<()> {
-    if record.runtime_requirements & !RUNTIME_REQUIREMENT_MASK != 0 {
+    if record.runtime_requirements & !RuntimeRequirements::valid_mask() != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Code Generation Record contains unknown Runtime Requirements",

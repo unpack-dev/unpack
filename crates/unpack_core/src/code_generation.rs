@@ -7,12 +7,12 @@ use rspack_sources::{ConcatSource, OriginalSource, RawStringSource, ReplaceSourc
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AsyncBlockOrigin, AsyncDependenciesBlockId, Chunk, ChunkGraph, ChunkGroupKind, CompilerOptions,
-    ConstDependency, Dependency, DependencyId, Error, ExportsInfo,
+    AsyncBlockOrigin, AsyncDependenciesBlockIndex, Chunk, ChunkGraph, ChunkGroupKind,
+    CompilerOptions, ConstDependency, Dependency, DependencyIndex, Error, ExportsInfo,
     HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
     HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Module,
-    ModuleGraph, ModuleId, SourceRange,
+    ModuleGraph, ModuleHandle, SourceRange,
     build_cache::{BuildCache, CacheETag, CacheIdentifier, CacheKey},
     cache_hash::StableHasher,
     code_generation_record::{
@@ -32,8 +32,8 @@ pub struct Asset {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CodeGenerationResults {
-    module_render_ids: HashMap<ModuleId, RenderId>,
-    results: HashMap<ModuleId, CodeGenerationResult>,
+    module_render_ids: HashMap<ModuleHandle, RenderId>,
+    results: HashMap<ModuleHandle, CodeGenerationResult>,
 }
 
 pub(crate) struct CodeGenerationOutcome {
@@ -44,7 +44,7 @@ pub(crate) struct CodeGenerationOutcome {
 impl CodeGenerationResults {
     pub(crate) fn runtime_requirements(
         &self,
-    ) -> impl Iterator<Item = (ModuleId, &RuntimeRequirements)> {
+    ) -> impl Iterator<Item = (ModuleHandle, &RuntimeRequirements)> {
         self.results
             .iter()
             .map(|(module, result)| (*module, result.runtime_requirements()))
@@ -55,7 +55,7 @@ struct CodeGenerationInput<'a> {
     module: &'a Module,
     module_graph: &'a ModuleGraph,
     chunk_graph: &'a ChunkGraph,
-    module_render_ids: &'a HashMap<ModuleId, RenderId>,
+    module_render_ids: &'a HashMap<ModuleHandle, RenderId>,
 }
 
 fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
@@ -79,37 +79,41 @@ fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
         .code_generation_local_input_digest()
         .hash(&mut hasher);
     hash_used_export_names(module, &mut hasher);
-    module_render_ids.get(&module.id()).hash(&mut hasher);
+    module_render_ids.get(&module.handle()).hash(&mut hasher);
 
-    for dependency_id in 0..module.dependencies().len() {
+    for dependency_index in 0..module.dependencies().len() {
         module_graph
-            .module_for_dependency(module.id(), None, DependencyId::new(dependency_id))
+            .module_for_dependency(
+                module.handle(),
+                None,
+                DependencyIndex::new(dependency_index),
+            )
             .and_then(|target| module_render_ids.get(&target))
             .hash(&mut hasher);
     }
 
     for (block_index, block) in module.blocks().iter().enumerate() {
-        for dependency_id in 0..block.dependencies().len() {
+        for dependency_index in 0..block.dependencies().len() {
             module_graph
                 .module_for_dependency(
-                    module.id(),
-                    Some(AsyncDependenciesBlockId::new(block_index)),
-                    DependencyId::new(dependency_id),
+                    module.handle(),
+                    Some(AsyncDependenciesBlockIndex::new(block_index)),
+                    DependencyIndex::new(dependency_index),
                 )
                 .and_then(|target| module_render_ids.get(&target))
                 .hash(&mut hasher);
         }
         chunk_graph
             .block_chunk_group(AsyncBlockOrigin {
-                module: module.id(),
-                block: AsyncDependenciesBlockId::new(block_index),
+                module: module.handle(),
+                block: AsyncDependenciesBlockIndex::new(block_index),
             })
-            .and_then(|group_id| {
-                chunk_graph.chunk_groups()[group_id.index()]
+            .and_then(|group_handle| {
+                chunk_graph.chunk_groups()[group_handle.index()]
                     .chunks()
                     .first()
             })
-            .and_then(|chunk_id| chunk_graph.chunk(*chunk_id))
+            .and_then(|chunk_handle| chunk_graph.chunk(*chunk_handle))
             .map(Chunk::render_id)
             .hash(&mut hasher);
     }
@@ -181,7 +185,7 @@ enum AssetRenderManifest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModuleRenderManifest {
-    module: ModuleId,
+    module: ModuleHandle,
     render_id: RenderId,
 }
 
@@ -269,18 +273,18 @@ fn generate_code_with(
     let module_render_ids = module_graph
         .modules()
         .iter()
-        .filter(|module| !chunk_graph.module_chunks(module.id()).is_empty())
+        .filter(|module| !chunk_graph.module_chunks(module.handle()).is_empty())
         .map(|module| {
             let render_id = chunk_graph
-                .module_render_id(module.id())
+                .module_render_id(module.handle())
                 .unwrap_or_else(|| {
                     panic!(
                         "module {:?} must have an assigned Render ID before code generation",
-                        module.id()
+                        module.handle()
                     )
                 })
                 .clone();
-            (module.id(), render_id)
+            (module.handle(), render_id)
         })
         .collect::<HashMap<_, _>>();
     let mut results = HashMap::new();
@@ -288,7 +292,7 @@ fn generate_code_with(
     for module in module_graph
         .modules()
         .iter()
-        .filter(|module| !chunk_graph.module_chunks(module.id()).is_empty())
+        .filter(|module| !chunk_graph.module_chunks(module.handle()).is_empty())
     {
         let input = CodeGenerationInput {
             module,
@@ -305,11 +309,11 @@ fn generate_code_with(
         let result = record
             .into_result(module.source())
             .expect("generated Code Generation Record must match its Module source");
-        let previous = results.insert(module.id(), result);
+        let previous = results.insert(module.handle(), result);
         assert!(
             previous.is_none(),
             "module {:?} must be generated exactly once per Compilation",
-            module.id()
+            module.handle()
         );
     }
 
@@ -324,20 +328,20 @@ fn generate_code_with(
 
 pub(crate) fn create_render_manifest(
     chunk_graph: &ChunkGraph,
-    entries: &[ModuleId],
+    entries: &[ModuleHandle],
     code_generation_results: &CodeGenerationResults,
 ) -> RenderManifest {
     let mut manifest_entries = Vec::new();
 
-    for (entry_index, group_id) in chunk_graph.entrypoints().iter().copied().enumerate() {
-        let group = &chunk_graph.chunk_groups()[group_id.index()];
-        let chunk_id = group
+    for (entry_index, group_handle) in chunk_graph.entrypoints().iter().copied().enumerate() {
+        let group = &chunk_graph.chunk_groups()[group_handle.index()];
+        let chunk_handle = group
             .chunks()
             .first()
             .copied()
             .expect("Entrypoint must contain a Chunk before manifest creation");
         let chunk = chunk_graph
-            .chunk(chunk_id)
+            .chunk(chunk_handle)
             .expect("Entrypoint Chunk must exist before manifest creation");
         let entry_module = entries
             .get(entry_index)
@@ -345,14 +349,14 @@ pub(crate) fn create_render_manifest(
             .expect("Entrypoint must have an Entry Module before manifest creation");
         let modules = module_render_manifest(chunk_graph, chunk, code_generation_results);
         chunk_graph
-            .runtime_tree_requirements(group_id)
+            .runtime_tree_requirements(group_handle)
             .expect("Runtime Requirements must be processed before manifest creation");
         let runtime_context = RuntimeModuleContext {
             chunk_graph,
-            runtime_chunk: chunk_id,
+            runtime_chunk: chunk_handle,
         };
         let runtime_modules = chunk_graph
-            .runtime_modules(chunk_id)
+            .runtime_modules(chunk_handle)
             .iter()
             .map(|module| RenderedRuntimeModule {
                 module: *module,
@@ -375,9 +379,9 @@ pub(crate) fn create_render_manifest(
     }
 
     for chunk in chunk_graph.chunks() {
-        let is_initial = chunk.groups().iter().any(|group_id| {
+        let is_initial = chunk.groups().iter().any(|group_handle| {
             matches!(
-                chunk_graph.chunk_groups()[group_id.index()].kind(),
+                chunk_graph.chunk_groups()[group_handle.index()].kind(),
                 ChunkGroupKind::Entrypoint { .. }
             )
         });
@@ -500,20 +504,20 @@ fn module_render_manifest(
     code_generation_results: &CodeGenerationResults,
 ) -> Vec<ModuleRenderManifest> {
     let mut modules = chunk_graph
-        .chunk_modules(chunk.id())
+        .chunk_modules(chunk.handle())
         .iter()
-        .map(|module_id| {
+        .map(|module_handle| {
             assert!(
-                code_generation_results.results.contains_key(module_id),
-                "module {module_id:?} must have a Code Generation Result before rendering"
+                code_generation_results.results.contains_key(module_handle),
+                "module {module_handle:?} must have a Code Generation Result before rendering"
             );
             ModuleRenderManifest {
-                module: *module_id,
+                module: *module_handle,
                 render_id: code_generation_results
                     .module_render_ids
-                    .get(module_id)
+                    .get(module_handle)
                     .unwrap_or_else(|| {
-                        panic!("module {module_id:?} must have a Render ID before rendering")
+                        panic!("module {module_handle:?} must have a Render ID before rendering")
                     })
                     .clone(),
             }
@@ -683,8 +687,8 @@ fn generate_module_code(
         }));
     }
 
-    let module_id = module.id();
-    let module_render_id = &module_render_ids[&module_id];
+    let module_handle = module.handle();
+    let module_render_id = &module_render_ids[&module_handle];
     let module_render_name = module_render_id.to_string();
     let mut source = ReplaceSource::new(OriginalSource::new(
         module.source(),
@@ -699,7 +703,7 @@ fn generate_module_code(
     for dependency in module.presentational_dependencies() {
         apply_dependency_template(
             dependency,
-            module_id,
+            module_handle,
             None,
             None,
             module_graph,
@@ -711,12 +715,12 @@ fn generate_module_code(
             &mut init_fragments,
         )?;
     }
-    for (dependency_id, dependency) in module.dependencies().iter().enumerate() {
+    for (dependency_index, dependency) in module.dependencies().iter().enumerate() {
         apply_dependency_template(
             dependency,
-            module_id,
+            module_handle,
             None,
-            Some(DependencyId::new(dependency_id)),
+            Some(DependencyIndex::new(dependency_index)),
             module_graph,
             chunk_graph,
             module.exports_info(),
@@ -727,12 +731,12 @@ fn generate_module_code(
         )?;
     }
     for (block_index, block) in module.blocks().iter().enumerate() {
-        for (dependency_id, dependency) in block.dependencies().iter().enumerate() {
+        for (dependency_index, dependency) in block.dependencies().iter().enumerate() {
             apply_dependency_template(
                 dependency,
-                module_id,
-                Some(AsyncDependenciesBlockId::new(block_index)),
-                Some(DependencyId::new(dependency_id)),
+                module_handle,
+                Some(AsyncDependenciesBlockIndex::new(block_index)),
+                Some(DependencyIndex::new(dependency_index)),
                 module_graph,
                 chunk_graph,
                 module.exports_info(),
@@ -801,24 +805,24 @@ fn push_init_fragment(
 #[allow(clippy::too_many_arguments)]
 fn apply_dependency_template(
     dependency: &Dependency,
-    module_id: ModuleId,
-    origin_block: Option<AsyncDependenciesBlockId>,
-    dependency_id: Option<DependencyId>,
+    module_handle: ModuleHandle,
+    origin_block: Option<AsyncDependenciesBlockIndex>,
+    dependency_index: Option<DependencyIndex>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     exports_info: &ExportsInfo,
-    module_render_ids: &HashMap<ModuleId, RenderId>,
+    module_render_ids: &HashMap<ModuleHandle, RenderId>,
     runtime_requirements: &mut RuntimeRequirements,
     source: &mut ReplaceSource,
     init_fragments: &mut Vec<InitFragment>,
 ) -> std::result::Result<(), Error> {
     let module = module_graph
-        .module(module_id)
+        .module(module_handle)
         .expect("Dependency Template origin Module must exist in the Module Graph");
     for range in dependency.source_ranges() {
         if range.start > range.end || range.end as usize > module.source_len() {
             return Err(Error::CodeGeneration {
-                module: module_id,
+                module: module_handle,
                 path: module.identity().resource.clone(),
                 message: format!(
                     "dependency source range {}..{} exceeds module source length {}",
@@ -837,8 +841,8 @@ fn apply_dependency_template(
             runtime_requirements.insert(RuntimeRequirement::Require);
             apply_harmony_import_side_effect_dependency(
                 dep,
-                module_id,
-                dependency_id,
+                module_handle,
+                dependency_index,
                 module_graph,
                 module_render_ids,
                 init_fragments,
@@ -846,8 +850,8 @@ fn apply_dependency_template(
         }
         Dependency::HarmonyImportSpecifier(dep) => apply_harmony_import_specifier_dependency(
             dep,
-            module_id,
-            dependency_id,
+            module_handle,
+            dependency_index,
             module_graph,
             module_render_ids,
             source,
@@ -864,8 +868,8 @@ fn apply_dependency_template(
             runtime_requirements.insert(RuntimeRequirement::DefinePropertyGetters);
             apply_harmony_export_imported_specifier_dependency(
                 dep,
-                module_id,
-                dependency_id,
+                module_handle,
+                dependency_index,
                 module_graph,
                 exports_info,
                 module_render_ids,
@@ -876,9 +880,9 @@ fn apply_dependency_template(
             runtime_requirements.insert(RuntimeRequirement::Require);
             apply_import_dependency(
                 dep,
-                module_id,
+                module_handle,
                 origin_block,
-                dependency_id,
+                dependency_index,
                 module_graph,
                 chunk_graph,
                 module_render_ids,
@@ -909,15 +913,15 @@ fn apply_export_header_dependency(dep: &HarmonyExportHeaderDependency, source: &
 
 fn apply_harmony_import_side_effect_dependency(
     dep: &HarmonyImportSideEffectDependency,
-    module_id: ModuleId,
-    dependency_id: Option<DependencyId>,
+    module_handle: ModuleHandle,
+    dependency_index: Option<DependencyIndex>,
     module_graph: &ModuleGraph,
-    module_render_ids: &HashMap<ModuleId, RenderId>,
+    module_render_ids: &HashMap<ModuleHandle, RenderId>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
-    let dependency_id = dependency_id.expect("Harmony import must have a Dependency ID");
+    let dependency_index = dependency_index.expect("Harmony import must have a Dependency Index");
     let target = module_graph
-        .module_for_dependency(module_id, None, dependency_id)
+        .module_for_dependency(module_handle, None, dependency_index)
         .expect("Harmony import must have a Module Graph connection");
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
     let target_id = json_render_id(&module_render_ids[&target]);
@@ -930,15 +934,16 @@ fn apply_harmony_import_side_effect_dependency(
 
 fn apply_harmony_import_specifier_dependency(
     dep: &HarmonyImportSpecifierDependency,
-    module_id: ModuleId,
-    dependency_id: Option<DependencyId>,
+    module_handle: ModuleHandle,
+    dependency_index: Option<DependencyIndex>,
     module_graph: &ModuleGraph,
-    module_render_ids: &HashMap<ModuleId, RenderId>,
+    module_render_ids: &HashMap<ModuleHandle, RenderId>,
     source: &mut ReplaceSource,
 ) {
-    let dependency_id = dependency_id.expect("Harmony import specifier must have a Dependency ID");
+    let dependency_index =
+        dependency_index.expect("Harmony import specifier must have a Dependency Index");
     module_graph
-        .module_for_dependency(module_id, None, dependency_id)
+        .module_for_dependency(module_handle, None, dependency_index)
         .expect("Harmony import specifier must have a Module Graph connection");
     let expression = import_expression(
         &dep.module.request,
@@ -1007,16 +1012,17 @@ fn apply_harmony_export_expression_dependency(
 
 fn apply_harmony_export_imported_specifier_dependency(
     dep: &HarmonyExportImportedSpecifierDependency,
-    module_id: ModuleId,
-    dependency_id: Option<DependencyId>,
+    module_handle: ModuleHandle,
+    dependency_index: Option<DependencyIndex>,
     module_graph: &ModuleGraph,
     exports_info: &ExportsInfo,
-    module_render_ids: &HashMap<ModuleId, RenderId>,
+    module_render_ids: &HashMap<ModuleHandle, RenderId>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
-    let dependency_id = dependency_id.expect("Harmony re-export must have a Dependency ID");
+    let dependency_index =
+        dependency_index.expect("Harmony re-export must have a Dependency Index");
     module_graph
-        .module_for_dependency(module_id, None, dependency_id)
+        .module_for_dependency(module_handle, None, dependency_index)
         .expect("Harmony re-export must have a Module Graph connection");
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
     if dep.is_star {
@@ -1044,35 +1050,35 @@ fn apply_harmony_export_imported_specifier_dependency(
 
 fn apply_import_dependency(
     dep: &ImportDependency,
-    module_id: ModuleId,
-    origin_block: Option<AsyncDependenciesBlockId>,
-    dependency_id: Option<DependencyId>,
+    module_handle: ModuleHandle,
+    origin_block: Option<AsyncDependenciesBlockIndex>,
+    dependency_index: Option<DependencyIndex>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
-    module_render_ids: &HashMap<ModuleId, RenderId>,
+    module_render_ids: &HashMap<ModuleHandle, RenderId>,
     runtime_requirements: &mut RuntimeRequirements,
     source: &mut ReplaceSource,
 ) {
     let block_index = origin_block.expect("Dynamic import must belong to an Async Block");
-    let dependency_id = dependency_id.expect("Dynamic import must have a Dependency ID");
+    let dependency_index = dependency_index.expect("Dynamic import must have a Dependency Index");
     let target = module_graph
-        .module_for_dependency(module_id, Some(block_index), dependency_id)
+        .module_for_dependency(module_handle, Some(block_index), dependency_index)
         .expect("Dynamic import must have a Module Graph connection");
     let target_id = json_render_id(&module_render_ids[&target]);
     let origin = AsyncBlockOrigin {
-        module: module_id,
+        module: module_handle,
         block: block_index,
     };
-    let expression = if let Some(group_id) = chunk_graph.block_chunk_group(origin) {
+    let expression = if let Some(group_handle) = chunk_graph.block_chunk_group(origin) {
         runtime_requirements.insert(RuntimeRequirement::EnsureChunk);
-        let group = &chunk_graph.chunk_groups()[group_id.index()];
-        let chunk_id = group
+        let group = &chunk_graph.chunk_groups()[group_handle.index()];
+        let chunk_handle = group
             .chunks()
             .first()
             .copied()
             .expect("Async Chunk Group must contain a Chunk");
         let chunk = chunk_graph
-            .chunk(chunk_id)
+            .chunk(chunk_handle)
             .expect("Async Chunk must exist before Dynamic Import generation");
         let chunk_id = json_render_id(chunk.render_id());
         format!(
@@ -1168,7 +1174,7 @@ mod tests {
 
     use crate::{
         CacheOptions, Compiler, CompilerOptions, ConstDependency, Dependency, Entry, Error,
-        ModuleGraph, ModuleId, ModuleIdentity, SnapshotOptions, SourceRange,
+        ModuleGraph, ModuleHandle, ModuleIdentity, SnapshotOptions, SourceRange,
         build_cache::{
             BuildCache, CacheIdentifier, CacheItemFamily, CacheItemWork, CacheKey, CacheNamespace,
         },
@@ -1209,9 +1215,9 @@ mod tests {
 
     #[test]
     fn exact_render_hash_covers_generated_source_and_manifest_inputs() {
-        let module_id = ModuleId::new(0);
+        let module_handle = ModuleHandle::new(0);
         let module = ModuleRenderManifest {
-            module: module_id,
+            module: module_handle,
             render_id: RenderId::String("./src/feature.js".to_string()),
         };
         let render = AssetRenderManifest::AsyncChunk {
@@ -1220,13 +1226,13 @@ mod tests {
         };
         let mut results = CodeGenerationResults::default();
         results.results.insert(
-            module_id,
+            module_handle,
             code_generation_result("export const value = 'before';"),
         );
         let before = render.cache_etag(&results);
 
         results.results.insert(
-            module_id,
+            module_handle,
             code_generation_result("export const value = 'after';"),
         );
         assert_ne!(before, render.cache_etag(&results));
@@ -1235,7 +1241,7 @@ mod tests {
         let mut requirements = super::RuntimeRequirements::default();
         requirements.insert(RuntimeRequirement::MakeNamespaceObject);
         results.results.insert(
-            module_id,
+            module_handle,
             code_generation_result("export const value = 'after';")
                 .with_runtime_requirements(requirements),
         );
@@ -1290,7 +1296,8 @@ mod tests {
                     "value".to_string(),
                     1,
                 );
-            let mut chunk_graph = crate::ChunkGraph::build(&options, &module_graph, &[module]);
+            let mut chunk_graph =
+                crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
             assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
             assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
             (module_graph, chunk_graph, module)
@@ -1339,7 +1346,8 @@ mod tests {
             .module_mut(module)
             .expect("fixture Module should exist")
             .finish_build(Vec::new(), Vec::new(), Vec::new(), "éx".to_string(), 1);
-        let mut chunk_graph = crate::ChunkGraph::build(&options, &module_graph, &[module]);
+        let mut chunk_graph =
+            crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
         let module_render_ids = HashMap::from([(
@@ -1413,7 +1421,8 @@ mod tests {
                 "value".to_string(),
                 1,
             );
-        let mut chunk_graph = crate::ChunkGraph::build(&options, &module_graph, &[module]);
+        let mut chunk_graph =
+            crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
@@ -1476,7 +1485,7 @@ mod tests {
         for module in compilation.module_graph().modules() {
             let requirements = compilation
                 .chunk_graph()
-                .module_runtime_requirements(module.id())
+                .module_runtime_requirements(module.handle())
                 .expect("renderable Module must have processed Runtime Requirements");
             assert!(requirements.contains(RuntimeRequirement::MakeNamespaceObject));
             assert!(requirements.contains(RuntimeRequirement::DefinePropertyGetters));
@@ -1485,13 +1494,13 @@ mod tests {
         for chunk in compilation.chunk_graph().chunks() {
             let requirements = compilation
                 .chunk_graph()
-                .chunk_runtime_requirements(chunk.id())
+                .chunk_runtime_requirements(chunk.handle())
                 .expect("Chunk must have processed Runtime Requirements");
             assert!(requirements.contains(RuntimeRequirement::MakeNamespaceObject));
             assert!(requirements.contains(RuntimeRequirement::DefinePropertyGetters));
             assert!(requirements.contains(RuntimeRequirement::HasOwnProperty));
             assert_eq!(
-                compilation.chunk_graph().runtime_modules(chunk.id()),
+                compilation.chunk_graph().runtime_modules(chunk.handle()),
                 [
                     RuntimeModule::DefinePropertyGetters,
                     RuntimeModule::HasOwnProperty,
@@ -1556,12 +1565,12 @@ mod tests {
             .find(|module| module.identity().resource.ends_with("shared.js"))
             .expect("fixture shared Module should exist");
         let failed_path = failed_module.identity().resource.clone();
-        let failed_module = failed_module.id();
+        let failed_module = failed_module.handle();
         let failed = super::generate_code_with(
             compilation.module_graph(),
             compilation.chunk_graph(),
             |input| {
-                if input.module.id() == failed_module {
+                if input.module.handle() == failed_module {
                     Err(Error::CodeGeneration {
                         module: failed_module,
                         path: input.module.identity().resource.clone(),

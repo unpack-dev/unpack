@@ -13,9 +13,9 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ModuleId(usize);
+pub struct ModuleHandle(usize);
 
-impl ModuleId {
+impl ModuleHandle {
     pub const fn new(index: usize) -> Self {
         Self(index)
     }
@@ -27,7 +27,7 @@ impl ModuleId {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
-    id: ModuleId,
+    handle: ModuleHandle,
     identity: ModuleIdentity,
     built_content: Arc<BuiltModuleContent>,
     exports_info: ExportsInfo,
@@ -86,9 +86,9 @@ impl BuiltModuleContent {
 }
 
 impl Module {
-    pub(crate) fn new(id: ModuleId, identity: ModuleIdentity) -> Self {
+    pub(crate) fn new(handle: ModuleHandle, identity: ModuleIdentity) -> Self {
         Self {
-            id,
+            handle,
             identity,
             built_content: Arc::new(BuiltModuleContent::new(
                 ParsedModule::default(),
@@ -100,8 +100,8 @@ impl Module {
         }
     }
 
-    pub fn id(&self) -> ModuleId {
-        self.id
+    pub fn handle(&self) -> ModuleHandle {
+        self.handle
     }
 
     pub fn identity(&self) -> &ModuleIdentity {

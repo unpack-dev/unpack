@@ -1,6 +1,9 @@
 mod build_cache;
+mod build_chunk_graph;
 mod cache_hash;
+mod chunk;
 mod chunk_graph;
+mod chunk_group;
 mod code_generation;
 mod code_generation_record;
 mod compilation;
@@ -24,9 +27,9 @@ mod runtime;
 mod snapshot;
 
 pub use build_cache::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
-pub use chunk_graph::{
-    AsyncBlockOrigin, Chunk, ChunkGraph, ChunkGroup, ChunkGroupId, ChunkGroupKind, ChunkId,
-};
+pub use chunk::{Chunk, ChunkHandle};
+pub use chunk_graph::ChunkGraph;
+pub use chunk_group::{AsyncBlockOrigin, ChunkGroup, ChunkGroupHandle, ChunkGroupKind};
 pub use code_generation::Asset;
 pub use compilation::{Compilation, WatchDependencies};
 pub use compiler::{
@@ -44,10 +47,10 @@ pub use error::{Error, Result};
 pub use exports_info::ExportsInfo;
 pub use loader::{LoaderFuture, LoaderRequest, LoaderRunner, MatchedLoader, ModuleRule};
 pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions};
-pub use module::{Module, ModuleId, ModuleIdentity, ModuleType};
+pub use module::{Module, ModuleHandle, ModuleIdentity, ModuleType};
 pub use module_graph::{
-    AsyncDependenciesBlockId, DependencyId, ModuleGraph, ModuleGraphConnection,
-    ModuleGraphConnectionId,
+    AsyncDependenciesBlockIndex, DependencyIndex, ModuleGraph, ModuleGraphConnection,
+    ModuleGraphConnectionHandle,
 };
 pub use normal_module_factory::{FactorizedModule, NormalModuleFactory};
 pub use resolver::{ResolveOptions, ResolvedResource, UnpackResolver};

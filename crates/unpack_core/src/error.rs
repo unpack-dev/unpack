@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::ModuleId;
+use crate::ModuleHandle;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -45,14 +45,14 @@ pub enum Error {
     MakeTask { message: String },
 
     #[error("module graph is missing module {0:?}")]
-    MissingModule(ModuleId),
+    MissingModule(ModuleHandle),
 
     #[error("module {0:?} does not have a filesystem parent directory")]
-    MissingModuleDirectory(ModuleId),
+    MissingModuleDirectory(ModuleHandle),
 
     #[error("failed to generate {path} ({module:?}): {message}")]
     CodeGeneration {
-        module: ModuleId,
+        module: ModuleHandle,
         path: PathBuf,
         message: String,
     },

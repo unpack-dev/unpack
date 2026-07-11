@@ -178,7 +178,7 @@ pub struct NativeStatsJson {
 
 #[napi(object)]
 pub struct NativeModule {
-    pub id: u32,
+    pub handle: u32,
     pub identifier: String,
     pub resource: String,
     #[napi(js_name = "type")]
@@ -189,10 +189,11 @@ pub struct NativeModule {
 
 #[napi(object)]
 pub struct NativeModuleGraphConnection {
-    pub id: u32,
-    #[napi(js_name = "originModule")]
-    pub origin_module: Option<u32>,
-    pub module: u32,
+    pub handle: u32,
+    #[napi(js_name = "originModuleHandle")]
+    pub origin_module_handle: Option<u32>,
+    #[napi(js_name = "moduleHandle")]
+    pub module_handle: u32,
     #[napi(js_name = "dependencyType")]
     pub dependency_type: String,
     pub request: Option<String>,
@@ -203,7 +204,7 @@ pub struct NativeModuleGraphConnection {
 
 #[napi(object)]
 pub struct NativeChunk {
-    pub id: u32,
+    pub handle: u32,
     pub name: Option<String>,
     #[napi(js_name = "renderId")]
     pub render_id: Option<Either<String, u32>>,
@@ -255,25 +256,25 @@ impl NativeCompilation {
     }
 
     #[napi(js_name = "incomingConnections")]
-    pub fn incoming_connections(&self, module_id: u32) -> Vec<NativeModuleGraphConnection> {
-        let module_id = unpack_core::ModuleId::new(module_id as usize);
-        if self.module_graph.module(module_id).is_none() {
+    pub fn incoming_connections(&self, module_handle: u32) -> Vec<NativeModuleGraphConnection> {
+        let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
+        if self.module_graph.module(module_handle).is_none() {
             return Vec::new();
         }
         self.module_graph
-            .incoming_connections(module_id)
+            .incoming_connections(module_handle)
             .map(native_module_graph_connection)
             .collect()
     }
 
     #[napi(js_name = "outgoingConnections")]
-    pub fn outgoing_connections(&self, module_id: u32) -> Vec<NativeModuleGraphConnection> {
-        let module_id = unpack_core::ModuleId::new(module_id as usize);
-        if self.module_graph.module(module_id).is_none() {
+    pub fn outgoing_connections(&self, module_handle: u32) -> Vec<NativeModuleGraphConnection> {
+        let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
+        if self.module_graph.module(module_handle).is_none() {
             return Vec::new();
         }
         self.module_graph
-            .outgoing_connections(module_id)
+            .outgoing_connections(module_handle)
             .map(native_module_graph_connection)
             .collect()
     }
@@ -284,7 +285,7 @@ impl NativeCompilation {
             .chunks()
             .iter()
             .map(|chunk| NativeChunk {
-                id: chunk.id().index().try_into().unwrap_or(u32::MAX),
+                handle: chunk.handle().index().try_into().unwrap_or(u32::MAX),
                 name: chunk.name().map(str::to_string),
                 render_id: native_render_id(chunk.render_id_string(), chunk.render_id_number()),
             })
@@ -292,41 +293,41 @@ impl NativeCompilation {
     }
 
     #[napi(js_name = "chunkModules")]
-    pub fn chunk_modules(&self, chunk_id: u32) -> Vec<u32> {
-        let chunk_id = unpack_core::ChunkId::new(chunk_id as usize);
-        if self.chunk_graph.chunk(chunk_id).is_none() {
+    pub fn chunk_modules(&self, chunk_handle: u32) -> Vec<u32> {
+        let chunk_handle = unpack_core::ChunkHandle::new(chunk_handle as usize);
+        if self.chunk_graph.chunk(chunk_handle).is_none() {
             return Vec::new();
         }
         self.chunk_graph
-            .chunk_modules(chunk_id)
+            .chunk_modules(chunk_handle)
             .iter()
             .copied()
-            .map(native_module_id)
+            .map(native_module_handle)
             .collect()
     }
 
     #[napi(js_name = "moduleChunks")]
-    pub fn module_chunks(&self, module_id: u32) -> Vec<u32> {
-        let module_id = unpack_core::ModuleId::new(module_id as usize);
-        if self.module_graph.module(module_id).is_none() {
+    pub fn module_chunks(&self, module_handle: u32) -> Vec<u32> {
+        let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
+        if self.module_graph.module(module_handle).is_none() {
             return Vec::new();
         }
         self.chunk_graph
-            .module_chunks(module_id)
+            .module_chunks(module_handle)
             .iter()
             .map(|chunk| chunk.index().try_into().unwrap_or(u32::MAX))
             .collect()
     }
 
     #[napi(js_name = "moduleId")]
-    pub fn module_id(&self, module_id: u32) -> Option<Either<String, u32>> {
-        let module_id = unpack_core::ModuleId::new(module_id as usize);
-        if self.module_graph.module(module_id).is_none() {
+    pub fn module_id(&self, module_handle: u32) -> Option<Either<String, u32>> {
+        let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
+        if self.module_graph.module(module_handle).is_none() {
             return None;
         }
         native_render_id(
-            self.chunk_graph.module_render_id_string(module_id),
-            self.chunk_graph.module_render_id_number(module_id),
+            self.chunk_graph.module_render_id_string(module_handle),
+            self.chunk_graph.module_render_id_number(module_handle),
         )
     }
 }
@@ -733,14 +734,14 @@ fn native_module_graph_connection(
     connection: &unpack_core::ModuleGraphConnection,
 ) -> NativeModuleGraphConnection {
     NativeModuleGraphConnection {
-        id: connection.id.index().try_into().unwrap_or(u32::MAX),
-        origin_module: connection.origin_module.map(native_module_id),
-        module: native_module_id(connection.module),
+        handle: connection.handle.index().try_into().unwrap_or(u32::MAX),
+        origin_module_handle: connection.origin_module.map(native_module_handle),
+        module_handle: native_module_handle(connection.module),
         dependency_type: dependency_type(&connection.dependency).to_string(),
         request: connection.dependency.request().map(str::to_string),
         weak: dependency_is_weak(&connection.dependency),
         parent_block_index: connection
-            .origin_dependency_id
+            .origin_dependency_index
             .and_then(|id| i32::try_from(id.index()).ok())
             .unwrap_or(-1),
     }
@@ -764,7 +765,7 @@ fn native_module(module: &Module) -> NativeModule {
     };
 
     NativeModule {
-        id: native_module_id(module.id()),
+        handle: native_module_handle(module.handle()),
         identifier: format!("{module_type}|{request}"),
         resource,
         module_type: module_type.to_string(),
@@ -776,8 +777,8 @@ fn native_module(module: &Module) -> NativeModule {
     }
 }
 
-fn native_module_id(id: unpack_core::ModuleId) -> u32 {
-    id.index().try_into().unwrap_or(u32::MAX)
+fn native_module_handle(handle: unpack_core::ModuleHandle) -> u32 {
+    handle.index().try_into().unwrap_or(u32::MAX)
 }
 
 fn dependency_type(dependency: &Dependency) -> &'static str {

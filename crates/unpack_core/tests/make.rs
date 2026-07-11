@@ -161,7 +161,7 @@ async fn make_records_dynamic_import_split_points() -> Result<(), Box<dyn std::e
         .iter()
         .find(|module| module.identity().resource.ends_with("feature.js"))
         .expect("feature module should exist")
-        .id();
+        .handle();
     let feature_outgoing = graph
         .outgoing_connections(feature)
         .map(|connection| {
@@ -209,7 +209,7 @@ async fn make_deduplicates_shared_module_identity() -> Result<(), Box<dyn std::e
         .iter()
         .find(|module| module.identity().resource.ends_with("shared.js"))
         .expect("shared module should exist")
-        .id();
+        .handle();
 
     assert_eq!(graph.modules().len(), 4);
     assert_eq!(graph.incoming_connections(shared).count(), 2);
@@ -244,7 +244,7 @@ async fn make_deduplicates_mixed_import_identity() -> Result<(), Box<dyn std::er
         .iter()
         .find(|module| module.identity().resource.ends_with("feature.js"))
         .expect("feature module should exist")
-        .id();
+        .handle();
     let incoming = graph
         .incoming_connections(feature)
         .map(|connection| connection.dependency.kind())

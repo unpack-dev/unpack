@@ -16,9 +16,10 @@ use napi_derive::napi;
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use unpack_core::{
     Asset, BuildDependency, CacheCompression, CacheIdleReason, CacheOptions, Compiler,
-    CompilerOptions, Entry, Error as CoreError, InfrastructureLogEvent, InfrastructureLogLevel,
-    InfrastructureLoggingOptions, LoaderFuture, LoaderRequest, LoaderRunner, ModuleRule,
-    SnapshotOptions, SnapshotPathPattern, SnapshotStrategy,
+    CompilerOptions, Dependency, Entry, Error as CoreError, InfrastructureLogEvent,
+    InfrastructureLogLevel, InfrastructureLoggingOptions, LoaderFuture, LoaderRequest,
+    LoaderRunner, Module, ModuleRule, ModuleType, SnapshotOptions, SnapshotPathPattern,
+    SnapshotStrategy,
 };
 
 #[global_allocator]
@@ -173,6 +174,38 @@ pub struct NativeStatsJson {
     pub output_path: String,
     #[napi(js_name = "watchDependencies")]
     pub watch_dependencies: NativeWatchDependencies,
+    #[napi(js_name = "moduleGraph")]
+    pub module_graph: NativeModuleGraph,
+}
+
+#[napi(object)]
+pub struct NativeModuleGraph {
+    pub modules: Vec<NativeModule>,
+    pub connections: Vec<NativeModuleGraphConnection>,
+}
+
+#[napi(object)]
+pub struct NativeModule {
+    pub id: u32,
+    pub identifier: String,
+    pub resource: String,
+    #[napi(js_name = "type")]
+    pub module_type: String,
+    #[napi(js_name = "providedExports")]
+    pub provided_exports: Vec<String>,
+}
+
+#[napi(object)]
+pub struct NativeModuleGraphConnection {
+    #[napi(js_name = "originModule")]
+    pub origin_module: Option<u32>,
+    pub module: u32,
+    #[napi(js_name = "dependencyType")]
+    pub dependency_type: String,
+    pub request: Option<String>,
+    pub weak: bool,
+    #[napi(js_name = "parentBlockIndex")]
+    pub parent_block_index: i32,
 }
 
 #[napi(object)]
@@ -580,8 +613,94 @@ async fn run_compiler_inner(
             assets: compilation.assets().iter().map(asset_stats).collect(),
             output_path: output_path.to_string_lossy().into_owned(),
             watch_dependencies: watch_dependencies(compilation.watch_dependencies()),
+            module_graph: module_graph(compilation.module_graph()),
         }),
         logs,
+    }
+}
+
+fn module_graph(graph: &unpack_core::ModuleGraph) -> NativeModuleGraph {
+    NativeModuleGraph {
+        modules: graph.modules().iter().map(native_module).collect(),
+        connections: graph
+            .connections()
+            .iter()
+            .map(|connection| NativeModuleGraphConnection {
+                origin_module: connection.origin_module.map(native_module_id),
+                module: native_module_id(connection.module),
+                dependency_type: dependency_type(&connection.dependency).to_string(),
+                request: connection.dependency.request().map(str::to_string),
+                weak: dependency_is_weak(&connection.dependency),
+                parent_block_index: connection
+                    .origin_dependency_id
+                    .and_then(|index| i32::try_from(index).ok())
+                    .unwrap_or(-1),
+            })
+            .collect(),
+    }
+}
+
+fn native_module(module: &Module) -> NativeModule {
+    let identity = module.identity();
+    let resource = format!(
+        "{}{}{}",
+        identity.resource.to_string_lossy(),
+        identity.query.as_deref().unwrap_or_default(),
+        identity.fragment.as_deref().unwrap_or_default()
+    );
+    let request = if identity.loaders.is_empty() {
+        resource.clone()
+    } else {
+        format!("{}!{resource}", identity.loaders.join("!"))
+    };
+    let module_type = match identity.module_type {
+        ModuleType::JavaScriptAuto => "javascript/auto",
+    };
+
+    NativeModule {
+        id: native_module_id(module.id()),
+        identifier: format!("{module_type}|{request}"),
+        resource,
+        module_type: module_type.to_string(),
+        provided_exports: module
+            .exports_info()
+            .provided_exports()
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+fn native_module_id(id: unpack_core::ModuleId) -> u32 {
+    id.index().try_into().unwrap_or(u32::MAX)
+}
+
+fn dependency_type(dependency: &Dependency) -> &'static str {
+    match dependency {
+        Dependency::Entry(_) => "entry",
+        Dependency::HarmonyImportSideEffect(_) => "harmony side effect evaluation",
+        Dependency::HarmonyImportSpecifier(_) => "harmony import specifier",
+        Dependency::HarmonyExportHeader(_) => "harmony export header",
+        Dependency::HarmonyExportSpecifier(_) => "harmony export specifier",
+        Dependency::HarmonyExportExpression(_) => "harmony export expression",
+        Dependency::HarmonyExportImportedSpecifier(_) => "harmony export imported specifier",
+        Dependency::Null(_) => "null",
+        Dependency::Const(_) => "const",
+        Dependency::Import(_) => "import()",
+    }
+}
+
+fn dependency_is_weak(dependency: &Dependency) -> bool {
+    match dependency {
+        Dependency::Entry(dependency) => dependency.module.weak,
+        Dependency::HarmonyImportSideEffect(dependency) => dependency.module.weak,
+        Dependency::HarmonyImportSpecifier(dependency) => dependency.module.weak,
+        Dependency::HarmonyExportImportedSpecifier(dependency) => dependency.module.weak,
+        Dependency::Import(dependency) => dependency.module.weak,
+        Dependency::HarmonyExportHeader(_)
+        | Dependency::HarmonyExportSpecifier(_)
+        | Dependency::HarmonyExportExpression(_)
+        | Dependency::Null(_)
+        | Dependency::Const(_) => false,
     }
 }
 

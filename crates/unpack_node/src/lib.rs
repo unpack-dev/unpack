@@ -15,11 +15,11 @@ use napi::{
 use napi_derive::napi;
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use unpack_core::{
-    Asset, BuildDependency, CacheCompression, CacheIdleReason, CacheOptions, Compiler,
-    CompilerOptions, Dependency, Entry, Error as CoreError, InfrastructureLogEvent,
-    InfrastructureLogLevel, InfrastructureLoggingOptions, LoaderFuture, LoaderRequest,
-    LoaderRunner, Module, ModuleRule, ModuleType, SnapshotOptions, SnapshotPathPattern,
-    SnapshotStrategy,
+    Asset, BuildDependency, CacheCompression, CacheIdleReason, CacheOptions, CompilationHooks,
+    Compiler, CompilerOptions, Dependency, Entry, Error as CoreError, HookFuture,
+    InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions, LoaderFuture,
+    LoaderRequest, LoaderRunner, Module, ModuleRule, ModuleType, SnapshotOptions,
+    SnapshotPathPattern, SnapshotStrategy,
 };
 
 #[global_allocator]
@@ -344,9 +344,16 @@ pub fn create_compiler(
     loader_callback: Option<
         Function<'_, FnArgs<(String, String, String, String)>, Promise<String>>,
     >,
+    compilation_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
+    finish_modules_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
 ) -> Result<NativeCompiler> {
     init_internal_tracing_from_env();
-    NativeCompiler::new(options, loader_callback)
+    NativeCompiler::new(
+        options,
+        loader_callback,
+        compilation_callback,
+        finish_modules_callback,
+    )
 }
 
 type NativeLoaderCallback = ThreadsafeFunction<
@@ -393,6 +400,51 @@ impl LoaderRunner for NativeLoaderRunner {
             })
         })
     }
+}
+
+type NativeFinishModulesCallback =
+    ThreadsafeFunction<NativeCompilation, Promise<()>, NativeCompilation, Status, false, true>;
+
+struct NativeCompilationHooks {
+    compilation: Arc<NativeFinishModulesCallback>,
+    finish_modules: Arc<NativeFinishModulesCallback>,
+}
+
+impl std::fmt::Debug for NativeCompilationHooks {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("NativeCompilationHooks")
+    }
+}
+
+impl CompilationHooks for NativeCompilationHooks {
+    fn compilation<'a>(&'a self, compilation: &'a unpack_core::Compilation) -> HookFuture<'a> {
+        call_compilation_hook(Arc::clone(&self.compilation), compilation)
+    }
+
+    fn finish_modules<'a>(&'a self, compilation: &'a unpack_core::Compilation) -> HookFuture<'a> {
+        call_compilation_hook(Arc::clone(&self.finish_modules), compilation)
+    }
+}
+
+fn call_compilation_hook<'a>(
+    callback: Arc<NativeFinishModulesCallback>,
+    compilation: &'a unpack_core::Compilation,
+) -> HookFuture<'a> {
+    let native_compilation = NativeCompilation {
+        module_graph: Arc::new(compilation.module_graph().clone()),
+        chunk_graph: Arc::new(unpack_core::ChunkGraph::default()),
+    };
+    Box::pin(async move {
+        let promise = callback
+            .call_async_catch(native_compilation)
+            .await
+            .map_err(|error| CoreError::Hook {
+                message: error.to_string(),
+            })?;
+        promise.await.map_err(|error| CoreError::Hook {
+            message: error.to_string(),
+        })
+    })
 }
 
 #[napi]
@@ -480,6 +532,8 @@ impl NativeCompiler {
         loader_callback: Option<
             Function<'_, FnArgs<(String, String, String, String)>, Promise<String>>,
         >,
+        compilation_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
+        finish_modules_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
     ) -> Result<Self> {
         let context = PathBuf::from(&options.context);
         let output_path = PathBuf::from(&options.output_path);
@@ -511,6 +565,25 @@ impl NativeCompiler {
                     .build()?;
                 Ok::<Arc<dyn LoaderRunner>, napi::Error>(Arc::new(NativeLoaderRunner {
                     callback: Arc::new(callback),
+                }))
+            })
+            .transpose()?;
+        compiler_options.compilation_hooks = compilation_callback
+            .zip(finish_modules_callback)
+            .map(|(compilation_callback, finish_modules_callback)| {
+                let compilation: NativeFinishModulesCallback = compilation_callback
+                    .build_threadsafe_function()
+                    .callee_handled::<false>()
+                    .weak::<true>()
+                    .build()?;
+                let finish_modules: NativeFinishModulesCallback = finish_modules_callback
+                    .build_threadsafe_function()
+                    .callee_handled::<false>()
+                    .weak::<true>()
+                    .build()?;
+                Ok::<Arc<dyn CompilationHooks>, napi::Error>(Arc::new(NativeCompilationHooks {
+                    compilation: Arc::new(compilation),
+                    finish_modules: Arc::new(finish_modules),
                 }))
             })
             .transpose()?;
@@ -899,7 +972,7 @@ fn stats_error(error: &CoreError) -> NativeStatsError {
             issuer: None,
             stack: None,
         },
-        CoreError::MakeTask { message } => NativeStatsError {
+        CoreError::MakeTask { message } | CoreError::Hook { message } => NativeStatsError {
             message: error.to_string(),
             path: None,
             request: None,

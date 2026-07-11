@@ -44,6 +44,9 @@ pub enum Error {
     #[error("make task failed: {message}")]
     MakeTask { message: String },
 
+    #[error("compilation hook failed: {message}")]
+    Hook { message: String },
+
     #[error("module graph is missing module {0:?}")]
     MissingModule(ModuleHandle),
 

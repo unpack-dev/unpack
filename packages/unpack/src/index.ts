@@ -124,6 +124,7 @@ export interface Stats {
 }
 
 export interface Compilation {
+  readonly hooks: CompilationHooks;
   readonly moduleGraph: ModuleGraph;
   readonly chunkGraph: ChunkGraph;
   readonly modules: ReadonlySet<Module>;
@@ -256,7 +257,33 @@ export interface DoneHook {
   promise(stats: Stats): Promise<void>;
 }
 
+export interface FinishModulesHook {
+  tap(options: string | TapOptions, callback: (modules: ReadonlySet<Module>) => void): void;
+  tapAsync(
+    options: string | TapOptions,
+    callback: (modules: ReadonlySet<Module>, done: (error?: Error | null) => void) => void
+  ): void;
+  tapPromise(
+    options: string | TapOptions,
+    callback: (modules: ReadonlySet<Module>) => PromiseLike<void>
+  ): void;
+  callAsync(
+    modules: ReadonlySet<Module>,
+    callback: (error?: Error | null) => void
+  ): void;
+  promise(modules: ReadonlySet<Module>): Promise<void>;
+}
+
+export interface CompilationHooks {
+  readonly finishModules: FinishModulesHook;
+}
+
+export interface CompilationHook {
+  tap(options: string | TapOptions, callback: (compilation: Compilation) => void): void;
+}
+
 export interface CompilerHooks {
+  readonly compilation: CompilationHook;
   readonly done: DoneHook;
 }
 
@@ -481,7 +508,9 @@ interface NativeBinding {
       resource: string,
       source: string,
       options: string
-    ) => Promise<string>
+    ) => Promise<string>,
+    compilation?: (compilation: NativeCompilation) => Promise<void>,
+    finishModules?: (compilation: NativeCompilation) => Promise<void>
   ): NativeCompiler;
 }
 
@@ -606,6 +635,31 @@ interface DoneTap {
   run(stats: Stats): Promise<void>;
 }
 
+interface OrderedTap {
+  name: string;
+  stage: number;
+  before: Set<string>;
+}
+
+function insertOrderedTap<TTap extends OrderedTap>(taps: TTap[], tap: TTap): void {
+  const before = new Set(tap.before);
+  let index = taps.length;
+  while (index > 0) {
+    const current = taps[index - 1];
+    if (before.has(current.name)) {
+      before.delete(current.name);
+      index -= 1;
+      continue;
+    }
+    if (before.size > 0 || current.stage > tap.stage) {
+      index -= 1;
+      continue;
+    }
+    break;
+  }
+  taps.splice(index, 0, tap);
+}
+
 class DoneHookImpl implements DoneHook {
   readonly #taps: DoneTap[] = [];
 
@@ -671,22 +725,86 @@ class DoneHookImpl implements DoneHook {
   ): void {
     const normalized = normalizeTapOptions(options);
     const tap: DoneTap = { ...normalized, run };
-    const before = new Set(tap.before);
-    let index = this.#taps.length;
-    while (index > 0) {
-      const current = this.#taps[index - 1];
-      if (before.has(current.name)) {
-        before.delete(current.name);
-        index -= 1;
-        continue;
-      }
-      if (before.size > 0 || current.stage > tap.stage) {
-        index -= 1;
-        continue;
-      }
-      break;
-    }
-    this.#taps.splice(index, 0, tap);
+    insertOrderedTap(this.#taps, tap);
+  }
+}
+
+interface FinishModulesTap {
+  name: string;
+  stage: number;
+  before: Set<string>;
+  run(modules: ReadonlySet<Module>): Promise<void>;
+}
+
+class FinishModulesHookImpl implements FinishModulesHook {
+  readonly #taps: FinishModulesTap[] = [];
+
+  tap(options: string | TapOptions, callback: (modules: ReadonlySet<Module>) => void): void {
+    assertFunction(callback, "callback");
+    this.#insert(options, async (modules) => { callback(modules); });
+  }
+
+  tapAsync(
+    options: string | TapOptions,
+    callback: (modules: ReadonlySet<Module>, done: (error?: Error | null) => void) => void
+  ): void {
+    assertFunction(callback, "callback");
+    this.#insert(options, (modules) => new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const done = (error?: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        error == null ? resolve() : reject(error);
+      };
+      try { callback(modules, done); } catch (error) { done(toError(error, "HookError")); }
+    }));
+  }
+
+  tapPromise(
+    options: string | TapOptions,
+    callback: (modules: ReadonlySet<Module>) => PromiseLike<void>
+  ): void {
+    assertFunction(callback, "callback");
+    this.#insert(options, async (modules) => { await callback(modules); });
+  }
+
+  callAsync(
+    modules: ReadonlySet<Module>,
+    callback: (error?: Error | null) => void
+  ): void {
+    assertFunction(callback, "callback");
+    void this.promise(modules).then(() => callback(), (error) => callback(toError(error, "HookError")));
+  }
+
+  async promise(modules: ReadonlySet<Module>): Promise<void> {
+    for (const tap of this.#taps) await tap.run(modules);
+  }
+
+  #insert(
+    options: string | TapOptions,
+    run: (modules: ReadonlySet<Module>) => Promise<void>
+  ): void {
+    const tap = { ...normalizeTapOptions(options), run };
+    insertOrderedTap(this.#taps, tap);
+  }
+}
+
+class CompilationHookImpl implements CompilationHook {
+  readonly #taps: Array<{
+    name: string;
+    stage: number;
+    before: Set<string>;
+    run(compilation: Compilation): void;
+  }> = [];
+
+  tap(options: string | TapOptions, callback: (compilation: Compilation) => void): void {
+    assertFunction(callback, "callback");
+    const tap = { ...normalizeTapOptions(options), run: callback };
+    insertOrderedTap(this.#taps, tap);
+  }
+
+  call(compilation: Compilation): void {
+    for (const tap of this.#taps) tap.run(compilation);
   }
 }
 
@@ -717,7 +835,10 @@ type CompilerLifecycle =
   | { kind: "closed" };
 
 class CompilerImpl implements Compiler {
-  readonly hooks: CompilerHooks = { done: new DoneHookImpl() };
+  readonly hooks: CompilerHooks = {
+    compilation: new CompilationHookImpl(),
+    done: new DoneHookImpl()
+  };
   #lifecycle: CompilerLifecycle = { kind: "open" };
   #running = false;
   #watching: WatchingImpl | undefined;
@@ -731,12 +852,37 @@ class CompilerImpl implements Compiler {
   readonly #infrastructureLoggingLevel: InfrastructureLoggingLevel;
   readonly #nativeCompiler: NativeCompiler;
   readonly #loaderRuntime: LoaderRuntime | undefined;
+  #nativeHookError: Error | undefined;
+  #activeCompilation: CompilationImpl | undefined;
 
   constructor(options: NormalizedOptions) {
     this.#loaderRuntime = options.moduleRules.length > 0
       ? new LoaderRuntime(options.context)
       : undefined;
-    this.#nativeCompiler = native.createCompiler(options, this.#loaderRuntime?.run);
+    this.#nativeCompiler = native.createCompiler(
+      options,
+      this.#loaderRuntime?.run,
+      async (nativeCompilation) => {
+        try {
+          const compilation = new CompilationImpl(nativeCompilation);
+          this.#activeCompilation = compilation;
+          (this.hooks.compilation as CompilationHookImpl).call(compilation);
+        } catch (error) {
+          this.#nativeHookError = toError(error, "HookError");
+          throw this.#nativeHookError;
+        }
+      },
+      async (nativeCompilation) => {
+        try {
+          const compilation = this.#activeCompilation ?? new CompilationImpl(nativeCompilation);
+          compilation.update(nativeCompilation);
+          await compilation.hooks.finishModules.promise(compilation.modules);
+        } catch (error) {
+          this.#nativeHookError = toError(error, "HookError");
+          throw this.#nativeHookError;
+        }
+      }
+    );
     this.#writableFilesystemCache =
       options.cache.type === "filesystem" && !options.cache.readonly;
     this.#cacheIdleTimeout = options.cache.idleTimeout ?? 60_000;
@@ -793,7 +939,8 @@ class CompilerImpl implements Compiler {
       (result) => {
         this.#emitInfrastructureLogs(result.logs);
         if (result.error) {
-          const error = namedError(result.error.name, result.error.message);
+          const error = this.#nativeHookError ?? namedError(result.error.name, result.error.message);
+          this.#nativeHookError = undefined;
           this.#emitInfrastructureLog("error", "unpack.Compiler", error.message);
           this.#deliverRunCallback(callback, error);
           return;
@@ -808,7 +955,8 @@ class CompilerImpl implements Compiler {
         this.#emitInfrastructureLog("info", "unpack.Compiler", "run completed");
         const stats = new StatsImpl(
           normalizeNativeStats(result.stats),
-          result.compilation
+          result.compilation,
+          this.#takeActiveCompilation(result.compilation)
         );
         void this.hooks.done.promise(stats).then(
           () => this.#deliverRunCallback(callback, null, stats),
@@ -982,7 +1130,8 @@ class CompilerImpl implements Compiler {
       const result = await run;
       this.#emitInfrastructureLogs(result.logs);
       if (result.error) {
-        const error = namedError(result.error.name, result.error.message);
+        const error = this.#nativeHookError ?? namedError(result.error.name, result.error.message);
+        this.#nativeHookError = undefined;
         this.#emitInfrastructureLog("error", "unpack.Watch", error.message);
         handler(error);
         return;
@@ -997,7 +1146,8 @@ class CompilerImpl implements Compiler {
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation completed");
       const stats = new StatsImpl(
         normalizeNativeStats(result.stats),
-        result.compilation
+        result.compilation,
+        this.#takeActiveCompilation(result.compilation)
       );
       try {
         await this.hooks.done.promise(stats);
@@ -1014,8 +1164,19 @@ class CompilerImpl implements Compiler {
   }
 
   #runNativeCompilation(): Promise<NativeRunResult> {
+    this.#nativeHookError = undefined;
+    this.#activeCompilation = undefined;
     this.#loaderRuntime?.beginCompilation();
     return this.#nativeCompiler.run();
+  }
+
+  #takeActiveCompilation(
+    nativeCompilation: NativeCompilation | null | undefined
+  ): CompilationImpl | undefined {
+    const compilation = this.#activeCompilation;
+    this.#activeCompilation = undefined;
+    compilation?.update(nativeCompilation);
+    return compilation;
   }
 
   #scheduleIdleCacheFlush(delay: number): void {
@@ -1324,9 +1485,13 @@ class StatsImpl implements Stats {
   readonly compilation: Compilation;
   readonly #json: StatsJson;
 
-  constructor(json: StatsJson, compilation: NativeCompilation | null | undefined) {
+  constructor(
+    json: StatsJson,
+    compilation: NativeCompilation | null | undefined,
+    existingCompilation?: Compilation
+  ) {
     this.#json = json;
-    this.compilation = new CompilationImpl(compilation);
+    this.compilation = existingCompilation ?? new CompilationImpl(compilation);
   }
 
   hasErrors(): boolean {
@@ -1482,7 +1647,7 @@ const EMPTY_OPTIMIZATION_BAILOUTS: readonly string[] = [];
 const EMPTY_EXPORTS_INFO = new ExportsInfoImpl([]);
 
 class ModuleGraphImpl implements ModuleGraph {
-  readonly #nativeCompilation: NativeCompilation | undefined;
+  #nativeCompilation: NativeCompilation | undefined;
   readonly #modulesByHandle: ReadonlyMap<number, ModuleImpl>;
   readonly #connectionByHandle = new Map<number, ModuleGraphConnectionImpl>();
   readonly #connectionByDependency = new Map<Dependency, ModuleGraphConnectionImpl>();
@@ -1509,6 +1674,15 @@ class ModuleGraphImpl implements ModuleGraph {
     this.#modulesByHandle = modulesByHandle;
     for (const module of modulesByHandle.values()) {
       this.#exports.set(module, new ExportsInfoImpl(module.providedExports));
+    }
+  }
+
+  updateNativeCompilation(nativeCompilation: NativeCompilation | undefined): void {
+    this.#nativeCompilation = nativeCompilation;
+    for (const module of this.#modulesByHandle.values()) {
+      if (!this.#exports.has(module)) {
+        this.#exports.set(module, new ExportsInfoImpl(module.providedExports));
+      }
     }
   }
 
@@ -1711,7 +1885,7 @@ const EMPTY_CHUNK_ITERABLE: SortableSetView<Chunk> = new SortableSetView();
 const EMPTY_MODULE_ITERABLE: SortableSetView<Module> = new SortableSetView();
 
 class ChunkGraphImpl implements ChunkGraph {
-  readonly #nativeCompilation: NativeCompilation | undefined;
+  #nativeCompilation: NativeCompilation | undefined;
   readonly #modulesByHandle: ReadonlyMap<number, ModuleImpl>;
   readonly #chunksByHandle: ReadonlyMap<number, ChunkImpl>;
   readonly #moduleIds = new Map<Module, string | number | null>();
@@ -1732,6 +1906,16 @@ class ChunkGraphImpl implements ChunkGraph {
     this.#nativeCompilation = nativeCompilation;
     this.#modulesByHandle = modulesByHandle;
     this.#chunksByHandle = chunksByHandle;
+  }
+
+  updateNativeCompilation(nativeCompilation: NativeCompilation | undefined): void {
+    this.#nativeCompilation = nativeCompilation;
+    this.#moduleIds.clear();
+    this.#moduleChunks.clear();
+    this.#chunkModules.clear();
+    this.#moduleChunkIterables.clear();
+    this.#chunkModuleIterables.clear();
+    this.#orderedChunkModules.clear();
   }
 
   #loadModuleChunks(module: Module): SortableSetView<Chunk> {
@@ -1844,44 +2028,54 @@ class ChunkGraphImpl implements ChunkGraph {
 }
 
 class CompilationImpl implements Compilation {
-  readonly moduleGraph: ModuleGraph;
-  readonly chunkGraph: ChunkGraph;
+  readonly hooks: CompilationHooks = { finishModules: new FinishModulesHookImpl() };
+  readonly moduleGraph: ModuleGraphImpl;
+  readonly chunkGraph: ChunkGraphImpl;
   readonly modules: ReadonlySet<Module>;
+  readonly #modulesByHandle = new Map<number, ModuleImpl>();
+  readonly #chunksByHandle = new Map<number, ChunkImpl>();
+  readonly #moduleSet = new Set<Module>();
 
   constructor(compilation: NativeCompilation | null | undefined) {
-    const modulesByHandle = new Map(
-      (compilation?.modules() ?? []).map((module) => [
-        module.handle,
-        new ModuleImpl(
+    this.moduleGraph = new ModuleGraphImpl(undefined, this.#modulesByHandle);
+    this.chunkGraph = new ChunkGraphImpl(
+      undefined,
+      this.#modulesByHandle,
+      this.#chunksByHandle
+    );
+    this.modules = this.#moduleSet;
+    this.update(compilation);
+  }
+
+  update(compilation: NativeCompilation | null | undefined): void {
+    for (const module of compilation?.modules() ?? []) {
+      if (!this.#modulesByHandle.has(module.handle)) {
+        const moduleImpl = new ModuleImpl(
           module.handle,
           module.resource,
           module.type,
           module.providedExports,
           module.identifier
-        )
-      ])
-    );
-    const moduleGraph = new ModuleGraphImpl(compilation ?? undefined, modulesByHandle);
-    for (const module of modulesByHandle.values()) {
-      module.bindModuleGraph(moduleGraph);
+        );
+        moduleImpl.bindModuleGraph(this.moduleGraph);
+        this.#modulesByHandle.set(module.handle, moduleImpl);
+        this.#moduleSet.add(moduleImpl);
+      }
     }
-    const chunksByHandle = new Map(
-      (compilation?.chunks() ?? []).map((chunk) => [
-        chunk.handle,
-        new ChunkImpl(
+    for (const chunk of compilation?.chunks() ?? []) {
+      if (!this.#chunksByHandle.has(chunk.handle)) {
+        this.#chunksByHandle.set(
+          chunk.handle,
+          new ChunkImpl(
           chunk.handle,
           chunk.renderId ?? chunk.render_id ?? null,
           chunk.name ?? undefined
         )
-      ])
-    );
-    this.moduleGraph = moduleGraph;
-    this.chunkGraph = new ChunkGraphImpl(
-      compilation ?? undefined,
-      modulesByHandle,
-      chunksByHandle
-    );
-    this.modules = new Set(modulesByHandle.values());
+        );
+      }
+    }
+    this.moduleGraph.updateNativeCompilation(compilation ?? undefined);
+    this.chunkGraph.updateNativeCompilation(compilation ?? undefined);
   }
 }
 

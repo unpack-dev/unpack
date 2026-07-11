@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::{
     ChunkGraph, ChunkId, id_assignment::RenderId, output_filename::resolve_chunk_filename,
@@ -19,27 +19,97 @@ pub(crate) enum RuntimeRequirement {
     ReturnExportsFromRuntime,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+const ALL_RUNTIME_REQUIREMENTS: [RuntimeRequirement; 11] = [
+    RuntimeRequirement::ModuleFactories,
+    RuntimeRequirement::ModuleCache,
+    RuntimeRequirement::Require,
+    RuntimeRequirement::DefinePropertyGetters,
+    RuntimeRequirement::HasOwnProperty,
+    RuntimeRequirement::MakeNamespaceObject,
+    RuntimeRequirement::EnsureChunk,
+    RuntimeRequirement::EnsureChunkHandlers,
+    RuntimeRequirement::GetChunkFilename,
+    RuntimeRequirement::ModuleFactoriesAddOnly,
+    RuntimeRequirement::ReturnExportsFromRuntime,
+];
+
+const RUNTIME_REQUIREMENTS_MASK: u16 = {
+    let mut mask = 0;
+    let mut index = 0;
+    while index < ALL_RUNTIME_REQUIREMENTS.len() {
+        mask |= ALL_RUNTIME_REQUIREMENTS[index].mask();
+        index += 1;
+    }
+    mask
+};
+
+impl RuntimeRequirement {
+    const fn bit(self) -> u16 {
+        // These bit positions are persisted in PackFile records. Keep existing
+        // positions stable when adding or reordering the enum variants.
+        match self {
+            Self::ModuleFactories => 0,
+            Self::ModuleCache => 1,
+            Self::Require => 2,
+            Self::DefinePropertyGetters => 3,
+            Self::HasOwnProperty => 4,
+            Self::MakeNamespaceObject => 5,
+            Self::EnsureChunk => 6,
+            Self::GetChunkFilename => 7,
+            Self::ReturnExportsFromRuntime => 8,
+            Self::EnsureChunkHandlers => 9,
+            Self::ModuleFactoriesAddOnly => 10,
+        }
+    }
+
+    const fn mask(self) -> u16 {
+        1 << self.bit()
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeRequirements {
-    requirements: BTreeSet<RuntimeRequirement>,
+    bits: u16,
 }
 
 impl RuntimeRequirements {
+    pub(crate) fn all() -> impl Iterator<Item = RuntimeRequirement> {
+        ALL_RUNTIME_REQUIREMENTS.into_iter()
+    }
+
+    pub(crate) const fn valid_mask() -> u16 {
+        RUNTIME_REQUIREMENTS_MASK
+    }
+
     pub(crate) fn insert(&mut self, requirement: RuntimeRequirement) -> bool {
-        self.requirements.insert(requirement)
+        let mask = requirement.mask();
+        let changed = self.bits & mask == 0;
+        self.bits |= mask;
+        changed
     }
 
     #[cfg(test)]
     pub(crate) fn contains(&self, requirement: RuntimeRequirement) -> bool {
-        self.requirements.contains(&requirement)
+        self.bits & requirement.mask() != 0
     }
 
     pub(crate) fn extend(&mut self, other: &Self) {
-        self.requirements.extend(other.iter());
+        self.bits |= other.bits;
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = RuntimeRequirement> + '_ {
-        self.requirements.iter().copied()
+    pub(crate) fn iter(self) -> impl Iterator<Item = RuntimeRequirement> {
+        Self::all().filter(move |requirement| self.bits & requirement.mask() != 0)
+    }
+
+    pub(crate) const fn to_mask(self) -> u16 {
+        self.bits
+    }
+
+    pub(crate) const fn from_mask(mask: u16) -> Option<Self> {
+        if mask & !RUNTIME_REQUIREMENTS_MASK != 0 {
+            return None;
+        }
+        Some(Self { bits: mask })
     }
 }
 
@@ -69,12 +139,52 @@ pub(crate) enum RuntimeModule {
     RequireChunkLoading,
 }
 
+const ALL_RUNTIME_MODULES: [RuntimeModule; 7] = [
+    RuntimeModule::DefinePropertyGetters,
+    RuntimeModule::GetChunkFilename,
+    RuntimeModule::HasOwnProperty,
+    RuntimeModule::MakeNamespaceObject,
+    RuntimeModule::ModuleFactoriesAddOnly,
+    RuntimeModule::EnsureChunk,
+    RuntimeModule::RequireChunkLoading,
+];
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RuntimeModules(u8);
+
+impl RuntimeModules {
+    fn insert(&mut self, module: RuntimeModule) -> bool {
+        let mask = module.mask();
+        let changed = self.0 & mask == 0;
+        self.0 |= mask;
+        changed
+    }
+
+    fn iter(self) -> impl Iterator<Item = RuntimeModule> {
+        ALL_RUNTIME_MODULES
+            .into_iter()
+            .filter(move |module| self.0 & module.mask() != 0)
+    }
+}
+
 pub(crate) struct RuntimeModuleContext<'a> {
     pub(crate) chunk_graph: &'a ChunkGraph,
     pub(crate) runtime_chunk: ChunkId,
 }
 
 impl RuntimeModule {
+    const fn mask(self) -> u8 {
+        1 << match self {
+            Self::DefinePropertyGetters => 0,
+            Self::EnsureChunk => 1,
+            Self::GetChunkFilename => 2,
+            Self::HasOwnProperty => 3,
+            Self::MakeNamespaceObject => 4,
+            Self::ModuleFactoriesAddOnly => 5,
+            Self::RequireChunkLoading => 6,
+        }
+    }
+
     pub(crate) fn identifier(self) -> &'static str {
         match self {
             Self::DefinePropertyGetters => "webpack/runtime/define property getters",
@@ -199,38 +309,26 @@ __webpack_require__.f.require = function(chunkId, promises) {{
 pub(crate) fn resolve_runtime_modules(
     direct: &RuntimeRequirements,
 ) -> (RuntimeRequirements, Vec<RuntimeModule>) {
-    let mut requirements = direct.clone();
-    let mut modules = BTreeMap::new();
-    let mut pending = requirements.iter().collect::<Vec<_>>();
+    let mut requirements = *direct;
+    let mut modules = RuntimeModules::default();
 
-    while let Some(requirement) = pending.pop() {
-        let module = match requirement {
-            RuntimeRequirement::DefinePropertyGetters => Some(RuntimeModule::DefinePropertyGetters),
-            RuntimeRequirement::HasOwnProperty => Some(RuntimeModule::HasOwnProperty),
-            RuntimeRequirement::MakeNamespaceObject => Some(RuntimeModule::MakeNamespaceObject),
-            RuntimeRequirement::EnsureChunk => Some(RuntimeModule::EnsureChunk),
-            RuntimeRequirement::EnsureChunkHandlers => Some(RuntimeModule::RequireChunkLoading),
-            RuntimeRequirement::GetChunkFilename => Some(RuntimeModule::GetChunkFilename),
-            RuntimeRequirement::ModuleFactoriesAddOnly => {
-                Some(RuntimeModule::ModuleFactoriesAddOnly)
+    loop {
+        let previous_requirements = requirements;
+        for requirement in requirements.iter() {
+            let Some(module) = runtime_module_for_requirement(requirement) else {
+                continue;
+            };
+            modules.insert(module);
+            for prerequisite in module.prerequisites() {
+                requirements.insert(*prerequisite);
             }
-            RuntimeRequirement::ModuleFactories
-            | RuntimeRequirement::ModuleCache
-            | RuntimeRequirement::Require
-            | RuntimeRequirement::ReturnExportsFromRuntime => None,
-        };
-        let Some(module) = module else {
-            continue;
-        };
-        insert_runtime_module(&mut modules, module);
-        for prerequisite in module.prerequisites() {
-            if requirements.insert(*prerequisite) {
-                pending.push(*prerequisite);
-            }
+        }
+        if requirements == previous_requirements {
+            break;
         }
     }
 
-    let mut modules = modules.into_values().collect::<Vec<_>>();
+    let mut modules = modules.iter().collect::<Vec<_>>();
     modules.sort_by_key(|module| {
         let stage = RUNTIME_MODULE_STAGE_ORDER
             .iter()
@@ -239,6 +337,22 @@ pub(crate) fn resolve_runtime_modules(
         (stage, module.identifier())
     });
     (requirements, modules)
+}
+
+fn runtime_module_for_requirement(requirement: RuntimeRequirement) -> Option<RuntimeModule> {
+    match requirement {
+        RuntimeRequirement::DefinePropertyGetters => Some(RuntimeModule::DefinePropertyGetters),
+        RuntimeRequirement::HasOwnProperty => Some(RuntimeModule::HasOwnProperty),
+        RuntimeRequirement::MakeNamespaceObject => Some(RuntimeModule::MakeNamespaceObject),
+        RuntimeRequirement::EnsureChunk => Some(RuntimeModule::EnsureChunk),
+        RuntimeRequirement::EnsureChunkHandlers => Some(RuntimeModule::RequireChunkLoading),
+        RuntimeRequirement::GetChunkFilename => Some(RuntimeModule::GetChunkFilename),
+        RuntimeRequirement::ModuleFactoriesAddOnly => Some(RuntimeModule::ModuleFactoriesAddOnly),
+        RuntimeRequirement::ModuleFactories
+        | RuntimeRequirement::ModuleCache
+        | RuntimeRequirement::Require
+        | RuntimeRequirement::ReturnExportsFromRuntime => None,
+    }
 }
 
 fn render_chunk_filename_map(chunk_graph: &ChunkGraph) -> String {
@@ -268,18 +382,6 @@ fn json_render_id(render_id: &RenderId) -> String {
     }
 }
 
-fn insert_runtime_module(
-    modules: &mut BTreeMap<&'static str, RuntimeModule>,
-    module: RuntimeModule,
-) {
-    if let Some(existing) = modules.insert(module.identifier(), module) {
-        assert_eq!(
-            existing, module,
-            "conflicting Runtime Modules must not share an identifier"
-        );
-    }
-}
-
 pub(crate) fn entry_startup_runtime_requirements() -> RuntimeRequirements {
     let mut requirements = RuntimeRequirements::default();
     requirements.insert(RuntimeRequirement::ModuleFactories);
@@ -292,6 +394,39 @@ pub(crate) fn entry_startup_runtime_requirements() -> RuntimeRequirements {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_requirements_use_compact_inline_storage() {
+        assert_eq!(
+            std::mem::size_of::<RuntimeRequirements>(),
+            std::mem::size_of::<u16>()
+        );
+    }
+
+    #[test]
+    fn runtime_requirement_masks_keep_pack_file_bit_positions_stable() {
+        let persisted_bits = [
+            (RuntimeRequirement::ModuleFactories, 0),
+            (RuntimeRequirement::ModuleCache, 1),
+            (RuntimeRequirement::Require, 2),
+            (RuntimeRequirement::DefinePropertyGetters, 3),
+            (RuntimeRequirement::HasOwnProperty, 4),
+            (RuntimeRequirement::MakeNamespaceObject, 5),
+            (RuntimeRequirement::EnsureChunk, 6),
+            (RuntimeRequirement::GetChunkFilename, 7),
+            (RuntimeRequirement::ReturnExportsFromRuntime, 8),
+            (RuntimeRequirement::EnsureChunkHandlers, 9),
+            (RuntimeRequirement::ModuleFactoriesAddOnly, 10),
+        ];
+
+        for (requirement, bit) in persisted_bits {
+            let mut requirements = RuntimeRequirements::default();
+            requirements.insert(requirement);
+            assert_eq!(requirements.to_mask(), 1 << bit);
+            assert_eq!(RuntimeRequirements::from_mask(1 << bit), Some(requirements));
+        }
+        assert_eq!(RuntimeRequirements::from_mask(1 << 15), None);
+    }
 
     #[test]
     fn resolver_closes_transitive_requirements_and_orders_modules() {
@@ -343,13 +478,27 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "conflicting Runtime Modules")]
-    fn resolver_rejects_conflicting_module_identifiers() {
-        let mut modules = BTreeMap::from([(
-            RuntimeModule::DefinePropertyGetters.identifier(),
-            RuntimeModule::HasOwnProperty,
-        )]);
+    fn runtime_module_mask_is_compact_and_uses_stable_module_order() {
+        assert_eq!(
+            std::mem::size_of::<RuntimeModules>(),
+            std::mem::size_of::<u8>()
+        );
 
-        insert_runtime_module(&mut modules, RuntimeModule::DefinePropertyGetters);
+        let mut modules = RuntimeModules::default();
+        for module in ALL_RUNTIME_MODULES {
+            assert!(modules.insert(module));
+            assert!(!modules.insert(module));
+        }
+        assert_eq!(modules.iter().collect::<Vec<_>>(), ALL_RUNTIME_MODULES);
+
+        for (index, module) in ALL_RUNTIME_MODULES.iter().enumerate() {
+            for other in &ALL_RUNTIME_MODULES[index + 1..] {
+                assert_ne!(module.identifier(), other.identifier());
+            }
+        }
+        assert!(ALL_RUNTIME_MODULES.windows(2).all(|modules| {
+            (modules[0].stage(), modules[0].identifier())
+                <= (modules[1].stage(), modules[1].identifier())
+        }));
     }
 }

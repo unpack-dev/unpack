@@ -301,8 +301,7 @@ fn normalize_path(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::{
-        CacheOptions, ChunkGraph, CompilerOptions, Entry, ModuleGraph, ModuleIdentity,
-        SnapshotOptions,
+        CacheOptions, CompilerOptions, Entry, ModuleGraph, ModuleIdentity, SnapshotOptions,
         build_cache::BuildCache,
         code_generation::{create_render_manifest, generate_code, render_assets},
     };
@@ -375,7 +374,8 @@ mod tests {
         let options = CompilerOptions::new(context, vec![Entry::new("main", "./index")]);
         let mut module_graph = ModuleGraph::default();
         let module = add_built_module(&mut module_graph, ModuleIdentity::new(context), "unnamed");
-        let mut chunk_graph = ChunkGraph::build(&options, &module_graph, &[module]);
+        let mut chunk_graph =
+            crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
@@ -384,7 +384,7 @@ mod tests {
         chunk_graph.process_runtime_requirements(
             results
                 .runtime_requirements()
-                .map(|(module, requirements)| (module, requirements.clone())),
+                .map(|(module, requirements)| (module, *requirements)),
         );
         let manifest = create_render_manifest(&chunk_graph, &[module], &results);
         let assets = render_assets(&options, &build_cache, &manifest, &results);
@@ -421,7 +421,8 @@ mod tests {
             .iter()
             .map(|name| modules_by_name[name])
             .collect::<Vec<_>>();
-        let mut chunk_graph = ChunkGraph::build(&options, &module_graph, &entries);
+        let mut chunk_graph =
+            crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &entries);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
@@ -430,7 +431,7 @@ mod tests {
         chunk_graph.process_runtime_requirements(
             results
                 .runtime_requirements()
-                .map(|(module, requirements)| (module, requirements.clone())),
+                .map(|(module, requirements)| (module, *requirements)),
         );
         let manifest = create_render_manifest(&chunk_graph, &entries, &results);
         render_assets(&options, &build_cache, &manifest, &results)

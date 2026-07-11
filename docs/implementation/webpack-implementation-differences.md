@@ -95,6 +95,13 @@ Necessity:
 
 ## Chunk graph
 
+Unpack keeps the `build_chunk_graph` planning algorithm separate from the
+`ChunkGraph` relationship store, matching webpack's `buildChunkGraph` and
+`ChunkGraph` responsibility boundary. The implementation uses a dense
+`ModuleMask` indexed by Rust `ModuleId` handles for `min_available_modules` and
+`resulting_available_modules` intersections, while retaining ordered
+`Vec<ModuleId>` traversal results where output order matters.
+
 Unpack creates one entrypoint chunk group per entry, assigns statically reachable
 modules to the initial chunk, and creates or reuses async chunk groups by dynamic
 import target. A terminating worklist recursively discovers nested blocks. Each
@@ -127,8 +134,10 @@ Necessity:
 
 Unpack emits webpack-shaped Node/CommonJS output with a fixed module table,
 module cache, core `__webpack_require__`, and CommonJS entry startup. Generated
-code declares Runtime Requirements; a fixed-point resolver selects ordered
-Runtime Modules for export getters, own-property checks, namespace marking,
+code declares Runtime Requirements. Their closed set is stored as an inline
+`u16` mask rather than a general-purpose tree set, and selected Runtime Modules
+are deduplicated in an inline `u8` mask. A fixed-point resolver orders Runtime
+Modules for export getters, own-property checks, namespace marking,
 chunk ensuring, filename lookup, add-only module-factory exposure, and cohesive
 Node require chunk loading. Static-only Bundles omit all asynchronous helpers.
 For runtime trees with loadable Async Chunks, the Node loader registers payload

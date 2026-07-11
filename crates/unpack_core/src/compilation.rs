@@ -6,6 +6,7 @@ use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleId, Result, UnpackResolver,
     build_cache::BuildCache,
+    build_chunk_graph::build_chunk_graph,
     code_generation::{self, CodeGenerationResults, RenderManifest},
     id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
     make::{self, MakeState},
@@ -154,7 +155,7 @@ impl Compilation {
             "unpack.Compilation",
             "chunk graph build started",
         );
-        self.chunk_graph = ChunkGraph::build(&self.options, &self.module_graph, &self.entries);
+        self.chunk_graph = build_chunk_graph(&self.options, &self.module_graph, &self.entries);
         self.render_ids_assigned = false;
         self.log_infrastructure(
             InfrastructureLogLevel::Verbose,
@@ -248,7 +249,7 @@ impl Compilation {
             .as_ref()
             .expect("code generation results should exist before Runtime Requirements processing")
             .runtime_requirements()
-            .map(|(module, requirements)| (module, requirements.clone()))
+            .map(|(module, requirements)| (module, *requirements))
             .collect::<Vec<_>>();
         self.chunk_graph.process_runtime_requirements(requirements);
     }

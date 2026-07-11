@@ -1,6 +1,9 @@
 mod build_cache;
+mod build_chunk_graph;
 mod cache_hash;
+mod chunk;
 mod chunk_graph;
+mod chunk_group;
 mod code_generation;
 mod code_generation_record;
 mod compilation;
@@ -24,9 +27,9 @@ mod runtime;
 mod snapshot;
 
 pub use build_cache::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
-pub use chunk_graph::{
-    AsyncBlockOrigin, Chunk, ChunkGraph, ChunkGroup, ChunkGroupId, ChunkGroupKind, ChunkId,
-};
+pub use chunk::{Chunk, ChunkId};
+pub use chunk_graph::ChunkGraph;
+pub use chunk_group::{AsyncBlockOrigin, ChunkGroup, ChunkGroupId, ChunkGroupKind};
 pub use code_generation::Asset;
 pub use compilation::{Compilation, WatchDependencies};
 pub use compiler::{

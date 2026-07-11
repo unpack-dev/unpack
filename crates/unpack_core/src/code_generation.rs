@@ -1290,7 +1290,8 @@ mod tests {
                     "value".to_string(),
                     1,
                 );
-            let mut chunk_graph = crate::ChunkGraph::build(&options, &module_graph, &[module]);
+            let mut chunk_graph =
+                crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
             assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
             assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
             (module_graph, chunk_graph, module)
@@ -1339,7 +1340,8 @@ mod tests {
             .module_mut(module)
             .expect("fixture Module should exist")
             .finish_build(Vec::new(), Vec::new(), Vec::new(), "éx".to_string(), 1);
-        let mut chunk_graph = crate::ChunkGraph::build(&options, &module_graph, &[module]);
+        let mut chunk_graph =
+            crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
         let module_render_ids = HashMap::from([(
@@ -1413,7 +1415,8 @@ mod tests {
                 "value".to_string(),
                 1,
             );
-        let mut chunk_graph = crate::ChunkGraph::build(&options, &module_graph, &[module]);
+        let mut chunk_graph =
+            crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 

@@ -5,7 +5,7 @@ use std::{
 };
 
 use unpack_core::{
-    AsyncBlockOrigin, AsyncDependenciesBlockId, ChunkGroupKind, Compiler, CompilerOptions, Entry,
+    AsyncBlockOrigin, AsyncDependenciesBlockIndex, ChunkGroupKind, Compiler, CompilerOptions, Entry,
 };
 
 #[tokio::test]
@@ -805,8 +805,8 @@ async fn nested_async_groups_terminate_and_collapse_available_back_edges()
     assert_eq!(b_module.blocks().len(), 1);
     assert_eq!(
         chunk_graph.block_chunk_group(AsyncBlockOrigin {
-            module: b_module.id(),
-            block: AsyncDependenciesBlockId::new(0),
+            module: b_module.handle(),
+            block: AsyncDependenciesBlockIndex::new(0),
         }),
         None,
         "B-to-A edge must collapse because A is already available on the loading path"
@@ -921,7 +921,7 @@ async fn nested_shared_parent_shrink_rescans_newly_required_modules()
             .modules()
             .iter()
             .find(|module| module.identity().resource.ends_with(filename))
-            .map(|module| module.id())
+            .map(|module| module.handle())
             .unwrap_or_else(|| panic!("fixture Module {filename} must exist"))
     };
     let p = find_module("p.js");
@@ -931,13 +931,13 @@ async fn nested_shared_parent_shrink_rescans_newly_required_modules()
     let c_from_p = chunk_graph
         .block_chunk_group(AsyncBlockOrigin {
             module: p,
-            block: AsyncDependenciesBlockId::new(0),
+            block: AsyncDependenciesBlockIndex::new(0),
         })
         .expect("P-to-C must map to an Async Chunk Group");
     let c_from_q = chunk_graph
         .block_chunk_group(AsyncBlockOrigin {
             module: q,
-            block: AsyncDependenciesBlockId::new(0),
+            block: AsyncDependenciesBlockIndex::new(0),
         })
         .expect("Q-to-C must reuse the Async Chunk Group");
     assert_eq!(c_from_p, c_from_q);
@@ -949,7 +949,7 @@ async fn nested_shared_parent_shrink_rescans_newly_required_modules()
     let y_group = chunk_graph
         .block_chunk_group(AsyncBlockOrigin {
             module: x,
-            block: AsyncDependenciesBlockId::new(0),
+            block: AsyncDependenciesBlockIndex::new(0),
         })
         .expect("rescanning X must retain its nested Y split point");
     assert!(
@@ -973,7 +973,7 @@ fn chunk_group_topology(
     compilation: &unpack_core::Compilation,
 ) -> Vec<(String, Vec<String>, Vec<String>)> {
     let chunk_graph = compilation.chunk_graph();
-    let label = |group: unpack_core::ChunkGroupId| {
+    let label = |group: unpack_core::ChunkGroupHandle| {
         let group = &chunk_graph.chunk_groups()[group.index()];
         match group.kind() {
             ChunkGroupKind::Entrypoint { name } => format!("entry:{name}"),
@@ -1011,7 +1011,7 @@ fn chunk_group_topology(
                 .map(&label)
                 .collect::<Vec<_>>();
             children.sort();
-            (label(group.id()), parents, children)
+            (label(group.handle()), parents, children)
         })
         .collect::<Vec<_>>();
     topology.sort();

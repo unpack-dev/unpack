@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    ChunkGraph, ChunkId, id_assignment::RenderId, output_filename::resolve_chunk_filename,
+    ChunkGraph, ChunkHandle, id_assignment::RenderId, output_filename::resolve_chunk_filename,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -169,7 +169,7 @@ impl RuntimeModules {
 
 pub(crate) struct RuntimeModuleContext<'a> {
     pub(crate) chunk_graph: &'a ChunkGraph,
-    pub(crate) runtime_chunk: ChunkId,
+    pub(crate) runtime_chunk: ChunkHandle,
 }
 
 impl RuntimeModule {

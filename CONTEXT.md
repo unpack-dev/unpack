@@ -116,6 +116,10 @@ _Avoid_: Trace event, stats entry, diagnostic
 The connected set of modules reachable from one or more entry points.
 _Avoid_: Dependency tree
 
+**Graph Handle**:
+An opaque, dense Rust index used to address a Module, Chunk, Chunk Group, or connection in compilation-owned storage. Handle names must not use webpack's Module ID or Chunk ID terms, which refer to generated output identity.
+_Avoid_: Internal Module ID, internal Chunk ID, Render ID
+
 **Chunk Graph**:
 The derived graph that assigns modules from the module graph to initial and async chunks before bundle code is generated.
 _Avoid_: Module graph chunks, output graph

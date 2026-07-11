@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    ModuleId,
-    chunk::{Chunk, ChunkId},
-    chunk_group::{AsyncBlockOrigin, ChunkGroup, ChunkGroupId, ChunkGroupKind},
+    ModuleHandle,
+    chunk::{Chunk, ChunkHandle},
+    chunk_group::{AsyncBlockOrigin, ChunkGroup, ChunkGroupHandle, ChunkGroupKind},
     id_assignment::RenderId,
     runtime::{
         RuntimeModule, RuntimeRequirements, entry_startup_runtime_requirements,
@@ -15,16 +15,16 @@ use crate::{
 pub struct ChunkGraph {
     chunks: Vec<Chunk>,
     chunk_groups: Vec<ChunkGroup>,
-    entrypoints: Vec<ChunkGroupId>,
-    chunk_modules: Vec<Vec<ModuleId>>,
-    module_chunks: Vec<Vec<ChunkId>>,
+    entrypoints: Vec<ChunkGroupHandle>,
+    chunk_modules: Vec<Vec<ModuleHandle>>,
+    module_chunks: Vec<Vec<ChunkHandle>>,
     module_render_ids: Vec<Option<RenderId>>,
-    block_chunk_groups: HashMap<AsyncBlockOrigin, ChunkGroupId>,
+    block_chunk_groups: HashMap<AsyncBlockOrigin, ChunkGroupHandle>,
     // Includes logical loading edges omitted from the materialized graph to break cycles.
-    runtime_chunk_group_children: Vec<Vec<ChunkGroupId>>,
+    runtime_chunk_group_children: Vec<Vec<ChunkGroupHandle>>,
     module_runtime_requirements: Vec<RuntimeRequirements>,
     chunk_runtime_requirements: Vec<RuntimeRequirements>,
-    runtime_tree_requirements: HashMap<ChunkGroupId, RuntimeRequirements>,
+    runtime_tree_requirements: HashMap<ChunkGroupHandle, RuntimeRequirements>,
     chunk_runtime_modules: Vec<Vec<RuntimeModule>>,
 }
 
@@ -32,34 +32,39 @@ impl ChunkGraph {
     pub(crate) fn add_chunk(
         &mut self,
         name: Option<String>,
-        root_modules: Vec<ModuleId>,
-    ) -> ChunkId {
-        let id = ChunkId::new(self.chunks.len());
-        self.chunks.push(Chunk::new(id, name, root_modules));
+        root_modules: Vec<ModuleHandle>,
+    ) -> ChunkHandle {
+        let handle = ChunkHandle::new(self.chunks.len());
+        self.chunks.push(Chunk::new(handle, name, root_modules));
         self.chunk_modules.push(Vec::new());
         self.chunk_runtime_requirements
             .push(RuntimeRequirements::default());
         self.chunk_runtime_modules.push(Vec::new());
-        id
+        handle
     }
 
     pub(crate) fn add_chunk_group(
         &mut self,
         kind: ChunkGroupKind,
         origin: Option<AsyncBlockOrigin>,
-    ) -> ChunkGroupId {
-        let id = ChunkGroupId::new(self.chunk_groups.len());
-        self.chunk_groups.push(ChunkGroup::new(id, kind, origin));
+    ) -> ChunkGroupHandle {
+        let handle = ChunkGroupHandle::new(self.chunk_groups.len());
+        self.chunk_groups
+            .push(ChunkGroup::new(handle, kind, origin));
         self.runtime_chunk_group_children.push(Vec::new());
-        id
+        handle
     }
 
-    pub(crate) fn connect_chunk_and_group(&mut self, chunk: ChunkId, group: ChunkGroupId) {
+    pub(crate) fn connect_chunk_and_group(&mut self, chunk: ChunkHandle, group: ChunkGroupHandle) {
         self.chunks[chunk.index()].add_group(group);
         self.chunk_groups[group.index()].push_chunk(chunk);
     }
 
-    pub(crate) fn connect_chunk_groups(&mut self, parent: ChunkGroupId, child: ChunkGroupId) {
+    pub(crate) fn connect_chunk_groups(
+        &mut self,
+        parent: ChunkGroupHandle,
+        child: ChunkGroupHandle,
+    ) {
         self.chunk_groups[parent.index()].add_child(child);
         self.chunk_groups[child.index()].add_parent(parent);
         self.connect_runtime_chunk_groups(parent, child);
@@ -67,32 +72,32 @@ impl ChunkGraph {
 
     pub(crate) fn connect_runtime_chunk_groups(
         &mut self,
-        parent: ChunkGroupId,
-        child: ChunkGroupId,
+        parent: ChunkGroupHandle,
+        child: ChunkGroupHandle,
     ) {
         if !self.runtime_chunk_group_children[parent.index()].contains(&child) {
             self.runtime_chunk_group_children[parent.index()].push(child);
         }
     }
 
-    pub(crate) fn add_entrypoint(&mut self, entrypoint: ChunkGroupId) {
+    pub(crate) fn add_entrypoint(&mut self, entrypoint: ChunkGroupHandle) {
         self.entrypoints.push(entrypoint);
     }
 
     pub(crate) fn connect_block_and_chunk_group(
         &mut self,
         origin: AsyncBlockOrigin,
-        chunk_group: ChunkGroupId,
+        chunk_group: ChunkGroupHandle,
     ) {
         self.block_chunk_groups.insert(origin, chunk_group);
     }
 
     pub fn split_chunk(
         &mut self,
-        chunk: ChunkId,
+        chunk: ChunkHandle,
         render_id: impl Into<String>,
         filename: impl Into<String>,
-    ) -> Option<ChunkId> {
+    ) -> Option<ChunkHandle> {
         let original = self.chunks.get(chunk.index())?.clone();
         let render_id = RenderId::String(render_id.into());
         let new_chunk = self.add_chunk(None, Vec::new());
@@ -102,7 +107,7 @@ impl ChunkGraph {
         Some(new_chunk)
     }
 
-    pub(crate) fn connect_chunk_and_module(&mut self, chunk: ChunkId, module: ModuleId) {
+    pub(crate) fn connect_chunk_and_module(&mut self, chunk: ChunkHandle, module: ModuleHandle) {
         if self.module_chunks.len() <= module.index() {
             self.module_chunks.resize_with(module.index() + 1, Vec::new);
             self.module_render_ids
@@ -126,36 +131,36 @@ impl ChunkGraph {
         &self.chunk_groups
     }
 
-    pub fn entrypoints(&self) -> &[ChunkGroupId] {
+    pub fn entrypoints(&self) -> &[ChunkGroupHandle] {
         &self.entrypoints
     }
 
-    pub fn chunk_modules(&self, chunk: ChunkId) -> &[ModuleId] {
+    pub fn chunk_modules(&self, chunk: ChunkHandle) -> &[ModuleHandle] {
         &self.chunk_modules[chunk.index()]
     }
 
-    pub fn module_chunks(&self, module: ModuleId) -> &[ChunkId] {
+    pub fn module_chunks(&self, module: ModuleHandle) -> &[ChunkHandle] {
         self.module_chunks
             .get(module.index())
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub(crate) fn module_render_id(&self, module: ModuleId) -> Option<&RenderId> {
+    pub(crate) fn module_render_id(&self, module: ModuleHandle) -> Option<&RenderId> {
         self.module_render_ids
             .get(module.index())
             .and_then(Option::as_ref)
     }
 
-    pub fn module_render_id_string(&self, module: ModuleId) -> Option<&str> {
+    pub fn module_render_id_string(&self, module: ModuleHandle) -> Option<&str> {
         self.module_render_id(module).and_then(RenderId::as_string)
     }
 
-    pub fn module_render_id_number(&self, module: ModuleId) -> Option<u32> {
+    pub fn module_render_id_number(&self, module: ModuleHandle) -> Option<u32> {
         self.module_render_id(module).and_then(RenderId::as_number)
     }
 
-    pub(crate) fn set_module_render_id(&mut self, module: ModuleId, render_id: RenderId) {
+    pub(crate) fn set_module_render_id(&mut self, module: ModuleHandle, render_id: RenderId) {
         if self.module_render_ids.len() <= module.index() {
             self.module_render_ids
                 .resize_with(module.index() + 1, || None);
@@ -163,21 +168,21 @@ impl ChunkGraph {
         self.module_render_ids[module.index()] = Some(render_id);
     }
 
-    pub(crate) fn set_chunk_render_id(&mut self, chunk: ChunkId, render_id: RenderId) {
+    pub(crate) fn set_chunk_render_id(&mut self, chunk: ChunkHandle, render_id: RenderId) {
         self.chunks[chunk.index()].assign_render_id(render_id);
     }
 
-    pub fn block_chunk_group(&self, origin: AsyncBlockOrigin) -> Option<ChunkGroupId> {
+    pub fn block_chunk_group(&self, origin: AsyncBlockOrigin) -> Option<ChunkGroupHandle> {
         self.block_chunk_groups.get(&origin).copied()
     }
 
-    pub fn chunk(&self, id: ChunkId) -> Option<&Chunk> {
-        self.chunks.get(id.index())
+    pub fn chunk(&self, handle: ChunkHandle) -> Option<&Chunk> {
+        self.chunks.get(handle.index())
     }
 
     pub(crate) fn process_runtime_requirements(
         &mut self,
-        module_requirements: impl IntoIterator<Item = (ModuleId, RuntimeRequirements)>,
+        module_requirements: impl IntoIterator<Item = (ModuleHandle, RuntimeRequirements)>,
     ) {
         self.module_runtime_requirements
             .resize_with(self.module_chunks.len(), RuntimeRequirements::default);
@@ -207,16 +212,16 @@ impl ChunkGraph {
             let mut requirements = RuntimeRequirements::default();
             let mut visited = HashSet::new();
             let mut pending = vec![entrypoint];
-            while let Some(group_id) = pending.pop() {
-                if !visited.insert(group_id) {
+            while let Some(group_handle) = pending.pop() {
+                if !visited.insert(group_handle) {
                     continue;
                 }
-                let group = &self.chunk_groups[group_id.index()];
+                let group = &self.chunk_groups[group_handle.index()];
                 for chunk in group.chunks() {
                     requirements.extend(&self.chunk_runtime_requirements[chunk.index()]);
                 }
                 pending.extend(
-                    self.runtime_chunk_group_children[group_id.index()]
+                    self.runtime_chunk_group_children[group_handle.index()]
                         .iter()
                         .copied(),
                 );
@@ -236,7 +241,7 @@ impl ChunkGraph {
     #[cfg(test)]
     pub(crate) fn module_runtime_requirements(
         &self,
-        module: ModuleId,
+        module: ModuleHandle,
     ) -> Option<&RuntimeRequirements> {
         self.module_runtime_requirements.get(module.index())
     }
@@ -244,19 +249,19 @@ impl ChunkGraph {
     #[cfg(test)]
     pub(crate) fn chunk_runtime_requirements(
         &self,
-        chunk: ChunkId,
+        chunk: ChunkHandle,
     ) -> Option<&RuntimeRequirements> {
         self.chunk_runtime_requirements.get(chunk.index())
     }
 
     pub(crate) fn runtime_tree_requirements(
         &self,
-        entrypoint: ChunkGroupId,
+        entrypoint: ChunkGroupHandle,
     ) -> Option<&RuntimeRequirements> {
         self.runtime_tree_requirements.get(&entrypoint)
     }
 
-    pub(crate) fn runtime_modules(&self, chunk: ChunkId) -> &[RuntimeModule] {
+    pub(crate) fn runtime_modules(&self, chunk: ChunkHandle) -> &[RuntimeModule] {
         self.chunk_runtime_modules
             .get(chunk.index())
             .map(Vec::as_slice)

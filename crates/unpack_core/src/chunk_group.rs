@@ -1,9 +1,9 @@
-use crate::{AsyncDependenciesBlockId, ModuleId, chunk::ChunkId};
+use crate::{AsyncDependenciesBlockIndex, ModuleHandle, chunk::ChunkHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ChunkGroupId(usize);
+pub struct ChunkGroupHandle(usize);
 
-impl ChunkGroupId {
+impl ChunkGroupHandle {
     pub const fn new(index: usize) -> Self {
         Self(index)
     }
@@ -15,22 +15,22 @@ impl ChunkGroupId {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkGroup {
-    id: ChunkGroupId,
+    handle: ChunkGroupHandle,
     kind: ChunkGroupKind,
-    chunks: Vec<ChunkId>,
-    parents: Vec<ChunkGroupId>,
-    children: Vec<ChunkGroupId>,
+    chunks: Vec<ChunkHandle>,
+    parents: Vec<ChunkGroupHandle>,
+    children: Vec<ChunkGroupHandle>,
     origin: Option<AsyncBlockOrigin>,
 }
 
 impl ChunkGroup {
     pub(crate) fn new(
-        id: ChunkGroupId,
+        handle: ChunkGroupHandle,
         kind: ChunkGroupKind,
         origin: Option<AsyncBlockOrigin>,
     ) -> Self {
         Self {
-            id,
+            handle,
             kind,
             chunks: Vec::new(),
             parents: Vec::new(),
@@ -39,23 +39,23 @@ impl ChunkGroup {
         }
     }
 
-    pub fn id(&self) -> ChunkGroupId {
-        self.id
+    pub fn handle(&self) -> ChunkGroupHandle {
+        self.handle
     }
 
     pub fn kind(&self) -> &ChunkGroupKind {
         &self.kind
     }
 
-    pub fn chunks(&self) -> &[ChunkId] {
+    pub fn chunks(&self) -> &[ChunkHandle] {
         &self.chunks
     }
 
-    pub fn parents(&self) -> &[ChunkGroupId] {
+    pub fn parents(&self) -> &[ChunkGroupHandle] {
         &self.parents
     }
 
-    pub fn children(&self) -> &[ChunkGroupId] {
+    pub fn children(&self) -> &[ChunkGroupHandle] {
         &self.children
     }
 
@@ -63,19 +63,19 @@ impl ChunkGroup {
         self.origin
     }
 
-    pub(crate) fn push_chunk(&mut self, chunk: ChunkId) {
+    pub(crate) fn push_chunk(&mut self, chunk: ChunkHandle) {
         if !self.chunks.contains(&chunk) {
             self.chunks.push(chunk);
         }
     }
 
-    pub(crate) fn add_parent(&mut self, parent: ChunkGroupId) {
+    pub(crate) fn add_parent(&mut self, parent: ChunkGroupHandle) {
         if !self.parents.contains(&parent) {
             self.parents.push(parent);
         }
     }
 
-    pub(crate) fn add_child(&mut self, child: ChunkGroupId) {
+    pub(crate) fn add_child(&mut self, child: ChunkGroupHandle) {
         if !self.children.contains(&child) {
             self.children.push(child);
         }
@@ -90,6 +90,6 @@ pub enum ChunkGroupKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncBlockOrigin {
-    pub module: ModuleId,
-    pub block: AsyncDependenciesBlockId,
+    pub module: ModuleHandle,
+    pub block: AsyncDependenciesBlockIndex,
 }

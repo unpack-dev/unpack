@@ -98,9 +98,11 @@ Necessity:
 Unpack keeps the `build_chunk_graph` planning algorithm separate from the
 `ChunkGraph` relationship store, matching webpack's `buildChunkGraph` and
 `ChunkGraph` responsibility boundary. The implementation uses a dense
-`ModuleMask` indexed by Rust `ModuleId` handles for `min_available_modules` and
+`ModuleMask` indexed by Rust `ModuleHandle` values for `min_available_modules` and
 `resulting_available_modules` intersections, while retaining ordered
-`Vec<ModuleId>` traversal results where output order matters.
+`Vec<ModuleHandle>` traversal results where output order matters. Dense arena
+keys use `*Handle` names so webpack's `Module ID` and `Chunk ID` names remain
+reserved for generated output identity.
 
 Unpack creates one entrypoint chunk group per entry, assigns statically reachable
 modules to the initial chunk, and creates or reuses async chunk groups by dynamic
@@ -124,6 +126,9 @@ Webpack's `buildChunkGraph` is much broader. It tracks runtime per chunk group, 
 Necessity:
 
 - Unpack's chunk group and many-to-many membership model is necessary because it preserves the shape needed for later split chunks and runtime chunks.
+- Reusing one Async Chunk plan per target Module is a staged internal deviation;
+  webpack's block-first `ChunkGroupInfo` model becomes necessary before named
+  async groups, per-block options, or full split-point identity can be claimed.
 - Intersecting parent available-module sets is necessary: excluding a module
   seen on only one path would make the shared payload unusable from another.
 - Split chunks, cache groups, min-size/min-chunks/max-request rules, runtime chunks, and named chunk options are not necessary for the first implementation.

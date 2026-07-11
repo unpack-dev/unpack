@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
-    ModuleGraph, ModuleId, Result, UnpackResolver,
+    ModuleGraph, ModuleHandle, Result, UnpackResolver,
     build_cache::BuildCache,
     build_chunk_graph::build_chunk_graph,
     code_generation::{self, CodeGenerationResults, RenderManifest},
@@ -25,7 +25,7 @@ pub struct Compilation {
     code_generation_results: Option<CodeGenerationResults>,
     asset_render_manifest: Option<RenderManifest>,
     assets: Vec<Asset>,
-    entries: Vec<ModuleId>,
+    entries: Vec<ModuleHandle>,
     errors: Vec<Error>,
     watch_dependencies: WatchDependencies,
     infrastructure_log_events: Vec<InfrastructureLogEvent>,
@@ -77,7 +77,7 @@ impl Compilation {
         &self.assets
     }
 
-    pub fn entries(&self) -> &[ModuleId] {
+    pub fn entries(&self) -> &[ModuleHandle] {
         &self.entries
     }
 

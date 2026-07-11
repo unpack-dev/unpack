@@ -63,11 +63,11 @@ pub(crate) fn assign_module_render_ids(
     let candidates = module_graph
         .modules()
         .iter()
-        .filter(|module| !chunk_graph.module_chunks(module.id()).is_empty())
+        .filter(|module| !chunk_graph.module_chunks(module.handle()).is_empty())
         .map(|module| {
             let full_name = module_identity_key(&context, module.identity());
             let short_name = readable_module_name(&context, module.identity());
-            NamedIdCandidate::new(module.id(), short_name, full_name)
+            NamedIdCandidate::new(module.handle(), short_name, full_name)
         })
         .collect();
 
@@ -87,7 +87,7 @@ pub(crate) fn assign_chunk_render_ids(
     for chunk in chunk_graph.chunks() {
         if let Some(name) = chunk.name() {
             entry_candidates.push(NamedIdCandidate::new(
-                chunk.id(),
+                chunk.handle(),
                 name.to_string(),
                 format!("entry:{name}"),
             ));
@@ -120,7 +120,7 @@ pub(crate) fn assign_chunk_render_ids(
                 .collect::<Vec<_>>()
                 .join("|")
         );
-        async_candidates.push(NamedIdCandidate::new(chunk.id(), short_name, full_name));
+        async_candidates.push(NamedIdCandidate::new(chunk.handle(), short_name, full_name));
     }
 
     let mut assignments = assign_named_ids(entry_candidates);
@@ -129,8 +129,8 @@ pub(crate) fn assign_chunk_render_ids(
         .map(|(_, render_id)| render_id.to_string())
         .collect();
     assignments.extend(assign_named_ids_with_reserved(async_candidates, reserved));
-    for (chunk_id, render_id) in assignments {
-        chunk_graph.set_chunk_render_id(chunk_id, render_id);
+    for (chunk_handle, render_id) in assignments {
+        chunk_graph.set_chunk_render_id(chunk_handle, render_id);
     }
 }
 
@@ -441,7 +441,7 @@ mod tests {
         module_graph: &mut ModuleGraph,
         identity: ModuleIdentity,
         value: &str,
-    ) -> crate::ModuleId {
+    ) -> crate::ModuleHandle {
         let module = module_graph.add_module(identity);
         let source = format!("const value = {value:?};");
         module_graph

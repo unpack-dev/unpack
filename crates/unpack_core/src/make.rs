@@ -15,8 +15,8 @@ use tokio::{
 };
 
 use crate::{
-    AsyncDependenciesBlockId, CompilerOptions, Dependency, DependencyId, DependencyKind, Error,
-    FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleId,
+    AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, DependencyKind,
+    Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleHandle,
     ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     module::BuiltModuleContent,
@@ -27,12 +27,12 @@ use crate::{
 #[derive(Debug, Default)]
 pub(crate) struct MakeState {
     pub module_graph: ModuleGraph,
-    pub entries: BTreeMap<usize, ModuleId>,
+    pub entries: BTreeMap<usize, ModuleHandle>,
     pub errors: Vec<Error>,
     pub file_dependencies: HashSet<PathBuf>,
     pub context_dependencies: HashSet<PathBuf>,
     pub missing_dependencies: HashSet<PathBuf>,
-    modules_by_identity: HashMap<ModuleIdentity, ModuleId>,
+    modules_by_identity: HashMap<ModuleIdentity, ModuleHandle>,
 }
 
 #[derive(Clone)]
@@ -114,14 +114,14 @@ enum MakeTask {
 #[derive(Debug, Clone)]
 struct FactorizeTask {
     factory: ModuleFactoryKind,
-    origin_module: Option<ModuleId>,
+    origin_module: Option<ModuleHandle>,
     context: PathBuf,
     dependencies: Vec<QueuedDependency>,
 }
 
 #[derive(Debug, Clone)]
 struct AddTask {
-    origin_module: Option<ModuleId>,
+    origin_module: Option<ModuleHandle>,
     context: PathBuf,
     dependencies: Vec<QueuedDependency>,
     result: FactorizeTaskResult,
@@ -135,7 +135,7 @@ enum FactorizeTaskResult {
 
 #[derive(Debug, Clone)]
 struct BuildTask {
-    module_id: ModuleId,
+    module_handle: ModuleHandle,
     identity: ModuleIdentity,
     resource: PathBuf,
     loader: Option<MatchedLoader>,
@@ -143,7 +143,7 @@ struct BuildTask {
 
 #[derive(Debug, Clone)]
 struct ProcessDependenciesTask {
-    origin_module: ModuleId,
+    origin_module: ModuleHandle,
     context: PathBuf,
     dependencies: Vec<QueuedDependency>,
 }
@@ -151,14 +151,14 @@ struct ProcessDependenciesTask {
 #[derive(Debug, Clone)]
 struct QueuedDependency {
     entry_index: Option<usize>,
-    origin_block: Option<AsyncDependenciesBlockId>,
-    origin_dependency_id: Option<DependencyId>,
+    origin_block: Option<AsyncDependenciesBlockIndex>,
+    origin_dependency_index: Option<DependencyIndex>,
     dependency: Dependency,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AddModuleResult {
-    module_id: ModuleId,
+    module_handle: ModuleHandle,
     is_new: bool,
 }
 
@@ -218,7 +218,7 @@ pub(crate) async fn run(
                 dependencies: vec![QueuedDependency {
                     entry_index: Some(entry_index),
                     origin_block: None,
-                    origin_dependency_id: None,
+                    origin_dependency_index: None,
                     dependency: Dependency::new(DependencyKind::Entry, entry.request.clone()),
                 }],
             }),
@@ -398,7 +398,7 @@ impl AddTask {
                 }
 
                 Ok(vec![MakeTask::Build(BuildTask {
-                    module_id: add_result.module_id,
+                    module_handle: add_result.module_handle,
                     identity,
                     resource,
                     loader,
@@ -415,7 +415,7 @@ impl AddTask {
                 state.missing_dependencies.insert(identity.resource.clone());
                 let add_result =
                     state.add_or_connect(self.origin_module, self.dependencies, identity);
-                state.fail_module(add_result.module_id, error, String::new())?;
+                state.fail_module(add_result.module_handle, error, String::new())?;
                 Ok(Vec::new())
             }
         }
@@ -438,7 +438,7 @@ impl BuildTask {
         let issuer_context = self
             .resource
             .parent()
-            .ok_or(Error::MissingModuleDirectory(self.module_id))?
+            .ok_or(Error::MissingModuleDirectory(self.module_handle))?
             .to_path_buf();
 
         if let Some(record) = services.module_build_cache.get(&self.identity, None) {
@@ -459,11 +459,11 @@ impl BuildTask {
             };
             if valid {
                 let process_dependencies =
-                    process_dependencies_task(self.module_id, &issuer_context, record.parsed());
+                    process_dependencies_task(self.module_handle, &issuer_context, record.parsed());
                 state
                     .lock()
                     .await
-                    .finish_build(self.module_id, Arc::clone(record.built_content()))?;
+                    .finish_build(self.module_handle, Arc::clone(record.built_content()))?;
                 return Ok(process_dependencies.into_iter().collect());
             }
         }
@@ -475,7 +475,7 @@ impl BuildTask {
                 state
                     .lock()
                     .await
-                    .fail_module(self.module_id, error, String::new())?;
+                    .fail_module(self.module_handle, error, String::new())?;
                 return Ok(Vec::new());
             }
         };
@@ -489,7 +489,7 @@ impl BuildTask {
                 state
                     .lock()
                     .await
-                    .fail_module(self.module_id, error, raw_source)?;
+                    .fail_module(self.module_handle, error, raw_source)?;
                 return Ok(Vec::new());
             };
             match loader_runner
@@ -506,7 +506,7 @@ impl BuildTask {
                     state
                         .lock()
                         .await
-                        .fail_module(self.module_id, error, raw_source)?;
+                        .fail_module(self.module_handle, error, raw_source)?;
                     return Ok(Vec::new());
                 }
                 Err(error) => return Err(error),
@@ -520,20 +520,20 @@ impl BuildTask {
                 state
                     .lock()
                     .await
-                    .fail_module(self.module_id, error, source)?;
+                    .fail_module(self.module_handle, error, source)?;
                 return Ok(Vec::new());
             }
             Err(error) => return Err(error),
         };
         let process_dependencies =
-            process_dependencies_task(self.module_id, &issuer_context, &parsed);
+            process_dependencies_task(self.module_handle, &issuer_context, &parsed);
 
         if !services.module_build_cache.is_enabled() {
             let built_content = Arc::new(BuiltModuleContent::new(parsed, source));
             state
                 .lock()
                 .await
-                .finish_build(self.module_id, built_content)?;
+                .finish_build(self.module_handle, built_content)?;
             return Ok(process_dependencies.into_iter().collect());
         }
 
@@ -566,7 +566,7 @@ impl BuildTask {
         state
             .lock()
             .await
-            .finish_build(self.module_id, built_content)?;
+            .finish_build(self.module_handle, built_content)?;
         services
             .module_build_cache
             .store(self.identity, None, record);
@@ -640,7 +640,7 @@ impl DependencyCategory {
 }
 
 fn process_dependencies_task(
-    module_id: ModuleId,
+    module_handle: ModuleHandle,
     issuer_context: &Path,
     parsed: &ParsedModule,
 ) -> Option<MakeTask> {
@@ -650,20 +650,20 @@ fn process_dependencies_task(
         .iter()
         .cloned()
         .enumerate()
-        .map(|(dependency_id, dependency)| QueuedDependency {
+        .map(|(dependency_index, dependency)| QueuedDependency {
             entry_index: None,
             origin_block: None,
-            origin_dependency_id: Some(DependencyId::new(dependency_id)),
+            origin_dependency_index: Some(DependencyIndex::new(dependency_index)),
             dependency,
         })
         .collect::<Vec<_>>();
 
     for (block_index, block) in parsed.blocks.iter().enumerate() {
         dependencies.extend(block.dependencies().iter().cloned().enumerate().map(
-            |(dependency_id, dependency)| QueuedDependency {
+            |(dependency_index, dependency)| QueuedDependency {
                 entry_index: None,
-                origin_block: Some(AsyncDependenciesBlockId::new(block_index)),
-                origin_dependency_id: Some(DependencyId::new(dependency_id)),
+                origin_block: Some(AsyncDependenciesBlockIndex::new(block_index)),
+                origin_dependency_index: Some(DependencyIndex::new(dependency_index)),
                 dependency,
             },
         ));
@@ -673,7 +673,7 @@ fn process_dependencies_task(
         None
     } else {
         Some(MakeTask::ProcessDependencies(ProcessDependenciesTask {
-            origin_module: module_id,
+            origin_module: module_handle,
             context: issuer_context,
             dependencies,
         }))
@@ -724,53 +724,61 @@ fn normalize_missing_resource(path: PathBuf) -> PathBuf {
 impl MakeState {
     fn add_or_connect(
         &mut self,
-        origin_module: Option<ModuleId>,
+        origin_module: Option<ModuleHandle>,
         dependencies: Vec<QueuedDependency>,
         identity: ModuleIdentity,
     ) -> AddModuleResult {
-        let (module_id, is_new) =
-            if let Some(module_id) = self.modules_by_identity.get(&identity).copied() {
-                (module_id, false)
+        let (module_handle, is_new) =
+            if let Some(module_handle) = self.modules_by_identity.get(&identity).copied() {
+                (module_handle, false)
             } else {
-                let module_id = self.module_graph.add_module(identity.clone());
-                self.modules_by_identity.insert(identity, module_id);
-                (module_id, true)
+                let module_handle = self.module_graph.add_module(identity.clone());
+                self.modules_by_identity.insert(identity, module_handle);
+                (module_handle, true)
             };
 
         for dependency in dependencies {
             if let Some(entry_index) = dependency.entry_index {
-                self.entries.insert(entry_index, module_id);
+                self.entries.insert(entry_index, module_handle);
             }
             self.module_graph.connect(
                 origin_module,
                 dependency.origin_block,
-                dependency.origin_dependency_id,
+                dependency.origin_dependency_index,
                 dependency.dependency,
-                module_id,
+                module_handle,
             );
         }
 
-        AddModuleResult { module_id, is_new }
+        AddModuleResult {
+            module_handle,
+            is_new,
+        }
     }
 
     fn finish_build(
         &mut self,
-        module_id: ModuleId,
+        module_handle: ModuleHandle,
         built_content: Arc<BuiltModuleContent>,
     ) -> Result<()> {
         let module = self
             .module_graph
-            .module_mut(module_id)
-            .ok_or(Error::MissingModule(module_id))?;
+            .module_mut(module_handle)
+            .ok_or(Error::MissingModule(module_handle))?;
         module.finish_build_content(built_content);
         Ok(())
     }
 
-    fn fail_module(&mut self, module_id: ModuleId, error: Error, source: String) -> Result<()> {
+    fn fail_module(
+        &mut self,
+        module_handle: ModuleHandle,
+        error: Error,
+        source: String,
+    ) -> Result<()> {
         let module = self
             .module_graph
-            .module_mut(module_id)
-            .ok_or(Error::MissingModule(module_id))?;
+            .module_mut(module_handle)
+            .ok_or(Error::MissingModule(module_handle))?;
         module.fail_build(error.clone(), source);
         self.errors.push(error);
         Ok(())
@@ -820,7 +828,7 @@ mod tests {
             .iter()
             .find(|module| module.identity().resource.ends_with("dep.js"))
             .expect("dep module should exist")
-            .id();
+            .handle();
 
         assert_eq!(state.errors, []);
         assert_eq!(graph.modules().len(), 2);

@@ -1,20 +1,20 @@
 use std::collections::HashMap;
 
-use crate::{Dependency, Module, ModuleId, ModuleIdentity};
+use crate::{Dependency, Module, ModuleHandle, ModuleIdentity};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ModuleGraph {
     modules: Vec<Module>,
     connections: Vec<ModuleGraphConnection>,
-    outgoing: Vec<Vec<ModuleGraphConnectionId>>,
-    incoming: Vec<Vec<ModuleGraphConnectionId>>,
-    outgoing_by_location: Vec<HashMap<DependencyLocation, ModuleGraphConnectionId>>,
+    outgoing: Vec<Vec<ModuleGraphConnectionHandle>>,
+    incoming: Vec<Vec<ModuleGraphConnectionHandle>>,
+    outgoing_by_location: Vec<HashMap<DependencyLocation, ModuleGraphConnectionHandle>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ModuleGraphConnectionId(usize);
+pub struct ModuleGraphConnectionHandle(usize);
 
-impl ModuleGraphConnectionId {
+impl ModuleGraphConnectionHandle {
     pub const fn new(index: usize) -> Self {
         Self(index)
     }
@@ -25,9 +25,9 @@ impl ModuleGraphConnectionId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DependencyId(usize);
+pub struct DependencyIndex(usize);
 
-impl DependencyId {
+impl DependencyIndex {
     pub const fn new(index: usize) -> Self {
         Self(index)
     }
@@ -38,9 +38,9 @@ impl DependencyId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct AsyncDependenciesBlockId(usize);
+pub struct AsyncDependenciesBlockIndex(usize);
 
-impl AsyncDependenciesBlockId {
+impl AsyncDependenciesBlockIndex {
     pub const fn new(index: usize) -> Self {
         Self(index)
     }
@@ -51,57 +51,57 @@ impl AsyncDependenciesBlockId {
 }
 
 impl ModuleGraph {
-    pub(crate) fn add_module(&mut self, identity: ModuleIdentity) -> ModuleId {
-        let id = ModuleId::new(self.modules.len());
-        self.modules.push(Module::new(id, identity));
+    pub(crate) fn add_module(&mut self, identity: ModuleIdentity) -> ModuleHandle {
+        let handle = ModuleHandle::new(self.modules.len());
+        self.modules.push(Module::new(handle, identity));
         self.outgoing.push(Vec::new());
         self.incoming.push(Vec::new());
         self.outgoing_by_location.push(HashMap::new());
-        id
+        handle
     }
 
-    pub(crate) fn module_mut(&mut self, id: ModuleId) -> Option<&mut Module> {
-        self.modules.get_mut(id.index())
+    pub(crate) fn module_mut(&mut self, handle: ModuleHandle) -> Option<&mut Module> {
+        self.modules.get_mut(handle.index())
     }
 
     pub(crate) fn connect(
         &mut self,
-        origin_module: Option<ModuleId>,
-        origin_block: Option<AsyncDependenciesBlockId>,
-        origin_dependency_id: Option<DependencyId>,
+        origin_module: Option<ModuleHandle>,
+        origin_block: Option<AsyncDependenciesBlockIndex>,
+        origin_dependency_index: Option<DependencyIndex>,
         dependency: Dependency,
-        module: ModuleId,
+        module: ModuleHandle,
     ) {
-        let connection_id = ModuleGraphConnectionId::new(self.connections.len());
+        let connection_handle = ModuleGraphConnectionHandle::new(self.connections.len());
         self.connections.push(ModuleGraphConnection {
-            id: connection_id,
+            handle: connection_handle,
             origin_module,
             origin_block,
-            origin_dependency_id,
+            origin_dependency_index,
             dependency,
             module,
         });
         if let Some(origin_module) = origin_module {
-            self.outgoing[origin_module.index()].push(connection_id);
-            if let Some(dependency_id) = origin_dependency_id {
+            self.outgoing[origin_module.index()].push(connection_handle);
+            if let Some(dependency_index) = origin_dependency_index {
                 self.outgoing_by_location[origin_module.index()].insert(
                     DependencyLocation {
                         block: origin_block,
-                        dependency_id,
+                        dependency_index,
                     },
-                    connection_id,
+                    connection_handle,
                 );
             }
         }
-        self.incoming[module.index()].push(connection_id);
+        self.incoming[module.index()].push(connection_handle);
     }
 
     pub fn modules(&self) -> &[Module] {
         &self.modules
     }
 
-    pub fn module(&self, id: ModuleId) -> Option<&Module> {
-        self.modules.get(id.index())
+    pub fn module(&self, handle: ModuleHandle) -> Option<&Module> {
+        self.modules.get(handle.index())
     }
 
     pub fn connections(&self) -> &[ModuleGraphConnection] {
@@ -110,51 +110,51 @@ impl ModuleGraph {
 
     pub fn outgoing_connections(
         &self,
-        module: ModuleId,
+        module: ModuleHandle,
     ) -> impl Iterator<Item = &ModuleGraphConnection> {
         self.outgoing[module.index()]
             .iter()
-            .map(|connection_id| &self.connections[connection_id.index()])
+            .map(|connection_handle| &self.connections[connection_handle.index()])
     }
 
     pub fn incoming_connections(
         &self,
-        module: ModuleId,
+        module: ModuleHandle,
     ) -> impl Iterator<Item = &ModuleGraphConnection> {
         self.incoming[module.index()]
             .iter()
-            .map(|connection_id| &self.connections[connection_id.index()])
+            .map(|connection_handle| &self.connections[connection_handle.index()])
     }
 
     pub fn module_for_dependency(
         &self,
-        origin_module: ModuleId,
-        origin_block: Option<AsyncDependenciesBlockId>,
-        dependency_id: DependencyId,
-    ) -> Option<ModuleId> {
+        origin_module: ModuleHandle,
+        origin_block: Option<AsyncDependenciesBlockIndex>,
+        dependency_index: DependencyIndex,
+    ) -> Option<ModuleHandle> {
         let location = DependencyLocation {
             block: origin_block,
-            dependency_id,
+            dependency_index,
         };
         self.outgoing_by_location
             .get(origin_module.index())?
             .get(&location)
-            .map(|connection_id| self.connections[connection_id.index()].module)
+            .map(|connection_handle| self.connections[connection_handle.index()].module)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DependencyLocation {
-    block: Option<AsyncDependenciesBlockId>,
-    dependency_id: DependencyId,
+    block: Option<AsyncDependenciesBlockIndex>,
+    dependency_index: DependencyIndex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleGraphConnection {
-    pub id: ModuleGraphConnectionId,
-    pub origin_module: Option<ModuleId>,
-    pub origin_block: Option<AsyncDependenciesBlockId>,
-    pub origin_dependency_id: Option<DependencyId>,
+    pub handle: ModuleGraphConnectionHandle,
+    pub origin_module: Option<ModuleHandle>,
+    pub origin_block: Option<AsyncDependenciesBlockIndex>,
+    pub origin_dependency_index: Option<DependencyIndex>,
     pub dependency: Dependency,
-    pub module: ModuleId,
+    pub module: ModuleHandle,
 }

@@ -1,13 +1,13 @@
 use crate::{
-    ModuleId,
-    chunk_group::{ChunkGroup, ChunkGroupId},
+    ModuleHandle,
+    chunk_group::{ChunkGroup, ChunkGroupHandle},
     id_assignment::RenderId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ChunkId(usize);
+pub struct ChunkHandle(usize);
 
-impl ChunkId {
+impl ChunkHandle {
     pub const fn new(index: usize) -> Self {
         Self(index)
     }
@@ -19,18 +19,22 @@ impl ChunkId {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
-    id: ChunkId,
+    handle: ChunkHandle,
     name: Option<String>,
-    root_modules: Vec<ModuleId>,
+    root_modules: Vec<ModuleHandle>,
     render_id: Option<RenderId>,
     filename_override: Option<String>,
-    groups: Vec<ChunkGroupId>,
+    groups: Vec<ChunkGroupHandle>,
 }
 
 impl Chunk {
-    pub(crate) fn new(id: ChunkId, name: Option<String>, root_modules: Vec<ModuleId>) -> Self {
+    pub(crate) fn new(
+        handle: ChunkHandle,
+        name: Option<String>,
+        root_modules: Vec<ModuleHandle>,
+    ) -> Self {
         Self {
-            id,
+            handle,
             name,
             root_modules,
             render_id: None,
@@ -39,8 +43,8 @@ impl Chunk {
         }
     }
 
-    pub fn id(&self) -> ChunkId {
-        self.id
+    pub fn handle(&self) -> ChunkHandle {
+        self.handle
     }
 
     pub fn name(&self) -> Option<&str> {
@@ -61,17 +65,17 @@ impl Chunk {
             .expect("chunk Render ID should be assigned before it is read")
     }
 
-    pub fn groups(&self) -> &[ChunkGroupId] {
+    pub fn groups(&self) -> &[ChunkGroupHandle] {
         &self.groups
     }
 
-    pub(crate) fn add_group(&mut self, group: ChunkGroupId) {
+    pub(crate) fn add_group(&mut self, group: ChunkGroupHandle) {
         if !self.groups.contains(&group) {
             self.groups.push(group);
         }
     }
 
-    pub(crate) fn root_modules(&self) -> &[ModuleId] {
+    pub(crate) fn root_modules(&self) -> &[ModuleHandle] {
         &self.root_modules
     }
 
@@ -90,7 +94,7 @@ impl Chunk {
     pub fn split(&self, new_chunk: &mut Chunk, chunk_groups: &mut [ChunkGroup]) {
         for group in &self.groups {
             new_chunk.add_group(*group);
-            chunk_groups[group.index()].push_chunk(new_chunk.id());
+            chunk_groups[group.index()].push_chunk(new_chunk.handle());
         }
     }
 }

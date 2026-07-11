@@ -14,18 +14,15 @@ use std::{
 use crate::{
     InfrastructureLogEvent, InfrastructureLogLevel, ModuleIdentity, SnapshotOptions,
     SnapshotStrategy, UnpackResolver,
-    cache_hash::stable_hash,
+    code_generation_record::CodeGenerationRecord,
+    module::BuiltModuleContent,
     pack_file::{
-        AccessStamp, AssetRenderRecordCodec, AssetRenderRecordDto, CodecRegistry, DEFAULT_MAX_AGE,
-        ModuleBuildRecordCodec,
-        ModuleBuildRecordDto, PackFile, PackFileAddress, PackFileETag, PackFileGuardDto,
-        PackFileRetention, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
-        ResolveRecordDto, SnapshotDto,
-        PackFileCompression, PackFileOpenOptions, PackFilePublicationOptions,
-/*
-        PackFileOpenOptions, PackFilePublicationOptions, PackFileRetention, PackFileWriteBatch,
+        AccessStamp, AssetRenderRecordCodec, AssetRenderRecordDto, CodeGenerationRecordCodec,
+        CodeGenerationRecordDto, CodecRegistry, DEFAULT_MAX_AGE, ModuleBuildRecordCodec,
+        ModuleBuildRecordDto, PackFile, PackFileAddress, PackFileCompression, PackFileETag,
+        PackFileGuardDto, PackFileOpenOptions, PackFilePublicationOptions,
+        PackFileRestore as PackFileRecordRestore, PackFileRetention, PackFileWriteBatch,
         PublicationBase, ResolveRecordCodec, ResolveRecordDto, SnapshotDto,
-*/
     },
     parser::ParsedModule,
     rendered_source::RenderedSource,
@@ -34,6 +31,8 @@ use crate::{
 
 const RESOLVE_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/resolve");
 const MODULE_BUILD_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/module-build");
+const CODE_GENERATION_CACHE_NAMESPACE: CacheNamespace =
+    CacheNamespace::new("unpack/code-generation");
 const ASSET_RENDER_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/asset-render");
 const CACHE_PROFILE_LOGGER: &str = "unpack.Cache.Profile";
 const CACHE_WRITER_LOGGER: &str = "unpack.Cache.Writer";
@@ -93,6 +92,7 @@ pub(crate) struct BuildCache {
     resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
     build_dependency_file_system_info: FileSystemInfo,
     diagnostics: Arc<CacheDiagnostics>,
+    clock: Arc<dyn CacheClock>,
     inner: Arc<Mutex<BuildCacheInner>>,
 }
 
@@ -359,9 +359,17 @@ struct PublishBarrier {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone)]
+struct RestoreBarrier {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 struct ManualCacheClock {
     now_millis: AtomicU64,
+    calls: AtomicU64,
 }
 
 #[cfg(test)]
@@ -369,17 +377,23 @@ impl ManualCacheClock {
     fn at_millis(now_millis: u64) -> Self {
         Self {
             now_millis: AtomicU64::new(now_millis),
+            calls: AtomicU64::new(0),
         }
     }
 
     fn set_millis(&self, now_millis: u64) {
         self.now_millis.store(now_millis, Ordering::SeqCst);
     }
+
+    fn calls(&self) -> u64 {
+        self.calls.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(test)]
 impl CacheClock for ManualCacheClock {
     fn now(&self) -> AccessStamp {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         AccessStamp::from_millis(self.now_millis.load(Ordering::SeqCst))
     }
 }
@@ -458,8 +472,125 @@ impl fmt::Debug for CacheEntry {
     }
 }
 
+#[derive(Debug)]
+enum CacheLayerLookup {
+    Hit(CacheEntry),
+    Deferred(PersistentRestore),
+    Miss,
+}
+
+enum PreparedPersistentRecord {
+    Resolve(PackFileRecordRestore<ResolveRecordDto>),
+    ModuleBuild(PackFileRecordRestore<ModuleBuildRecordDto>),
+    CodeGeneration(PackFileRecordRestore<CodeGenerationRecordDto>),
+    AssetRender(PackFileRecordRestore<AssetRenderRecordDto>),
+}
+
+#[derive(Debug, Clone)]
+struct PersistentRestore {
+    pack_file: Arc<Mutex<PackFile>>,
+    reader_generation: u64,
+    address: PackFileAddress,
+    etag: Option<PackFileETag>,
+    cache_etag: Option<CacheETag>,
+    namespace: CacheNamespace,
+    diagnostics: Arc<CacheDiagnostics>,
+    #[cfg(test)]
+    barrier: Option<RestoreBarrier>,
+}
+
+impl PersistentRestore {
+    fn restore(&self) -> Option<CacheEntry> {
+        let started = Instant::now();
+        let prepared = {
+            let mut pack_file = self
+                .pack_file
+                .lock()
+                .expect("PackFile mutex should not be poisoned");
+            match self.namespace {
+                RESOLVE_CACHE_NAMESPACE => PreparedPersistentRecord::Resolve(
+                    pack_file.prepare_restore(&self.address, self.etag.as_ref())?,
+                ),
+                MODULE_BUILD_CACHE_NAMESPACE => PreparedPersistentRecord::ModuleBuild(
+                    pack_file.prepare_restore(&self.address, self.etag.as_ref())?,
+                ),
+                CODE_GENERATION_CACHE_NAMESPACE => PreparedPersistentRecord::CodeGeneration(
+                    pack_file.prepare_restore(&self.address, self.etag.as_ref())?,
+                ),
+                ASSET_RENDER_CACHE_NAMESPACE => PreparedPersistentRecord::AssetRender(
+                    pack_file.prepare_restore(&self.address, self.etag.as_ref())?,
+                ),
+                _ => return None,
+            }
+        };
+        #[cfg(test)]
+        if let Some(barrier) = &self.barrier {
+            barrier.entered.wait();
+            barrier.release.wait();
+        }
+
+        let restored = match prepared {
+            PreparedPersistentRecord::Resolve(prepared) => {
+                let record = ResolveRecord::try_from(prepared.decode()?).ok()?;
+                CacheEntry::new(CacheItemFamily::Resolve, self.cache_etag.clone(), record)
+            }
+            PreparedPersistentRecord::ModuleBuild(prepared) => {
+                let record = ModuleBuildRecord::try_from(prepared.decode()?).ok()?;
+                CacheEntry::new(
+                    CacheItemFamily::ModuleBuild,
+                    self.cache_etag.clone(),
+                    record,
+                )
+            }
+            PreparedPersistentRecord::CodeGeneration(prepared) => {
+                let record = prepared.decode()?.into_record_after_codec_validation();
+                CacheEntry::new(
+                    CacheItemFamily::CodeGeneration,
+                    self.cache_etag.clone(),
+                    record,
+                )
+            }
+            PreparedPersistentRecord::AssetRender(prepared) => {
+                let record = RenderedSource::try_from(prepared.decode()?).ok()?;
+                CacheEntry::new(
+                    CacheItemFamily::AssetRender,
+                    self.cache_etag.clone(),
+                    record,
+                )
+            }
+        };
+        self.diagnostics.profile(format!(
+            "restore items=1; deserialization items=1 duration_us={}",
+            started.elapsed().as_micros()
+        ));
+        Some(restored)
+    }
+
+    fn reads_from(&self, other: &Self) -> bool {
+        self.reader_generation == other.reader_generation
+            && Arc::ptr_eq(&self.pack_file, &other.pack_file)
+    }
+}
+
+#[derive(Debug)]
+struct PersistentTouch {
+    pack_file: Arc<Mutex<PackFile>>,
+    address: PackFileAddress,
+    etag: Option<PackFileETag>,
+    stamp: AccessStamp,
+}
+
+impl PersistentTouch {
+    fn apply(&self) -> bool {
+        self.pack_file
+            .lock()
+            .expect("PackFile mutex should not be poisoned")
+            .touch(&self.address, self.etag.as_ref(), self.stamp)
+    }
+}
+
 trait CacheLayer: fmt::Debug + Send + Sync {
-    fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry>;
+    fn lookup(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> CacheLayerLookup;
     fn store(&mut self, address: CacheAddress, entry: CacheEntry);
     fn clear(&mut self) {}
     fn prepare_persistent(
@@ -474,13 +605,13 @@ trait CacheLayer: fmt::Debug + Send + Sync {
     ) -> bool {
         false
     }
-    fn touch(
-        &mut self,
+    fn plan_touch(
+        &self,
         _address: &CacheAddress,
         _etag: Option<&CacheETag>,
         _stamp: AccessStamp,
-    ) -> bool {
-        false
+    ) -> Option<PersistentTouch> {
+        None
     }
     fn on_compilation_completed(&mut self) -> Vec<CacheItemFamily> {
         Vec::new()
@@ -496,6 +627,8 @@ trait CacheLayer: fmt::Debug + Send + Sync {
     fn has_publication(&self) -> bool {
         false
     }
+    #[cfg(test)]
+    fn install_restore_barrier(&mut self, _barrier: RestoreBarrier) {}
     #[allow(dead_code)]
     fn evict(&mut self, address: &CacheAddress) -> bool;
     #[cfg(test)]
@@ -550,21 +683,26 @@ impl MemoryCacheLayer {
 }
 
 impl CacheLayer for MemoryCacheLayer {
-    fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry> {
+    fn lookup(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> CacheLayerLookup {
         if self.retention == MemoryRetention::Unbounded {
             return self
                 .entries
                 .get(address)
                 .filter(|entry| entry.entry.etag.as_ref() == etag)
-                .map(|entry| entry.entry.clone());
+                .map_or(CacheLayerLookup::Miss, |entry| {
+                    CacheLayerLookup::Hit(entry.entry.clone())
+                });
         }
         let active_generation = self.active_generation();
-        let entry = self
+        let Some(entry) = self
             .entries
             .get_mut(address)
-            .filter(|entry| entry.entry.etag.as_ref() == etag)?;
+            .filter(|entry| entry.entry.etag.as_ref() == etag)
+        else {
+            return CacheLayerLookup::Miss;
+        };
         entry.last_used_generation = active_generation;
-        Some(entry.entry.clone())
+        CacheLayerLookup::Hit(entry.entry.clone())
     }
 
     fn store(&mut self, address: CacheAddress, entry: CacheEntry) {
@@ -616,7 +754,8 @@ impl CacheLayer for MemoryCacheLayer {
 struct PackFileCacheLayer {
     root: Option<PathBuf>,
     registry: CodecRegistry,
-    pack_file: Option<PackFile>,
+    pack_file: Option<Arc<Mutex<PackFile>>>,
+    reader_generation: u64,
     compression: PackFileCompression,
     open_options: PackFileOpenOptions,
     publication_base: PublicationBase,
@@ -624,6 +763,8 @@ struct PackFileCacheLayer {
     pending: HashMap<CacheAddress, CacheEntry>,
     diagnostics: Arc<CacheDiagnostics>,
     _writer_marker: Option<CacheWriterMarker>,
+    #[cfg(test)]
+    restore_barrier: Option<RestoreBarrier>,
 }
 
 #[derive(Debug)]
@@ -738,20 +879,30 @@ impl PackFileCacheLayer {
         let root = options.cache_location.clone();
         let compression = options.compression.into();
         let open_options = PackFileOpenOptions::new(options.allow_collecting_memory);
-        let pack_file = root
-            .as_ref()
-            .map(|root| PackFile::open_with_options(root, registry.clone(), open_options));
+        let pack_file = root.as_ref().map(|root| {
+            Arc::new(Mutex::new(PackFile::open_with_options(
+                root,
+                registry.clone(),
+                open_options,
+            )))
+        });
         let has_standalone_guard = pack_file.as_ref().is_some_and(|pack_file| {
-            pack_file.guard().is_some_and(|guard| {
-                guard.build_dependencies.entries.is_empty()
-                    && guard.resolve_build_dependencies.entries.is_empty()
-            })
+            pack_file
+                .lock()
+                .expect("PackFile mutex should not be poisoned")
+                .guard()
+                .is_some_and(|guard| {
+                    guard.build_dependencies.entries.is_empty()
+                        && guard.resolve_build_dependencies.entries.is_empty()
+                })
         });
         let publication_base = if has_standalone_guard {
             PublicationBase::PreserveEntries {
                 expected_revision: pack_file
                     .as_ref()
                     .expect("standalone PackFile should be open")
+                    .lock()
+                    .expect("PackFile mutex should not be poisoned")
                     .revision(),
             }
         } else {
@@ -767,6 +918,7 @@ impl PackFileCacheLayer {
             root,
             registry,
             pack_file,
+            reader_generation: 0,
             compression,
             open_options,
             publication_base,
@@ -777,6 +929,8 @@ impl PackFileCacheLayer {
             pending: HashMap::new(),
             diagnostics,
             _writer_marker: writer_marker,
+            #[cfg(test)]
+            restore_barrier: None,
         }
     }
 
@@ -790,12 +944,20 @@ impl PackFileCacheLayer {
             self.pending.clear();
             return Ok(());
         };
-        let before_entries = self.pack_file.as_ref().map_or(0, PackFile::entry_count);
+        let before_entries = self.pack_file.as_ref().map_or(0, |pack_file| {
+            pack_file
+                .lock()
+                .expect("PackFile mutex should not be poisoned")
+                .entry_count()
+        });
         let queued_items = self.pending.len();
         let serialization_started = Instant::now();
         let mut batch = PackFileWriteBatch::new();
         if let Some(pack_file) = &self.pack_file {
-            pack_file.copy_access_updates_to(&mut batch);
+            pack_file
+                .lock()
+                .expect("PackFile mutex should not be poisoned")
+                .copy_access_updates_to(&mut batch);
         }
         for (address, entry) in &self.pending {
             let pack_address = address.to_pack_file_address();
@@ -821,9 +983,16 @@ impl PackFileCacheLayer {
                     let dto = ModuleBuildRecordDto::try_from(record.as_ref())?;
                     batch.insert(&self.registry, pack_address, pack_etag, dto)?;
                 }
-                CacheItemFamily::CodeGeneration => unreachable!(
-                    "Code Generation Results are Compilation-owned and cannot be persisted"
-                ),
+                CacheItemFamily::CodeGeneration => {
+                    let record = entry.value::<CodeGenerationRecord>().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Code Generation Cache Item contains an unexpected value",
+                        )
+                    })?;
+                    let dto = CodeGenerationRecordDto::from(record.as_ref());
+                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                }
                 CacheItemFamily::AssetRender => {
                     let record = entry.value::<RenderedSource>().ok_or_else(|| {
                         io::Error::new(
@@ -862,66 +1031,39 @@ impl PackFileCacheLayer {
         self.publication_base = PublicationBase::PreserveEntries {
             expected_revision: pack_file.revision(),
         };
-        self.pack_file = Some(pack_file);
+        self.pack_file = Some(Arc::new(Mutex::new(pack_file)));
+        self.reader_generation = self.reader_generation.wrapping_add(1);
         self.active = true;
         Ok(())
     }
 }
 
 impl CacheLayer for PackFileCacheLayer {
-    fn get(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> Option<CacheEntry> {
+    fn lookup(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> CacheLayerLookup {
         if let Some(entry) = self
             .pending
             .get(address)
             .filter(|entry| entry.etag.as_ref() == etag)
         {
-            return Some(entry.clone());
+            return CacheLayerLookup::Hit(entry.clone());
         }
         if !self.active {
-            return None;
+            return CacheLayerLookup::Miss;
         }
-        let started = Instant::now();
-        let pack_file = self.pack_file.as_mut()?;
-        let pack_address = address.to_pack_file_address();
-        let pack_etag = etag.map(CacheETag::to_pack_file_etag);
-        let restored = match address.namespace {
-            RESOLVE_CACHE_NAMESPACE => {
-                let dto = pack_file.get_resolve_record(&pack_address, pack_etag.as_ref())?;
-                let record = ResolveRecord::try_from((*dto).clone()).ok()?;
-                Some(CacheEntry::new(
-                    CacheItemFamily::Resolve,
-                    etag.cloned(),
-                    record,
-                ))
-            }
-            MODULE_BUILD_CACHE_NAMESPACE => {
-                let dto = pack_file.get_module_build_record(&pack_address, pack_etag.as_ref())?;
-                let record = ModuleBuildRecord::try_from((*dto).clone()).ok()?;
-                Some(CacheEntry::new(
-                    CacheItemFamily::ModuleBuild,
-                    etag.cloned(),
-                    record,
-                ))
-            }
-            ASSET_RENDER_CACHE_NAMESPACE => {
-                let dto =
-                    pack_file.get::<AssetRenderRecordDto>(&pack_address, pack_etag.as_ref())?;
-                let record = RenderedSource::try_from((*dto).clone()).ok()?;
-                Some(CacheEntry::new(
-                    CacheItemFamily::AssetRender,
-                    etag.cloned(),
-                    record,
-                ))
-            }
-            _ => None,
+        let Some(pack_file) = self.pack_file.as_ref() else {
+            return CacheLayerLookup::Miss;
         };
-        if restored.is_some() {
-            self.diagnostics.profile(format!(
-                "restore items=1; deserialization items=1 duration_us={}",
-                started.elapsed().as_micros()
-            ));
-        }
-        restored
+        CacheLayerLookup::Deferred(PersistentRestore {
+            pack_file: Arc::clone(pack_file),
+            reader_generation: self.reader_generation,
+            address: address.to_pack_file_address(),
+            etag: etag.map(CacheETag::to_pack_file_etag),
+            cache_etag: etag.cloned(),
+            namespace: address.namespace,
+            diagnostics: Arc::clone(&self.diagnostics),
+            #[cfg(test)]
+            barrier: self.restore_barrier.take(),
+        })
     }
 
     fn store(&mut self, address: CacheAddress, entry: CacheEntry) {
@@ -932,6 +1074,7 @@ impl CacheLayer for PackFileCacheLayer {
     fn clear(&mut self) {
         self.pending.clear();
         self.active = false;
+        self.reader_generation = self.reader_generation.wrapping_add(1);
         self.publication_base = PublicationBase::ReplaceAll;
     }
 
@@ -946,38 +1089,43 @@ impl CacheLayer for PackFileCacheLayer {
         resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
     ) -> bool {
         let build_strategy = if !build_inputs.is_empty()
-            && build_inputs.iter().all(|path| automatic_build_inputs.contains(path))
+            && build_inputs
+                .iter()
+                .all(|path| automatic_build_inputs.contains(path))
         {
             SnapshotStrategy::timestamp()
         } else {
             build_dependency_snapshot_strategy
         };
         let active = self.pack_file.as_ref().is_some_and(|pack_file| {
-            pack_file.guard().is_some_and(|candidate| {
-                let build_dependencies =
-                    Snapshot::try_from(candidate.build_dependencies.clone()).ok();
-                let resolve_build_dependencies =
-                    Snapshot::try_from(candidate.resolve_build_dependencies.clone()).ok();
-                candidate.version == guard.version
-                    && build_dependencies.is_some_and(|snapshot| {
-                        snapshot.has_exact_paths(build_inputs.iter().cloned())
-                            && file_system_info.is_snapshot_valid_sync(
+            pack_file
+                .lock()
+                .expect("PackFile mutex should not be poisoned")
+                .guard()
+                .is_some_and(|candidate| {
+                    let build_dependencies =
+                        Snapshot::try_from(candidate.build_dependencies.clone()).ok();
+                    let resolve_build_dependencies =
+                        Snapshot::try_from(candidate.resolve_build_dependencies.clone()).ok();
+                    candidate.version == guard.version
+                        && build_dependencies.is_some_and(|snapshot| {
+                            snapshot.has_exact_paths(build_inputs.iter().cloned())
+                                && file_system_info
+                                    .is_snapshot_valid_sync(&snapshot, build_strategy)
+                        })
+                        && resolve_build_dependencies.is_some_and(|snapshot| {
+                            file_system_info.is_snapshot_valid_sync(
                                 &snapshot,
-                                build_strategy,
+                                resolve_build_dependency_snapshot_strategy,
+                            ) || snapshot.has_valid_paths_sync(
+                                resolved_build_inputs.iter().cloned(),
+                                resolve_build_dependency_snapshot_strategy,
+                                file_system_info,
                             )
-                    })
-                    && resolve_build_dependencies.is_some_and(|snapshot| {
-                        file_system_info.is_snapshot_valid_sync(
-                            &snapshot,
-                            resolve_build_dependency_snapshot_strategy,
-                        ) || snapshot.has_valid_paths_sync(
-                            resolved_build_inputs.iter().cloned(),
-                            resolve_build_dependency_snapshot_strategy,
-                            file_system_info,
-                        )
-                    })
-            })
+                        })
+                })
         });
+        self.reader_generation = self.reader_generation.wrapping_add(1);
         self.active = active;
         self.publication_base = if active {
             PublicationBase::PreserveEntries {
@@ -985,28 +1133,41 @@ impl CacheLayer for PackFileCacheLayer {
                     .pack_file
                     .as_ref()
                     .expect("active PackFile should be open")
+                    .lock()
+                    .expect("PackFile mutex should not be poisoned")
                     .revision(),
             }
         } else {
             PublicationBase::ReplaceAll
         };
-        self.pack_file.as_ref().and_then(PackFile::guard) != Some(guard)
+        self.pack_file
+            .as_ref()
+            .and_then(|pack_file| {
+                pack_file
+                    .lock()
+                    .expect("PackFile mutex should not be poisoned")
+                    .guard()
+                    .cloned()
+            })
+            .as_ref()
+            != Some(guard)
     }
 
-    fn touch(
-        &mut self,
+    fn plan_touch(
+        &self,
         address: &CacheAddress,
         etag: Option<&CacheETag>,
         stamp: AccessStamp,
-    ) -> bool {
+    ) -> Option<PersistentTouch> {
         if !self.active {
-            return false;
+            return None;
         }
-        let pack_address = address.to_pack_file_address();
-        let pack_etag = etag.map(CacheETag::to_pack_file_etag);
-        self.pack_file
-            .as_mut()
-            .is_some_and(|pack_file| pack_file.touch(&pack_address, pack_etag.as_ref(), stamp))
+        self.pack_file.as_ref().map(|pack_file| PersistentTouch {
+            pack_file: Arc::clone(pack_file),
+            address: address.to_pack_file_address(),
+            etag: etag.map(CacheETag::to_pack_file_etag),
+            stamp,
+        })
     }
 
     fn publish(
@@ -1020,6 +1181,11 @@ impl CacheLayer for PackFileCacheLayer {
 
     fn has_publication(&self) -> bool {
         self.active
+    }
+
+    #[cfg(test)]
+    fn install_restore_barrier(&mut self, barrier: RestoreBarrier) {
+        self.restore_barrier = Some(barrier);
     }
 
     fn evict(&mut self, address: &CacheAddress) -> bool {
@@ -1054,6 +1220,31 @@ struct Cache {
     work: CacheWorkCounters,
 }
 
+struct CacheRestore {
+    layer_index: usize,
+    restore: PersistentRestore,
+}
+
+enum CacheGet<V> {
+    Ready {
+        value: Option<Arc<V>>,
+        persistent_access_changed: bool,
+    },
+    Deferred(CacheRestore),
+}
+
+impl<V> CacheGet<V> {
+    fn persistent_access_changed(&self) -> bool {
+        matches!(
+            self,
+            Self::Ready {
+                persistent_access_changed: true,
+                ..
+            }
+        )
+    }
+}
+
 impl Cache {
     fn from_options(options: &CacheOptions, diagnostics: Arc<CacheDiagnostics>) -> Self {
         let mut layers = Vec::new();
@@ -1078,48 +1269,136 @@ impl Cache {
         }
     }
 
-    fn get<V>(
+    fn begin_get<V>(
         &mut self,
         family: CacheItemFamily,
         address: &CacheAddress,
         etag: Option<&CacheETag>,
         stamp: AccessStamp,
-    ) -> (Option<Arc<V>>, bool)
+    ) -> CacheGet<V>
     where
         V: Send + Sync + 'static,
     {
         for index in 0..self.layers.len() {
-            let entry = self.layers[index].layer.get(address, etag);
-            let Some(entry) = entry else {
-                continue;
-            };
-            let Some(value) = entry.value::<V>() else {
-                continue;
-            };
-
-            if index > 0 {
-                for earlier in &mut self.layers[..index] {
-                    if earlier.writable {
-                        earlier.layer.store(address.clone(), entry.clone());
+            match self.layers[index].layer.lookup(address, etag) {
+                CacheLayerLookup::Hit(entry) => {
+                    if let Some((value, persistent_access_changed)) =
+                        self.use_entry(family, address, etag, stamp, index, entry)
+                    {
+                        return CacheGet::Ready {
+                            value: Some(value),
+                            persistent_access_changed,
+                        };
                     }
                 }
-                self.work.for_family_mut(family).restores += 1;
+                CacheLayerLookup::Deferred(restore) => {
+                    return CacheGet::Deferred(CacheRestore {
+                        layer_index: index,
+                        restore,
+                    });
+                }
+                CacheLayerLookup::Miss => {}
             }
-            self.work.for_family_mut(family).hits += 1;
-            let mut persistent_access_changed = false;
-            for slot in self
-                .layers
-                .iter_mut()
-                .filter(|slot| slot.kind == CacheLayerKind::Persistent)
-            {
-                let touched = slot.layer.touch(address, etag, stamp);
-                persistent_access_changed |= touched && slot.writable;
-            }
-            return (Some(value), persistent_access_changed);
         }
 
         self.work.for_family_mut(family).misses += 1;
-        (None, false)
+        CacheGet::Ready {
+            value: None,
+            persistent_access_changed: false,
+        }
+    }
+
+    fn finish_restore<V>(
+        &mut self,
+        family: CacheItemFamily,
+        address: &CacheAddress,
+        etag: Option<&CacheETag>,
+        stamp: AccessStamp,
+        plan: CacheRestore,
+        restored: Option<CacheEntry>,
+    ) -> CacheGet<V>
+    where
+        V: Send + Sync + 'static,
+    {
+        for index in 0..plan.layer_index {
+            if let CacheLayerLookup::Hit(entry) = self.layers[index].layer.lookup(address, etag)
+                && let Some((value, persistent_access_changed)) =
+                    self.use_entry(family, address, etag, stamp, index, entry)
+            {
+                return CacheGet::Ready {
+                    value: Some(value),
+                    persistent_access_changed,
+                };
+            }
+        }
+
+        match self.layers[plan.layer_index].layer.lookup(address, etag) {
+            CacheLayerLookup::Hit(entry) => {
+                if let Some((value, persistent_access_changed)) =
+                    self.use_entry(family, address, etag, stamp, plan.layer_index, entry)
+                {
+                    return CacheGet::Ready {
+                        value: Some(value),
+                        persistent_access_changed,
+                    };
+                }
+            }
+            CacheLayerLookup::Deferred(current) if current.reads_from(&plan.restore) => {
+                if let Some(entry) = restored
+                    && let Some((value, persistent_access_changed)) =
+                        self.use_entry(family, address, etag, stamp, plan.layer_index, entry)
+                {
+                    return CacheGet::Ready {
+                        value: Some(value),
+                        persistent_access_changed,
+                    };
+                }
+            }
+            CacheLayerLookup::Deferred(current) => {
+                return CacheGet::Deferred(CacheRestore {
+                    layer_index: plan.layer_index,
+                    restore: current,
+                });
+            }
+            CacheLayerLookup::Miss => {}
+        }
+
+        self.work.for_family_mut(family).misses += 1;
+        CacheGet::Ready {
+            value: None,
+            persistent_access_changed: false,
+        }
+    }
+
+    fn use_entry<V>(
+        &mut self,
+        family: CacheItemFamily,
+        address: &CacheAddress,
+        etag: Option<&CacheETag>,
+        stamp: AccessStamp,
+        layer_index: usize,
+        entry: CacheEntry,
+    ) -> Option<(Arc<V>, bool)>
+    where
+        V: Send + Sync + 'static,
+    {
+        let value = entry.value::<V>()?;
+        if layer_index > 0 {
+            for earlier in &mut self.layers[..layer_index] {
+                if earlier.writable {
+                    earlier.layer.store(address.clone(), entry.clone());
+                }
+            }
+            self.work.for_family_mut(family).restores += 1;
+        }
+        self.work.for_family_mut(family).hits += 1;
+        let persistent_access_changed = self
+            .layers
+            .iter()
+            .filter(|slot| slot.kind == CacheLayerKind::Persistent && slot.writable)
+            .find_map(|slot| slot.layer.plan_touch(address, etag, stamp))
+            .is_some_and(|touch| touch.apply());
+        Some((value, persistent_access_changed))
     }
 
     fn store<V>(
@@ -1231,6 +1510,17 @@ impl Cache {
             .iter()
             .find(|slot| slot.kind == CacheLayerKind::Persistent)
             .is_some_and(|slot| slot.layer.has_publication())
+    }
+
+    #[cfg(test)]
+    fn install_restore_barrier(&mut self, barrier: RestoreBarrier) {
+        if let Some(slot) = self
+            .layers
+            .iter_mut()
+            .find(|slot| slot.kind == CacheLayerKind::Persistent)
+        {
+            slot.layer.install_restore_barrier(barrier);
+        }
     }
 }
 
@@ -1422,33 +1712,48 @@ impl ResolveRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModuleBuildRecord {
-    parsed: ParsedModule,
-    source: String,
-    source_hash: Option<u64>,
+    built_content: Arc<BuiltModuleContent>,
     snapshot: Snapshot,
 }
 
 impl ModuleBuildRecord {
-    pub(crate) fn new(parsed: ParsedModule, source: String, snapshot: Snapshot) -> Self {
-        let source_hash = Some(stable_hash(&source));
+    pub(crate) fn new(built_content: Arc<BuiltModuleContent>, snapshot: Snapshot) -> Self {
         Self {
-            parsed,
-            source,
-            source_hash,
+            built_content,
             snapshot,
         }
     }
 
     pub(crate) fn parsed(&self) -> &ParsedModule {
-        &self.parsed
+        self.built_content.parsed()
     }
 
-    pub(crate) fn cloned_parts(&self) -> (ParsedModule, String, Option<u64>) {
-        (self.parsed.clone(), self.source.clone(), self.source_hash)
+    pub(crate) fn built_content(&self) -> &Arc<BuiltModuleContent> {
+        &self.built_content
     }
 
-    pub(crate) fn source_hash(&self) -> Option<u64> {
-        self.source_hash
+    pub(crate) fn persistent_parts(&self) -> (&ParsedModule, &str, Option<u64>) {
+        (
+            self.built_content.parsed(),
+            self.built_content.source(),
+            Some(self.built_content.source_hash()),
+        )
+    }
+
+    pub(crate) fn from_persistent_parts(
+        parsed: ParsedModule,
+        source: String,
+        source_hash: u64,
+        snapshot: Snapshot,
+    ) -> Self {
+        Self {
+            built_content: Arc::new(BuiltModuleContent::from_persistent_parts(
+                parsed,
+                source,
+                source_hash,
+            )),
+            snapshot,
+        }
     }
 
     pub(crate) fn snapshot(&self) -> &Snapshot {
@@ -1497,13 +1802,14 @@ impl BuildCache {
         diagnostics.profile(
             "restore items=0; deserialization items=0; contract=trusted-local,linux-supported,single-writer coordination=none",
         );
-        let inner = BuildCacheInner::new(&options, clock, diagnostics.clone());
+        let inner = BuildCacheInner::new(&options, Arc::clone(&clock), diagnostics.clone());
         Self {
             options,
             build_dependency_snapshot_strategy,
             resolve_build_dependency_snapshot_strategy,
             build_dependency_file_system_info,
             diagnostics,
+            clock,
             inner: Arc::new(Mutex::new(inner)),
         }
     }
@@ -1518,6 +1824,13 @@ impl BuildCache {
 
     pub(crate) fn module_builds(&self) -> ModuleBuildCache {
         self.facade(MODULE_BUILD_CACHE_NAMESPACE, CacheItemFamily::ModuleBuild)
+    }
+
+    pub(crate) fn code_generations(&self) -> CacheFacade<ModuleIdentity, CodeGenerationRecord> {
+        self.facade(
+            CODE_GENERATION_CACHE_NAMESPACE,
+            CacheItemFamily::CodeGeneration,
+        )
     }
 
     pub(crate) fn asset_renders<K>(&self) -> CacheFacade<K, RenderedSource> {
@@ -1608,7 +1921,9 @@ impl BuildCache {
             .lock()
             .expect("build cache mutex should not be poisoned");
         let build_validation_strategy = if !build_inputs.is_empty()
-            && build_inputs.iter().all(|path| automatic_build_inputs.contains(path))
+            && build_inputs
+                .iter()
+                .all(|path| automatic_build_inputs.contains(path))
         {
             SnapshotStrategy::timestamp()
         } else {
@@ -1684,11 +1999,18 @@ impl BuildCache {
         if let Some(error) = &inner.persistent_guard_error {
             return Err(io::Error::new(io::ErrorKind::InvalidData, error.clone()));
         }
-        let guard = inner.persistent_guard.clone().unwrap_or_else(|| PackFileGuardDto {
-            version: self.cache_version().into_bytes(),
-            build_dependencies: SnapshotDto { entries: Vec::new() },
-            resolve_build_dependencies: SnapshotDto { entries: Vec::new() },
-        });
+        let guard = inner
+            .persistent_guard
+            .clone()
+            .unwrap_or_else(|| PackFileGuardDto {
+                version: self.cache_version().into_bytes(),
+                build_dependencies: SnapshotDto {
+                    entries: Vec::new(),
+                },
+                resolve_build_dependencies: SnapshotDto {
+                    entries: Vec::new(),
+                },
+            });
         let stamp = inner.clock.now();
         inner
             .cache
@@ -1708,6 +2030,19 @@ impl BuildCache {
             .lock()
             .expect("build cache mutex should not be poisoned")
             .publish_barrier = Some(PublishBarrier { entered, release });
+    }
+
+    #[cfg(test)]
+    fn install_restore_barrier(
+        &self,
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        self.inner
+            .lock()
+            .expect("build cache mutex should not be poisoned")
+            .cache
+            .install_restore_barrier(RestoreBarrier { entered, release });
     }
 
     pub(crate) fn flush_to_filesystem(&self) -> io::Result<()> {
@@ -1805,29 +2140,61 @@ where
             return None;
         }
 
-        let mut inner = self
-            .build_cache
-            .inner
-            .lock()
-            .expect("build cache mutex should not be poisoned");
         let address = CacheAddress {
             namespace: self.namespace,
             identifier: key.cache_identifier(),
         };
         // Access timestamps only matter for the filesystem layer. Avoid a clock
-        // syscall on every cache lookup for disabled/memory caches (the hot path
-        // used by the make-phase benchmark).
-        let stamp = if self.build_cache.options.kind == CacheKind::Filesystem {
-            inner.clock.now()
+        // syscall for memory caches and read-only persistent caches, which never
+        // record access updates.
+        let stamp = if self.build_cache.options.kind == CacheKind::Filesystem
+            && !self.build_cache.options.readonly
+        {
+            self.build_cache.clock.now()
         } else {
             AccessStamp::from_millis(0)
         };
-        let (value, persistent_access_changed) =
-            inner.cache.get(self.family, &address, etag, stamp);
-        if persistent_access_changed {
-            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+
+        let mut result = {
+            let mut inner = self
+                .build_cache
+                .inner
+                .lock()
+                .expect("build cache mutex should not be poisoned");
+            let result = inner.cache.begin_get(self.family, &address, etag, stamp);
+            if result.persistent_access_changed() {
+                inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+            }
+            result
+        };
+
+        loop {
+            match result {
+                CacheGet::Ready { value, .. } => return value,
+                CacheGet::Deferred(plan) => {
+                    let restored = plan.restore.restore();
+                    result = {
+                        let mut inner = self
+                            .build_cache
+                            .inner
+                            .lock()
+                            .expect("build cache mutex should not be poisoned");
+                        let result = inner.cache.finish_restore(
+                            self.family,
+                            &address,
+                            etag,
+                            stamp,
+                            plan,
+                            restored,
+                        );
+                        if result.persistent_access_changed() {
+                            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+                        }
+                        result
+                    };
+                }
+            }
         }
-        value
     }
 
     pub(crate) fn store(&self, key: K, etag: Option<CacheETag>, value: V) {
@@ -1835,15 +2202,15 @@ where
             return;
         }
 
+        let address = CacheAddress {
+            namespace: self.namespace,
+            identifier: key.cache_identifier(),
+        };
         let mut inner = self
             .build_cache
             .inner
             .lock()
             .expect("build cache mutex should not be poisoned");
-        let address = CacheAddress {
-            namespace: self.namespace,
-            identifier: key.cache_identifier(),
-        };
         if inner.cache.store(self.family, address, etag, value) {
             inner.dirty_generation = inner.dirty_generation.saturating_add(1);
         }
@@ -1874,6 +2241,7 @@ fn persistent_codec_registry() -> CodecRegistry {
     CodecRegistry::new()
         .with_resolve_record(ResolveRecordCodec::current())
         .with_module_build_record(ModuleBuildRecordCodec::current())
+        .with_code_generation_record(CodeGenerationRecordCodec::current())
         .with_asset_render_record(AssetRenderRecordCodec::current())
 }
 
@@ -2091,6 +2459,118 @@ mod tests {
                 evictions: 1,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn slow_persistent_decode_does_not_block_memory_or_other_persistent_hits()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let resource = temp.path().join("src/dep.js");
+        write(&resource, "export const value = 1;")?;
+        let file_system_info = FileSystemInfo::new();
+        let record = ResolveRecord::new(
+            ModuleIdentity::new(resource.clone()),
+            resource.clone(),
+            BTreeSet::from([resource]),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            &file_system_info,
+            SnapshotStrategy::timestamp(),
+        )
+        .await?;
+        let persistent_key = ResolveRequest::new(temp.path(), "./persistent");
+        let other_persistent_key = ResolveRequest::new(temp.path(), "./other-persistent");
+        let memory_key = ResolveRequest::new(temp.path(), "./memory");
+        let mut options = CacheOptions::filesystem();
+        options.cache_location = Some(temp.path().join("cache"));
+
+        let first = BuildCache::new(options.clone(), SnapshotOptions::default());
+        first
+            .normal_module_factory()
+            .store(persistent_key.clone(), None, record.clone());
+        first
+            .normal_module_factory()
+            .store(other_persistent_key.clone(), None, record.clone());
+        first.flush_to_filesystem()?;
+        drop(first);
+
+        options.readonly = true;
+        let clock = Arc::new(ManualCacheClock::at_millis(1_000));
+        let second =
+            BuildCache::new_with_clock(options, SnapshotOptions::default(), Arc::clone(&clock));
+        let facade = second.normal_module_factory();
+        facade.store(memory_key.clone(), None, record);
+        let restore_entered = Arc::new(std::sync::Barrier::new(2));
+        let restore_release = Arc::new(std::sync::Barrier::new(2));
+        second.install_restore_barrier(restore_entered.clone(), restore_release.clone());
+
+        let restore_facade = facade.clone();
+        let restore_thread = std::thread::spawn(move || restore_facade.get(&persistent_key, None));
+        restore_entered.wait();
+
+        let memory_facade = facade.clone();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let memory_thread = std::thread::spawn(move || {
+            completed_tx
+                .send(memory_facade.get(&memory_key, None).is_some())
+                .expect("memory-hit observation should still be received");
+        });
+        let completed_before_restore_release =
+            completed_rx.recv_timeout(Duration::from_secs(1)).ok();
+
+        let other_persistent_facade = facade.clone();
+        let (other_completed_tx, other_completed_rx) = std::sync::mpsc::channel();
+        let other_persistent_thread = std::thread::spawn(move || {
+            other_completed_tx
+                .send(
+                    other_persistent_facade
+                        .get(&other_persistent_key, None)
+                        .is_some(),
+                )
+                .expect("persistent-hit observation should still be received");
+        });
+        let other_completed_before_restore_release =
+            other_completed_rx.recv_timeout(Duration::from_secs(1)).ok();
+
+        restore_release.wait();
+        assert!(
+            restore_thread
+                .join()
+                .expect("restore thread should finish")
+                .is_some()
+        );
+        memory_thread
+            .join()
+            .expect("memory-hit thread should finish");
+        other_persistent_thread
+            .join()
+            .expect("other persistent-hit thread should finish");
+        assert_eq!(
+            completed_before_restore_release,
+            Some(true),
+            "persistent deserialization must not hold the global BuildCache lock"
+        );
+        assert_eq!(
+            other_completed_before_restore_release,
+            Some(true),
+            "record decoding must not hold the PackFile reader lock"
+        );
+        assert_eq!(
+            clock.calls(),
+            0,
+            "read-only cache hits do not need access stamps"
+        );
+        assert_eq!(
+            second.work_counters().for_family(CacheItemFamily::Resolve),
+            CacheItemWork {
+                hits: 3,
+                misses: 0,
+                stores: 1,
+                restores: 2,
+                evictions: 0,
+            }
+        );
+        Ok(())
     }
 
     #[test]

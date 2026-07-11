@@ -79,7 +79,7 @@ export function toSummaryMarkdown(report, baselineReport) {
   ].filter(([, results]) => results.length > 0);
 
   const summary = groups
-    .map(([heading, results]) => `${heading}\n\n${toSummaryTable(results, baselines, baselineReport)}`)
+    .map(([heading, results]) => `${heading}\n\n${toSummaryTable(results, baselines)}`)
     .join("\n\n");
   const comparisonNote = baselineReport
     ? "\n\n> Delta is `(current - main) / main`. Positive timing deltas mean slower than the latest main result; negative timing deltas mean faster."
@@ -88,16 +88,11 @@ export function toSummaryMarkdown(report, baselineReport) {
   return `${summary}${comparisonNote}\n`;
 }
 
-function toSummaryTable(results, baselines, baselineReport) {
-  const lines = baselineReport
-    ? [
-        "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | no_cache_build_ms | output_bytes | cold_delta_vs_main | warm_delta_vs_main | no_cache_delta_vs_main | output_delta_vs_main | status |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
-      ]
-    : [
-        "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | no_cache_build_ms | output_bytes | status |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"
-      ];
+function toSummaryTable(results, baselines) {
+  const lines = [
+    "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | no_cache_build_ms | output_bytes | status |",
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"
+  ];
 
   for (const result of results) {
     const baseline = baselines.get(resultKey(result));
@@ -106,18 +101,10 @@ function toSummaryTable(results, baselines, baselineReport) {
         result.fixture,
         result.bundler,
         result.version_source ?? "",
-        formatNumber(result.cold_build_ms),
-        formatNumber(result.warm_build_ms),
-        formatNumber(result.no_cache_build_ms),
-        formatNumber(result.output_bytes, 0),
-        ...(baselineReport
-          ? [
-              formatDelta(result.cold_build_ms, baseline?.cold_build_ms),
-              formatDelta(result.warm_build_ms, baseline?.warm_build_ms),
-              formatDelta(result.no_cache_build_ms, baseline?.no_cache_build_ms),
-              formatDelta(result.output_bytes, baseline?.output_bytes)
-            ]
-          : []),
+        formatMeasurement(result.cold_build_ms, baseline?.cold_build_ms),
+        formatMeasurement(result.warm_build_ms, baseline?.warm_build_ms),
+        formatMeasurement(result.no_cache_build_ms, baseline?.no_cache_build_ms),
+        formatMeasurement(result.output_bytes, baseline?.output_bytes, 0),
         result.status
       ].join(" | ").replace(/^/, "| ").replace(/$/, " |")
     );
@@ -130,12 +117,14 @@ function resultKey(result) {
   return `${result.fixture}\0${result.bundler}`;
 }
 
-function formatDelta(current, baseline) {
+function formatMeasurement(current, baseline, digits = 1) {
+  const value = formatNumber(current, digits);
   if (!Number.isFinite(current) || !Number.isFinite(baseline) || baseline === 0) {
-    return "—";
+    return value;
   }
   const percentage = ((current - baseline) / baseline) * 100;
-  return `${percentage >= 0 ? "+" : ""}${percentage.toFixed(1)}%`;
+  const delta = `${percentage >= 0 ? "+" : ""}${percentage.toFixed(1)}%`;
+  return `${value} (${delta})`;
 }
 
 async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, options }) {

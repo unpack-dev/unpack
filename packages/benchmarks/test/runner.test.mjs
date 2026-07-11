@@ -52,21 +52,22 @@ test("summary compares measurements with matching latest main results", () => {
     { results: [baseline] }
   );
 
-  assert.match(summary, /cold_delta_vs_main/);
-  assert.match(summary, /warm_delta_vs_main/);
-  assert.match(summary, /no_cache_delta_vs_main/);
-  assert.match(summary, /output_delta_vs_main/);
-  assert.match(summary, /\| \+25\.0% \| \+100\.0% \| -20\.0% \| -50\.0% \| success \|/);
+  assert.doesNotMatch(summary, /delta_vs_main/);
+  assert.match(
+    summary,
+    /\| 10\.0 \(\+25\.0%\) \| 5\.0 \(\+100\.0%\) \| 8\.0 \(-20\.0%\) \| 100 \(-50\.0%\) \| success \|/
+  );
   assert.match(summary, /Positive timing deltas mean slower than the latest main result/);
 });
 
-test("summary displays unavailable deltas when main has no matching result", () => {
+test("summary omits inline deltas when main has no matching result", () => {
   const summary = toSummaryMarkdown(
     { results: [summaryResult({ fixture: "large", bundler: "unpack" })] },
     { results: [summaryResult({ fixture: "loader", bundler: "unpack" })] }
   );
 
-  assert.match(summary, /\| — \| — \| — \| — \| success \|/);
+  assert.match(summary, /\| 10\.0 \| 5\.0 \| 8\.0 \| 100 \| success \|/);
+  assert.doesNotMatch(summary, /\([+-][\d.]+%\)/);
 });
 
 test("runner emits persistent-cache and no-cache measurements for a verified bundle", async () => {

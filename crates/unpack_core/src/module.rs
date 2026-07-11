@@ -124,6 +124,10 @@ impl Module {
         &self.exports_info
     }
 
+    pub(crate) fn exports_info_mut(&mut self) -> &mut ExportsInfo {
+        &mut self.exports_info
+    }
+
     pub fn source(&self) -> &str {
         self.built_content.source()
     }

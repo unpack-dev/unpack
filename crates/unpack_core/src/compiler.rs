@@ -39,6 +39,8 @@ pub struct CompilerOptions {
     pub loader_runner: Option<Arc<dyn LoaderRunner>>,
     pub parallelism: usize,
     pub sourcemap: bool,
+    pub provided_exports: bool,
+    pub used_exports: bool,
 }
 
 impl CompilerOptions {
@@ -54,6 +56,8 @@ impl CompilerOptions {
             loader_runner: None,
             parallelism: 100,
             sourcemap: true,
+            provided_exports: true,
+            used_exports: true,
         }
     }
 }

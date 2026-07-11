@@ -150,13 +150,42 @@ test("done exposes webpack-shaped ModuleGraph queries with cached grouping", asy
       moduleGraph.getReadOnlyExportInfo(shared, "shared")
     );
     assert.equal(moduleGraph.getExportInfo(shared, "shared").provided, true);
-    assert.equal(moduleGraph.getUsedExports(shared), null);
+    assert.deepEqual(moduleGraph.getUsedExports(shared), new Set(["shared"]));
     inspected = true;
   });
 
   try {
     const stats = await runCompiler(compiler);
     assert.equal(stats.hasErrors(), false);
+    assert.equal(inspected, true);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("optimization providedExports and usedExports control ModuleGraph export metadata", async () => {
+  const fixture = await createGraphFixture();
+  const compiler = unpack({
+    context: fixture,
+    mode: "production",
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist") },
+    sourcemap: false,
+    optimization: { providedExports: false, usedExports: false }
+  });
+  assert.ok(compiler);
+  let inspected = false;
+  compiler.hooks.done.tap("inspect disabled export analysis", (stats) => {
+    const shared = findModule(stats.compilation.modules, "/src/shared.js");
+    assert.equal(stats.compilation.moduleGraph.getProvidedExports(shared), null);
+    assert.equal(stats.compilation.moduleGraph.isExportProvided(shared, "shared"), null);
+    assert.equal(stats.compilation.moduleGraph.getUsedExports(shared), null);
+    inspected = true;
+  });
+
+  try {
+    await runCompiler(compiler);
     assert.equal(inspected, true);
   } finally {
     await closeCompiler(compiler);

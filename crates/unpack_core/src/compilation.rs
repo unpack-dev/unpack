@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use tokio::sync::Mutex;
 
@@ -133,6 +137,8 @@ impl Compilation {
                     .collect(),
             };
 
+            self.analyze_exports();
+
             if result.is_ok() {
                 self.log_infrastructure(
                     InfrastructureLogLevel::Verbose,
@@ -145,6 +151,114 @@ impl Compilation {
         }
         .instrument(tracing::trace_span!("Compilation::make"))
         .await
+    }
+
+    fn analyze_exports(&mut self) {
+        if !self.options.provided_exports {
+            for module in self
+                .module_graph
+                .modules()
+                .iter()
+                .map(|module| module.handle())
+                .collect::<Vec<_>>()
+            {
+                if let Some(module) = self.module_graph.module_mut(module) {
+                    module.exports_info_mut().clear_provided_exports();
+                }
+            }
+        }
+        if !self.options.used_exports {
+            return;
+        }
+        let mut used: HashMap<ModuleHandle, (bool, BTreeSet<String>)> = self
+            .module_graph
+            .modules()
+            .iter()
+            .map(|module| (module.handle(), (false, BTreeSet::new())))
+            .collect();
+        for entry in &self.entries {
+            let provided = self
+                .module_graph
+                .module(*entry)
+                .and_then(|module| module.exports_info().provided_exports())
+                .map(|exports| exports.map(str::to_string).collect::<Vec<_>>());
+            let entry_usage = used.entry(*entry).or_default();
+            if let Some(provided) = provided {
+                entry_usage.1.extend(provided);
+            } else {
+                entry_usage.0 = true;
+            }
+        }
+
+        loop {
+            let mut changed = false;
+            for connection in self.module_graph.connections() {
+                if matches!(connection.dependency, crate::Dependency::Import(_)) {
+                    let target = used.entry(connection.module).or_default();
+                    changed |= !target.0;
+                    target.0 = true;
+                    continue;
+                }
+                let requested = match &connection.dependency {
+                    crate::Dependency::HarmonyImportSpecifier(dep) => dep.ids.first(),
+                    crate::Dependency::HarmonyExportImportedSpecifier(dep) => {
+                        let origin_uses_export = dep.name.as_ref().is_some_and(|name| {
+                            connection.origin_module.is_some_and(|origin| {
+                                used.get(&origin)
+                                    .is_some_and(|(all, names)| *all || names.contains(name))
+                            })
+                        });
+                        if origin_uses_export {
+                            dep.ids.first()
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(name) = requested {
+                    changed |= used
+                        .entry(connection.module)
+                        .or_default()
+                        .1
+                        .insert(name.clone());
+                } else if let crate::Dependency::HarmonyExportImportedSpecifier(dep) =
+                    &connection.dependency
+                {
+                    if dep.is_star {
+                        let origin_usage = connection
+                            .origin_module
+                            .and_then(|origin| used.get(&origin))
+                            .cloned()
+                            .unwrap_or_default();
+                        let target = used.entry(connection.module).or_default();
+                        if origin_usage.0 {
+                            changed |= !target.0;
+                            target.0 = true;
+                        } else {
+                            let previous_len = target.1.len();
+                            target.1.extend(
+                                origin_usage.1.into_iter().filter(|name| name != "default"),
+                            );
+                            changed |= target.1.len() != previous_len;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        for (handle, (all, names)) in used {
+            if let Some(module) = self.module_graph.module_mut(handle) {
+                if all {
+                    module.exports_info_mut().set_all_exports_used();
+                } else {
+                    module.exports_info_mut().set_used_exports(Some(names));
+                }
+            }
+        }
     }
 
     pub fn build_chunk_graph(&mut self) {

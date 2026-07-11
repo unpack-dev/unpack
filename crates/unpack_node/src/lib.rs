@@ -65,6 +65,10 @@ pub struct NativeCompilerOptions {
     #[napi(js_name = "infrastructureLogging")]
     pub infrastructure_logging: NativeInfrastructureLoggingOptions,
     pub sourcemap: bool,
+    #[napi(js_name = "providedExports")]
+    pub provided_exports: bool,
+    #[napi(js_name = "usedExports")]
+    pub used_exports: bool,
     #[napi(js_name = "moduleRules")]
     pub module_rules: Vec<NativeModuleRule>,
 }
@@ -184,7 +188,11 @@ pub struct NativeModule {
     #[napi(js_name = "type")]
     pub module_type: String,
     #[napi(js_name = "providedExports")]
-    pub provided_exports: Vec<String>,
+    pub provided_exports: Option<Vec<String>>,
+    #[napi(js_name = "usedExports")]
+    pub used_exports: Option<Vec<String>>,
+    #[napi(js_name = "allExportsUsed")]
+    pub all_exports_used: bool,
 }
 
 #[napi(object)]
@@ -494,6 +502,8 @@ impl NativeCompiler {
         compiler_options.infrastructure_logging =
             infrastructure_logging_options_from_native(options.infrastructure_logging);
         compiler_options.sourcemap = options.sourcemap;
+        compiler_options.provided_exports = options.provided_exports;
+        compiler_options.used_exports = options.used_exports;
         compiler_options.module_rules = options
             .module_rules
             .into_iter()
@@ -772,8 +782,12 @@ fn native_module(module: &Module) -> NativeModule {
         provided_exports: module
             .exports_info()
             .provided_exports()
-            .map(str::to_string)
-            .collect(),
+            .map(|exports| exports.map(str::to_string).collect()),
+        used_exports: module
+            .exports_info()
+            .used_exports()
+            .map(|exports| exports.map(str::to_string).collect()),
+        all_exports_used: module.exports_info().are_all_exports_used(),
     }
 }
 

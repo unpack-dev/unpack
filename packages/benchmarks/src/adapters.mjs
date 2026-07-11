@@ -15,6 +15,7 @@ const DEFAULT_UNPACK_TRACING_FILTER = "unpack_core=trace,unpack_node=trace";
 const TURBOPACK_TRACING_ENV = "TURBOPACK_TRACING";
 const DEFAULT_TURBOPACK_TRACING_FILTER = "turbo-tasks";
 const METRO_COMMONJS_TRANSFORMER = require.resolve("./metro-commonjs-transformer.cjs");
+const SWC_LOADER = require.resolve("swc-loader");
 const UNPACK_PACKAGE_ROOT = resolve(dirname(require.resolve("@unpack-js/core")), "..");
 
 export const adapters = {
@@ -317,7 +318,6 @@ export const adapters = {
 
   turbopack: {
     name: "turbopack",
-    supportsLoaderFixture: true,
     outputDir: ({ fixture }) => join(fixture.context, "dist"),
     versionSource: ({ options }) => {
       if (options.turbopackBinary) {
@@ -372,8 +372,6 @@ export const adapters = {
           "Turbopack requires --turbopack-binary or --turbopack-repo pointing at a fixed Next.js checkout"
         );
       }
-      await materializeTurbopackLoaderFixture(fixture);
-
       const args = [
         "build",
         "--dir",
@@ -533,11 +531,24 @@ function webpackLoaderRules(fixture) {
   }
 
   return [
-    {
-      test: /\.benchdata$/,
-      loader: join(fixture.context, "loaders/benchmark-loader.cjs")
-    }
+    swcLoaderRule(/\.js$/, "ecmascript"),
+    swcLoaderRule(/\.ts$/, "typescript")
   ];
+}
+
+function swcLoaderRule(test, syntax) {
+  return {
+    test,
+    loader: SWC_LOADER,
+    options: {
+      jsc: {
+        parser: { syntax },
+        target: "es2022"
+      },
+      module: { type: "es6" },
+      sourceMaps: false
+    }
+  };
 }
 
 function assertNoWebpackLoaderFixture(fixture, bundler) {
@@ -546,39 +557,6 @@ function assertNoWebpackLoaderFixture(fixture, bundler) {
   }
 
   throw unsupported(`${bundler} does not support the loader benchmark fixture`);
-}
-
-async function materializeTurbopackLoaderFixture(fixture) {
-  if (!fixture.requiresWebpackLoaders) {
-    return;
-  }
-
-  const entryPath = resolve(fixture.context, fixture.entry);
-  const entrySource = await readFile(entryPath, "utf8");
-  const rewrittenEntrySource = entrySource.replace(
-    /(\.\/loader-data\/item\d+\.benchdata)(?=")/g,
-    "$1.js"
-  );
-  if (rewrittenEntrySource !== entrySource) {
-    await writeFile(entryPath, rewrittenEntrySource, "utf8");
-  }
-
-  for (let index = 0; index < fixture.loaderModuleCount; index += 1) {
-    const dataPath = join(fixture.context, `src/loader-data/item${index}.benchdata`);
-    const value = Number.parseInt((await readFile(dataPath, "utf8")).trim(), 10);
-    if (!Number.isFinite(value)) {
-      throw new Error(`benchmark loader expected a numeric payload in ${dataPath}`);
-    }
-    await writeFile(
-      `${dataPath}.js`,
-      [
-        `const value = ${value};`,
-        "export default value;",
-        "export { value as loadedValue };"
-      ].join("\n") + "\n",
-      "utf8"
-    );
-  }
 }
 
 function runUnpackCompiler(compiler) {

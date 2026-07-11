@@ -1,8 +1,10 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
+
+use dashmap::DashMap;
 use tokio::sync::OnceCell;
 
 use crate::{
@@ -25,8 +27,7 @@ pub struct NormalModuleFactory {
 
 // Per-compilation singleflight cache; separate from BuildCache so cache:false
 // still coalesces duplicate factory work within one make run.
-type RuntimeFactorizeCache =
-    Arc<Mutex<HashMap<ResolveRequest, Arc<OnceCell<Result<FactorizedModule>>>>>>;
+type RuntimeFactorizeCache = Arc<DashMap<ResolveRequest, Arc<OnceCell<Result<FactorizedModule>>>>>;
 
 impl NormalModuleFactory {
     pub(crate) fn new(
@@ -41,7 +42,7 @@ impl NormalModuleFactory {
             cache,
             file_system_info,
             resolve_snapshot_strategy,
-            runtime_factorize_cache: Arc::new(Mutex::new(HashMap::new())),
+            runtime_factorize_cache: Arc::new(DashMap::new()),
             snapshot_cache,
             module_rules: Vec::new(),
         }
@@ -85,16 +86,11 @@ impl NormalModuleFactory {
         request: &str,
         resolve_request: ResolveRequest,
     ) -> Result<FactorizedModule> {
-        let cell = {
-            let mut cache = self
-                .runtime_factorize_cache
-                .lock()
-                .expect("runtime factorize cache mutex should not be poisoned");
-            cache
-                .entry(resolve_request.clone())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
-        };
+        let cell = self
+            .runtime_factorize_cache
+            .entry(resolve_request.clone())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone();
 
         cell.get_or_init(|| async {
             self.factorize_uncached(context, request, resolve_request)
@@ -234,14 +230,7 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(build_cache.stats().resolve_entries, 0);
-        assert_eq!(
-            factory
-                .runtime_factorize_cache
-                .lock()
-                .expect("runtime factorize cache mutex should not be poisoned")
-                .len(),
-            1
-        );
+        assert_eq!(factory.runtime_factorize_cache.len(), 1);
 
         Ok(())
     }

@@ -52,7 +52,8 @@ impl CompilerOptions {
             infrastructure_logging: InfrastructureLoggingOptions::disabled(),
             module_rules: Vec::new(),
             loader_runner: None,
-            parallelism: 100,
+      parallelism: std::thread::available_parallelism()
+        .map_or(16, |parallelism| (parallelism.get() * 4).clamp(16, 32)),
             sourcemap: true,
         }
     }

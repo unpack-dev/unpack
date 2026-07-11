@@ -633,7 +633,7 @@ fn module_graph(graph: &unpack_core::ModuleGraph) -> NativeModuleGraph {
                 weak: dependency_is_weak(&connection.dependency),
                 parent_block_index: connection
                     .origin_dependency_id
-                    .and_then(|index| i32::try_from(index).ok())
+                    .and_then(|id| i32::try_from(id.index()).ok())
                     .unwrap_or(-1),
             })
             .collect(),

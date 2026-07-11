@@ -18,6 +18,7 @@ const DEFAULT_TURBOPACK_TRACING_FILTER = "turbo-tasks";
 const METRO_COMMONJS_TRANSFORMER = require.resolve("./metro-commonjs-transformer.cjs");
 const SWC_LOADER = require.resolve("swc-loader");
 const UNPACK_PACKAGE_ROOT = resolve(dirname(require.resolve("@unpack-js/core")), "..");
+const RSPACK_PACKAGE_ROOT = resolve(dirname(require.resolve("@rspack/core")), "..");
 
 export const adapters = {
   unpack: {
@@ -460,8 +461,73 @@ export function createRspackBenchmarkConfig({
   persistentCache = true,
   cacheReadonly = false
 }) {
+  const baseConfig = webpackLikeConfig({ fixture, outputDir });
   return {
-    ...webpackLikeConfig({ fixture, outputDir }),
+    ...baseConfig,
+    resolve: rspackResolveConfig(),
+    externalsPresets: {
+      node: false
+    },
+    output: {
+      ...baseConfig.output,
+      module: false,
+      iife: false,
+      chunkFormat: "commonjs",
+      chunkLoading: "require",
+      workerChunkLoading: false,
+      wasmLoading: false,
+      workerWasmLoading: false,
+      asyncChunks: true,
+      pathinfo: false,
+      strictModuleErrorHandling: false,
+      compareBeforeEmit: false
+    },
+    module: {
+      ...(baseConfig.module ?? {}),
+      parser: {
+        javascript: {
+          commonjs: false,
+          commonjsMagicComments: false,
+          createRequire: false,
+          exportsPresence: false,
+          importDynamic: true,
+          importMeta: false,
+          importMetaResolve: false,
+          requireAlias: false,
+          requireAsExpression: false,
+          requireDynamic: false,
+          requireResolve: false,
+          url: false,
+          worker: false
+        }
+      }
+    },
+    amd: false,
+    node: false,
+    performance: false,
+    experiments: {
+      asyncWebAssembly: false
+    },
+    optimization: {
+      moduleIds: "named",
+      chunkIds: "named",
+      minimize: false,
+      mergeDuplicateChunks: false,
+      splitChunks: false,
+      runtimeChunk: false,
+      removeEmptyChunks: true,
+      realContentHash: false,
+      sideEffects: false,
+      providedExports: true,
+      concatenateModules: false,
+      innerGraph: false,
+      usedExports: false,
+      mangleExports: false,
+      inlineExports: false,
+      nodeEnv: false,
+      emitOnErrors: true,
+      avoidEntryIife: false
+    },
     cache: persistentCache
       ? {
           type: "persistent",
@@ -469,9 +535,29 @@ export function createRspackBenchmarkConfig({
             type: "filesystem",
             directory: cacheDir
           },
+          snapshot: {
+            managedPaths: [RSPACK_PACKAGE_ROOT]
+          },
           readonly: cacheReadonly
         }
       : false
+  };
+}
+
+function rspackResolveConfig() {
+  return {
+    ...unpackResolvePolicy(),
+    byDependency: {
+      esm: unpackResolvePolicy()
+    }
+  };
+}
+
+function unpackResolvePolicy() {
+  return {
+    conditionNames: [],
+    extensions: [".ts", ".tsx", ".js", ".jsx"],
+    mainFields: ["main"]
   };
 }
 

@@ -25,6 +25,16 @@ pub enum Error {
     #[error("failed to parse {path}: {message}")]
     Parse { path: PathBuf, message: String },
 
+    #[error("loader {loader} failed for {path}: {message}")]
+    Loader {
+        loader: PathBuf,
+        path: PathBuf,
+        message: String,
+    },
+
+    #[error("loader rules failed for {path}: {message}")]
+    LoaderRules { path: PathBuf, message: String },
+
     #[error("unsupported dynamic import in {path}: {message}")]
     UnsupportedDynamicImport { path: PathBuf, message: String },
 
@@ -55,6 +65,8 @@ impl Error {
             Self::Resolve { .. }
                 | Self::Read { .. }
                 | Self::Parse { .. }
+                | Self::Loader { .. }
+                | Self::LoaderRules { .. }
                 | Self::UnsupportedDynamicImport { .. }
                 | Self::CodeGeneration { .. }
         )

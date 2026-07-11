@@ -35,13 +35,19 @@ Necessity:
 
 ## Normal module factory
 
-Unpack's `NormalModuleFactory` only resolves a dependency request and builds a `ModuleIdentity`. The identity already has fields for `module_type`, `resource`, `query`, `fragment`, `layer`, and `loaders`, but today only `JavaScriptAuto` modules with no loaders are created.
+Unpack's `NormalModuleFactory` resolves a dependency request, matches the
+optional minimal `module.rules` condition, and builds a `ModuleIdentity`. The
+first loader slice supports non-overlapping unflagged regular-expression rules,
+absolute CommonJS loaders, JSON options, direct string or Promise returns, and
+asynchronous callbacks. Matching modules remain
+`JavaScriptAuto`; the loader path participates in module identity, file
+dependencies, watch dependencies, and Module Build Record validation.
 
 Webpack's `NormalModuleFactory` owns a large part of public configurability: hooks, scheme-specific resolution, rule matching, loader resolution, parser/generator selection, layers, import attributes, dependency categories, file/missing/context dependency tracking, and ignored modules.
 
 Necessity:
 
-- The minimal Unpack factory is a staged scope reduction.
+- The minimal Unpack factory and loader rule schema are staged scope reductions.
 - The current `ModuleIdentity` shape is still useful because loaders, layers, module types, and query/fragment behavior can be added without redefining graph identity.
 - Webpack's factory hook surface should be introduced when plugin and loader API work starts, using webpack names and ordering as the reference.
 
@@ -144,8 +150,9 @@ The Node-runtime closure coordinates with the API-alignment and benchmark
 tracks (#140, #145, and #147). The JavaScript package entry remains ESM-only,
 while emitted entry assets intentionally use CommonJS startup. Render IDs are
 readable and deterministic with controlled churn, but are not a byte-for-byte
-webpack ID contract. Context modules, CommonJS parsing/interop, loaders,
-plugins, tree shaking, module concatenation, browser loading targets, and other
+webpack ID contract. Context modules, general CommonJS parsing/interop, broader
+loader rules and loader chains, plugins, tree shaking, module concatenation,
+browser loading targets, and other
 unimplemented options remain explicit unsupported surfaces.
 
 ## ESM code generation
@@ -179,7 +186,7 @@ Necessity:
 
 Current staged scope limits:
 
-- No broad webpack configuration, loader, plugin, or compilation API parity yet.
+- No broad webpack configuration, loader-chain, plugin, or compilation API parity yet.
 - Minimal Rust-native compiler and normal module factory.
 - ESM-first parser surface.
 - Fixed Node require chunk loading target.
@@ -195,7 +202,7 @@ Feature work to defer until explicitly chosen:
 
 - Context modules and non-static dynamic imports.
 - CommonJS parsing and interop.
-- Loader and plugin API parity.
+- Broader loader rules, loader chains, loader options, async loaders, and plugin API parity.
 - Magic comments, dynamic import modes, import attributes, deferred/source import phases.
 - Split chunks, cache groups, runtime chunks, HMR, browser/ESM/webworker chunk loading.
 - Export usage analysis, tree shaking, module concatenation, and deterministic id plugins.

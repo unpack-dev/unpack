@@ -7,13 +7,18 @@ use std::{
     },
 };
 
-use napi::Result;
+use napi::{
+    Result, Status,
+    bindgen_prelude::{FnArgs, Function, Promise},
+    threadsafe_function::ThreadsafeFunction,
+};
 use napi_derive::napi;
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use unpack_core::{
     Asset, BuildDependency, CacheCompression, CacheIdleReason, CacheOptions, Compiler,
     CompilerOptions, Entry, Error as CoreError, InfrastructureLogEvent, InfrastructureLogLevel,
-    InfrastructureLoggingOptions, SnapshotOptions, SnapshotPathPattern, SnapshotStrategy,
+    InfrastructureLoggingOptions, LoaderFuture, LoaderRequest, LoaderRunner, ModuleRule,
+    SnapshotOptions, SnapshotPathPattern, SnapshotStrategy,
 };
 
 #[global_allocator]
@@ -59,6 +64,15 @@ pub struct NativeCompilerOptions {
     #[napi(js_name = "infrastructureLogging")]
     pub infrastructure_logging: NativeInfrastructureLoggingOptions,
     pub sourcemap: bool,
+    #[napi(js_name = "moduleRules")]
+    pub module_rules: Vec<NativeModuleRule>,
+}
+
+#[napi(object)]
+pub struct NativeModuleRule {
+    pub test: String,
+    pub loader: String,
+    pub options: String,
 }
 
 #[napi(object)]
@@ -195,9 +209,60 @@ pub struct NativeFlushResult {
 }
 
 #[napi(js_name = "createCompiler")]
-pub fn create_compiler(options: NativeCompilerOptions) -> Result<NativeCompiler> {
+pub fn create_compiler(
+    options: NativeCompilerOptions,
+    loader_callback: Option<
+        Function<'_, FnArgs<(String, String, String, String)>, Promise<String>>,
+    >,
+) -> Result<NativeCompiler> {
     init_internal_tracing_from_env();
-    NativeCompiler::new(options)
+    NativeCompiler::new(options, loader_callback)
+}
+
+type NativeLoaderCallback = ThreadsafeFunction<
+    FnArgs<(String, String, String, String)>,
+    Promise<String>,
+    FnArgs<(String, String, String, String)>,
+    Status,
+    false,
+>;
+
+struct NativeLoaderRunner {
+    callback: Arc<NativeLoaderCallback>,
+}
+
+impl std::fmt::Debug for NativeLoaderRunner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("NativeLoaderRunner")
+    }
+}
+
+impl LoaderRunner for NativeLoaderRunner {
+    fn run(&self, request: LoaderRequest) -> LoaderFuture<'_> {
+        let callback = Arc::clone(&self.callback);
+        Box::pin(async move {
+            let loader = request.loader.to_string_lossy().into_owned();
+            let resource = request.resource.to_string_lossy().into_owned();
+            let promise = callback
+                .call_async_catch(FnArgs::from((
+                    loader.clone(),
+                    resource.clone(),
+                    request.source,
+                    request.options,
+                )))
+                .await
+                .map_err(|error| CoreError::Loader {
+                    loader: PathBuf::from(&loader),
+                    path: PathBuf::from(&resource),
+                    message: error.to_string(),
+                })?;
+            promise.await.map_err(|error| CoreError::Loader {
+                loader: PathBuf::from(loader),
+                path: PathBuf::from(resource),
+                message: error.to_string(),
+            })
+        })
+    }
 }
 
 #[napi]
@@ -280,7 +345,12 @@ fn internal_tracing_filter() -> Option<String> {
 }
 
 impl NativeCompiler {
-    fn new(options: NativeCompilerOptions) -> Result<Self> {
+    fn new(
+        options: NativeCompilerOptions,
+        loader_callback: Option<
+            Function<'_, FnArgs<(String, String, String, String)>, Promise<String>>,
+        >,
+    ) -> Result<Self> {
         let context = PathBuf::from(&options.context);
         let output_path = PathBuf::from(&options.output_path);
         let entries = options
@@ -294,6 +364,26 @@ impl NativeCompiler {
         compiler_options.infrastructure_logging =
             infrastructure_logging_options_from_native(options.infrastructure_logging);
         compiler_options.sourcemap = options.sourcemap;
+        compiler_options.module_rules = options
+            .module_rules
+            .into_iter()
+            .map(|rule| {
+                ModuleRule::new(&rule.test, rule.loader, rule.options).map_err(|error| {
+                    napi::Error::from_reason(format!("options.module.rules[0].test: {error}"))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        compiler_options.loader_runner = loader_callback
+            .map(|callback| {
+                let callback: NativeLoaderCallback = callback
+                    .build_threadsafe_function()
+                    .callee_handled::<false>()
+                    .build()?;
+                Ok::<Arc<dyn LoaderRunner>, napi::Error>(Arc::new(NativeLoaderRunner {
+                    callback: Arc::new(callback),
+                }))
+            })
+            .transpose()?;
         let compiler = Compiler::new(compiler_options);
 
         Ok(Self {
@@ -554,15 +644,16 @@ fn stats_error(error: &CoreError) -> NativeStatsError {
             issuer: Some(issuer.to_string_lossy().into_owned()),
             stack: Some(message.clone()),
         },
-        CoreError::Read { path, message } | CoreError::Parse { path, message } => {
-            NativeStatsError {
-                message: error.to_string(),
-                path: Some(path.to_string_lossy().into_owned()),
-                request: None,
-                issuer: None,
-                stack: Some(message.clone()),
-            }
-        }
+        CoreError::Read { path, message }
+        | CoreError::Parse { path, message }
+        | CoreError::Loader { path, message, .. }
+        | CoreError::LoaderRules { path, message } => NativeStatsError {
+            message: error.to_string(),
+            path: Some(path.to_string_lossy().into_owned()),
+            request: None,
+            issuer: None,
+            stack: Some(message.clone()),
+        },
         CoreError::UnsupportedDynamicImport { path, message }
         | CoreError::ParseTask { path, message } => NativeStatsError {
             message: error.to_string(),

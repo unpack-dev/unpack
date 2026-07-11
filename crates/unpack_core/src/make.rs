@@ -11,8 +11,9 @@ use tokio::{
 };
 
 use crate::{
-    CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, ModuleGraph, ModuleId,
-    ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
+    CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, LoaderRequest,
+    LoaderRunner, MatchedLoader, ModuleGraph, ModuleId, ModuleIdentity, NormalModuleFactory,
+    Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     module::BuiltModuleContent,
     parser::{ParsedModule, parse_module_dependencies},
@@ -37,6 +38,7 @@ struct MakeServices {
     module_snapshot_strategy: SnapshotStrategy,
     file_system_info: FileSystemInfo,
     snapshot_cache: SnapshotCache,
+    loader_runner: Option<Arc<dyn LoaderRunner>>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -75,6 +77,7 @@ struct BuildTask {
     module_id: ModuleId,
     identity: ModuleIdentity,
     resource: PathBuf,
+    loader: Option<MatchedLoader>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,11 +135,13 @@ pub(crate) async fn run(
             file_system_info.clone(),
             options.snapshot.resolve,
             snapshot_cache.clone(),
-        ),
+        )
+        .with_module_rules(options.module_rules.clone()),
         module_build_cache: build_cache.module_builds(),
         file_system_info,
         module_snapshot_strategy: options.snapshot.module,
         snapshot_cache,
+        loader_runner: options.loader_runner.clone(),
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
 
@@ -299,6 +304,7 @@ impl AddTask {
             FactorizeTaskResult::Success(factorized) => {
                 let identity = factorized.identity;
                 let resource = factorized.resource;
+                let loader = factorized.loader;
                 let add_result = {
                     let mut state = state.lock().await;
                     state
@@ -321,6 +327,7 @@ impl AddTask {
                     module_id: add_result.module_id,
                     identity,
                     resource,
+                    loader,
                 })])
             }
             FactorizeTaskResult::Failed(error) => {
@@ -387,7 +394,7 @@ impl BuildTask {
             }
         }
 
-        let source = match tokio::fs::read_to_string(&self.resource).await {
+        let raw_source = match tokio::fs::read_to_string(&self.resource).await {
             Ok(source) => source,
             Err(error) => {
                 let error = Error::read(&self.resource, error);
@@ -397,6 +404,41 @@ impl BuildTask {
                     .fail_module(self.module_id, error, String::new())?;
                 return Ok(Vec::new());
             }
+        };
+        let source = if let Some(loader) = self.loader.as_ref() {
+            let Some(loader_runner) = services.loader_runner.as_ref() else {
+                let error = Error::Loader {
+                    loader: loader.loader.clone(),
+                    path: self.resource.clone(),
+                    message: "loader runner is unavailable".to_string(),
+                };
+                state
+                    .lock()
+                    .await
+                    .fail_module(self.module_id, error, raw_source)?;
+                return Ok(Vec::new());
+            };
+            match loader_runner
+                .run(LoaderRequest {
+                    loader: loader.loader.clone(),
+                    resource: self.resource.clone(),
+                    source: raw_source.clone(),
+                    options: loader.options.clone(),
+                })
+                .await
+            {
+                Ok(source) => source,
+                Err(error) if error.is_compilation_error() => {
+                    state
+                        .lock()
+                        .await
+                        .fail_module(self.module_id, error, raw_source)?;
+                    return Ok(Vec::new());
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            raw_source.clone()
         };
         let parsed = match parse_module_dependencies(&self.resource, &source) {
             Ok(parsed) => parsed,
@@ -421,10 +463,29 @@ impl BuildTask {
             return Ok(process_dependencies.into_iter().collect());
         }
 
-        let snapshot = services
-            .file_system_info
-            .create_file_snapshot(&self.resource, &source, services.module_snapshot_strategy)
-            .await?;
+        let mut snapshots = vec![
+            services
+                .file_system_info
+                .create_file_snapshot(
+                    &self.resource,
+                    &raw_source,
+                    services.module_snapshot_strategy,
+                )
+                .await?,
+        ];
+        if let Some(loader) = self.loader.as_ref() {
+            let loader = &loader.loader;
+            let loader_source = tokio::fs::read_to_string(&loader)
+                .await
+                .map_err(|error| Error::read(&loader, error))?;
+            snapshots.push(
+                services
+                    .file_system_info
+                    .create_file_snapshot(loader, &loader_source, services.module_snapshot_strategy)
+                    .await?,
+            );
+        }
+        let snapshot = services.file_system_info.merge_snapshots(snapshots.iter());
         let built_content = Arc::new(BuiltModuleContent::new(parsed, source));
         let record = ModuleBuildRecord::new(Arc::clone(&built_content), snapshot);
 

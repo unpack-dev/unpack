@@ -6,7 +6,8 @@ use std::{
 use tokio::sync::OnceCell;
 
 use crate::{
-    Dependency, ModuleIdentity, Result, SnapshotStrategy, UnpackResolver,
+    Dependency, Error, MatchedLoader, ModuleIdentity, ModuleRule, Result, SnapshotStrategy,
+    UnpackResolver,
     build_cache::{NormalModuleFactoryCache, ResolveRecord, ResolveRequest},
     snapshot::{FileSystemInfo, SnapshotCache},
 };
@@ -19,6 +20,7 @@ pub struct NormalModuleFactory {
     resolve_snapshot_strategy: SnapshotStrategy,
     runtime_factorize_cache: RuntimeFactorizeCache,
     snapshot_cache: SnapshotCache,
+    module_rules: Vec<ModuleRule>,
 }
 
 // Per-compilation singleflight cache; separate from BuildCache so cache:false
@@ -41,7 +43,13 @@ impl NormalModuleFactory {
             resolve_snapshot_strategy,
             runtime_factorize_cache: Arc::new(Mutex::new(HashMap::new())),
             snapshot_cache,
+            module_rules: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_module_rules(mut self, module_rules: Vec<ModuleRule>) -> Self {
+        self.module_rules = module_rules;
+        self
     }
 
     pub async fn factorize(
@@ -62,12 +70,13 @@ impl NormalModuleFactory {
                 )
                 .await
             {
-                return Ok(FactorizedModule::from_resolve_record(&record));
+                return self.apply_module_rules(FactorizedModule::from_resolve_record(&record));
             }
         }
 
         self.factorize_with_runtime_cache(context, request, resolve_request)
             .await
+            .and_then(|factorized| self.apply_module_rules(factorized))
     }
 
     async fn factorize_with_runtime_cache(
@@ -114,6 +123,7 @@ impl NormalModuleFactory {
                 file_dependencies: resolved.file_dependencies,
                 context_dependencies: resolved.context_dependencies,
                 missing_dependencies: resolved.missing_dependencies,
+                loader: None,
             });
         }
         let record = ResolveRecord::new_with_cache(
@@ -141,6 +151,28 @@ impl NormalModuleFactory {
 
         Ok(factorized)
     }
+
+    fn apply_module_rules(&self, mut factorized: FactorizedModule) -> Result<FactorizedModule> {
+        let mut matching = self
+            .module_rules
+            .iter()
+            .filter(|rule| rule.matches(&factorized.resource));
+        let Some(rule) = matching.next() else {
+            return Ok(factorized);
+        };
+        if matching.next().is_some() {
+            return Err(Error::LoaderRules {
+                path: factorized.resource,
+                message: "multiple matching rules would require a loader chain".to_string(),
+            });
+        }
+
+        let loader = rule.matched_loader();
+        factorized.identity.loaders = vec![loader.identifier.clone()];
+        factorized.file_dependencies.insert(loader.loader.clone());
+        factorized.loader = Some(loader);
+        Ok(factorized)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +182,7 @@ pub struct FactorizedModule {
     pub file_dependencies: HashSet<PathBuf>,
     pub context_dependencies: HashSet<PathBuf>,
     pub missing_dependencies: HashSet<PathBuf>,
+    pub loader: Option<MatchedLoader>,
 }
 
 impl FactorizedModule {
@@ -160,6 +193,7 @@ impl FactorizedModule {
             file_dependencies: record.file_dependencies().iter().cloned().collect(),
             context_dependencies: record.context_dependencies().iter().cloned().collect(),
             missing_dependencies: record.missing_dependencies().iter().cloned().collect(),
+            loader: None,
         }
     }
 }

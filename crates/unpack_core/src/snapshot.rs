@@ -6,7 +6,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
 use std::collections::BTreeMap;
 
 use crate::{Error, Result};
@@ -251,7 +250,6 @@ impl FileSystemInfo {
         snapshot.is_valid_sync_with_cache(strategy, self, Some(cache))
     }
 
-    #[cfg(test)]
     pub(crate) fn merge_snapshots<'a>(
         &self,
         snapshots: impl IntoIterator<Item = &'a Snapshot>,
@@ -606,7 +604,6 @@ impl Snapshot {
         })
     }
 
-    #[cfg(test)]
     fn merge<'a>(snapshots: impl IntoIterator<Item = &'a Snapshot>) -> Self {
         let mut entries = BTreeMap::new();
         for snapshot in snapshots {

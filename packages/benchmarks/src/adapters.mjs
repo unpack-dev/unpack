@@ -21,6 +21,7 @@ const UNPACK_PACKAGE_ROOT = resolve(dirname(require.resolve("@unpack-js/core")),
 export const adapters = {
   unpack: {
     name: "unpack",
+    supportsWebpackLoaders: true,
     versionSource: () => `@unpack-js/core@${packageVersion("@unpack-js/core")}`,
     async build({
       fixture,
@@ -31,9 +32,9 @@ export const adapters = {
       cacheReadonly = false,
       options
     }) {
-      assertNoWebpackLoaderFixture(fixture, "Unpack");
       configureUnpackTracing({ fixture, phase, persistentCache, cacheReadonly, options });
       const { default: unpack } = await import("@unpack-js/core");
+      const rules = webpackLoaderRules(fixture);
       const compiler = unpack({
         mode: "none",
         context: fixture.context,
@@ -43,6 +44,7 @@ export const adapters = {
         snapshot: {
           managedPaths: [UNPACK_PACKAGE_ROOT]
         },
+        ...(rules.length === 0 ? {} : { module: { rules } }),
         cache: persistentCache
           ? {
               type: "filesystem",

@@ -15,6 +15,17 @@ export interface UnpackOptions {
   cache?: CacheOptions;
   snapshot?: SnapshotOptions;
   infrastructureLogging?: InfrastructureLoggingOptions;
+  module?: ModuleOptions;
+}
+
+export interface ModuleOptions {
+  rules: ModuleRule[];
+}
+
+export interface ModuleRule {
+  test: RegExp;
+  loader: string;
+  options?: Record<string, unknown>;
 }
 
 export type Mode = "development" | "production" | "none";
@@ -147,6 +158,13 @@ interface NormalizedOptions {
   cache: NormalizedCacheOptions;
   snapshot: NormalizedSnapshotOptions;
   infrastructureLogging: NormalizedInfrastructureLoggingOptions;
+  moduleRules: NormalizedModuleRule[];
+}
+
+interface NormalizedModuleRule {
+  test: string;
+  loader: string;
+  options: string;
 }
 
 interface NormalizedCacheOptions {
@@ -279,7 +297,15 @@ interface NativeCompiler {
 }
 
 interface NativeBinding {
-  createCompiler(options: NormalizedOptions): NativeCompiler;
+  createCompiler(
+    options: NormalizedOptions,
+    loaderRunner?: (
+      loader: string,
+      resource: string,
+      source: string,
+      options: string
+    ) => Promise<string>
+  ): NativeCompiler;
 }
 
 const require = createRequire(import.meta.url);
@@ -292,6 +318,109 @@ const unpackToolchainBuildDependencies = [
   require.resolve("./unpack_node.node"),
   resolve(dirname(unpackJavaScriptPath), "../package.json")
 ];
+
+type LoaderFunction = (
+  this: {
+    resourcePath: string;
+    rootContext: string;
+    sourceMap: false;
+    getOptions(): Record<string, unknown>;
+    async(): (error: unknown, source?: unknown) => void;
+  },
+  source: string
+) => unknown;
+
+type LoaderState =
+  | { failed: false; loader: LoaderFunction }
+  | { failed: true; error: unknown };
+
+class LoaderRuntime {
+  readonly #loaders = new Map<string, LoaderState>();
+
+  constructor(private readonly rootContext: string) {}
+
+  beginCompilation(): void {
+    this.#loaders.clear();
+  }
+
+  readonly run = async (
+    loaderPath: string,
+    resourcePath: string,
+    source: string,
+    serializedOptions: string
+  ): Promise<string> => {
+    let state = this.#loaders.get(loaderPath);
+    if (state === undefined) {
+      try {
+        const resolvedLoaderPath = require.resolve(loaderPath);
+        delete require.cache[resolvedLoaderPath];
+        const loaded: unknown = require(resolvedLoaderPath);
+        if (typeof loaded !== "function") {
+          throw new TypeError(`loader ${loaderPath} must export a CommonJS function`);
+        }
+        state = { failed: false, loader: loaded as LoaderFunction };
+      } catch (error) {
+        state = { failed: true, error };
+      }
+      this.#loaders.set(loaderPath, state);
+    }
+    if (state.failed) throw state.error;
+
+    return new Promise<string>((resolve, reject) => {
+      let callbackRequested = false;
+      let settled = false;
+      const complete = (error: unknown, transformedSource?: unknown): void => {
+        if (settled) return;
+        settled = true;
+        if (error != null) {
+          reject(error);
+        } else if (typeof transformedSource === "string") {
+          resolve(transformedSource);
+        } else {
+          reject(new TypeError(`loader ${loaderPath} callback must provide a string`));
+        }
+      };
+      const callback = (error: unknown, transformedSource?: unknown): void => {
+        complete(error, transformedSource);
+      };
+
+      let result: unknown;
+      try {
+        result = state.loader.call(
+          {
+            resourcePath,
+            rootContext: this.rootContext,
+            sourceMap: false,
+            getOptions: () => JSON.parse(serializedOptions) as Record<string, unknown>,
+            async: () => {
+              callbackRequested = true;
+              return callback;
+            }
+          },
+          source
+        );
+      } catch (error) {
+        complete(error);
+        return;
+      }
+
+      if (typeof result === "string") {
+        complete(null, result);
+      } else if (result instanceof Promise) {
+        result.then(
+          (transformedSource) => complete(null, transformedSource),
+          (error) => complete(error)
+        );
+      } else if (!callbackRequested) {
+        complete(
+          new TypeError(
+            `loader ${loaderPath} must return a string, a Promise, or request a callback`
+          )
+        );
+      }
+    });
+  };
+}
 
 class CompilerImpl implements Compiler {
   #closed = false;
@@ -306,9 +435,13 @@ class CompilerImpl implements Compiler {
   readonly #cacheLargeChangeTimeout: number;
   readonly #infrastructureLoggingLevel: InfrastructureLoggingLevel;
   readonly #nativeCompiler: NativeCompiler;
+  readonly #loaderRuntime: LoaderRuntime | undefined;
 
   constructor(options: NormalizedOptions) {
-    this.#nativeCompiler = native.createCompiler(options);
+    this.#loaderRuntime = options.moduleRules.length > 0
+      ? new LoaderRuntime(options.context)
+      : undefined;
+    this.#nativeCompiler = native.createCompiler(options, this.#loaderRuntime?.run);
     this.#writableFilesystemCache =
       options.cache.type === "filesystem" && !options.cache.readonly;
     this.#cacheIdleTimeout = options.cache.idleTimeout ?? 60_000;
@@ -347,7 +480,7 @@ class CompilerImpl implements Compiler {
     let run: Promise<NativeRunResult>;
     try {
       this.#emitInfrastructureLog("info", "unpack.Compiler", "run started");
-      run = this.#nativeCompiler.run();
+      run = this.#runNativeCompilation();
     } catch (error) {
       this.#running = false;
       const infrastructureError = toError(error, "InfrastructureError");
@@ -481,7 +614,7 @@ class CompilerImpl implements Compiler {
     let run: Promise<NativeRunResult>;
     try {
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation started");
-      run = this.#nativeCompiler.run();
+      run = this.#runNativeCompilation();
     } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
       this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
@@ -512,6 +645,11 @@ class CompilerImpl implements Compiler {
       this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
       handler(infrastructureError);
     }
+  }
+
+  #runNativeCompilation(): Promise<NativeRunResult> {
+    this.#loaderRuntime?.beginCompilation();
+    return this.#nativeCompiler.run();
   }
 
   #scheduleIdleCacheFlush(delay: number): void {
@@ -881,7 +1019,8 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       "sourcemap",
       "cache",
       "snapshot",
-      "infrastructureLogging"
+      "infrastructureLogging",
+      "module"
     ],
     "options"
   );
@@ -906,18 +1045,58 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     ? outputPathValue
     : resolve(normalizedContext, outputPathValue);
 
+  const sourcemap =
+    options.sourcemap === undefined
+      ? true
+      : assertBoolean(options.sourcemap, "options.sourcemap");
+  const moduleRules = normalizeModuleOptions(options.module);
+  if (moduleRules.length > 0 && sourcemap) {
+    throw new TypeError("options.sourcemap must be false when options.module.rules is configured");
+  }
+
   return {
     context: normalizedContext,
     entries: normalizeEntry(options.entry),
     outputPath,
-    sourcemap:
-      options.sourcemap === undefined
-        ? true
-        : assertBoolean(options.sourcemap, "options.sourcemap"),
+    sourcemap,
     cache: normalizeCacheOptions(options.cache, normalizedContext, mode, name),
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
-    infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging)
+    infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
+    moduleRules
   };
+}
+
+function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedModuleRule[] {
+  if (module === undefined) return [];
+  assertPlainObject(module, "options.module");
+  assertKnownKeys(module, ["rules"], "options.module");
+  if (!Array.isArray(module.rules)) {
+    throw new TypeError("options.module.rules must be an array");
+  }
+  return module.rules.map((rule, index) => {
+    const name = `options.module.rules[${index}]`;
+    assertPlainObject(rule, name);
+    assertKnownKeys(rule, ["test", "loader", "options"], name);
+    if (!(rule.test instanceof RegExp)) {
+      throw new TypeError(`${name}.test must be a RegExp`);
+    }
+    if (rule.test.flags !== "") {
+      throw new TypeError(`${name}.test must not use flags`);
+    }
+    const loader = assertString(rule.loader, `${name}.loader`);
+    if (!isAbsolute(loader)) {
+      throw new TypeError(`${name}.loader must be an absolute path`);
+    }
+    const options = rule.options ?? {};
+    assertPlainObject(options, `${name}.options`);
+    let serializedOptions: string;
+    try {
+      serializedOptions = JSON.stringify(options);
+    } catch {
+      throw new TypeError(`${name}.options must be JSON-serializable`);
+    }
+    return { test: rule.test.source, loader, options: serializedOptions };
+  });
 }
 
 function normalizeEntry(entry: UnpackOptions["entry"]): NormalizedEntry[] {

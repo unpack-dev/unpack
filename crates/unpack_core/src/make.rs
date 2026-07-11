@@ -15,10 +15,9 @@ use tokio::{
 };
 
 use crate::{
-    CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, LoaderRequest,
-    AsyncDependenciesBlockId, DependencyId, LoaderRunner, MatchedLoader, ModuleGraph, ModuleId,
-    ModuleIdentity, NormalModuleFactory,
-    Result, SnapshotStrategy, UnpackResolver,
+    AsyncDependenciesBlockId, CompilerOptions, Dependency, DependencyId, DependencyKind, Error,
+    FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleId,
+    ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     module::BuiltModuleContent,
     parser::{ParsedModule, parse_module_dependencies},

@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AsyncBlockOrigin, AsyncDependenciesBlockId, Chunk, ChunkGraph, ChunkGroupKind, CompilerOptions,
-    ConstDependency, Dependency, DependencyId, Error, ExportsInfo, HarmonyExportExpressionDependency,
-    HarmonyExportHeaderDependency, HarmonyExportImportedSpecifierDependency,
-    HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
-    HarmonyImportSpecifierDependency, ImportDependency, Module, ModuleGraph, ModuleId, SourceRange,
+    ConstDependency, Dependency, DependencyId, Error, ExportsInfo,
+    HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
+    HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
+    HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Module,
+    ModuleGraph, ModuleId, SourceRange,
     build_cache::{BuildCache, CacheETag, CacheIdentifier, CacheKey},
     cache_hash::StableHasher,
     code_generation_record::{

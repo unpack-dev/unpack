@@ -9,7 +9,7 @@ use std::{
 
 use napi::{
     Result, Status,
-    bindgen_prelude::{FnArgs, Function, Promise},
+    bindgen_prelude::{Either, FnArgs, Function, Promise},
     threadsafe_function::ThreadsafeFunction,
 };
 use napi_derive::napi;
@@ -202,6 +202,14 @@ pub struct NativeModuleGraphConnection {
 }
 
 #[napi(object)]
+pub struct NativeChunk {
+    pub id: u32,
+    pub name: Option<String>,
+    #[napi(js_name = "renderId")]
+    pub render_id: Option<Either<String, u32>>,
+}
+
+#[napi(object)]
 pub struct NativeWatchDependencies {
     pub files: Vec<String>,
     pub contexts: Vec<String>,
@@ -232,6 +240,7 @@ pub struct NativeRunResult {
 #[napi]
 pub struct NativeCompilation {
     module_graph: Arc<unpack_core::ModuleGraph>,
+    chunk_graph: Arc<unpack_core::ChunkGraph>,
 }
 
 #[napi]
@@ -267,6 +276,58 @@ impl NativeCompilation {
             .outgoing_connections(module_id)
             .map(native_module_graph_connection)
             .collect()
+    }
+
+    #[napi]
+    pub fn chunks(&self) -> Vec<NativeChunk> {
+        self.chunk_graph
+            .chunks()
+            .iter()
+            .map(|chunk| NativeChunk {
+                id: chunk.id().index().try_into().unwrap_or(u32::MAX),
+                name: chunk.name().map(str::to_string),
+                render_id: native_render_id(chunk.render_id_string(), chunk.render_id_number()),
+            })
+            .collect()
+    }
+
+    #[napi(js_name = "chunkModules")]
+    pub fn chunk_modules(&self, chunk_id: u32) -> Vec<u32> {
+        let chunk_id = unpack_core::ChunkId::new(chunk_id as usize);
+        if self.chunk_graph.chunk(chunk_id).is_none() {
+            return Vec::new();
+        }
+        self.chunk_graph
+            .chunk_modules(chunk_id)
+            .iter()
+            .copied()
+            .map(native_module_id)
+            .collect()
+    }
+
+    #[napi(js_name = "moduleChunks")]
+    pub fn module_chunks(&self, module_id: u32) -> Vec<u32> {
+        let module_id = unpack_core::ModuleId::new(module_id as usize);
+        if self.module_graph.module(module_id).is_none() {
+            return Vec::new();
+        }
+        self.chunk_graph
+            .module_chunks(module_id)
+            .iter()
+            .map(|chunk| chunk.index().try_into().unwrap_or(u32::MAX))
+            .collect()
+    }
+
+    #[napi(js_name = "moduleId")]
+    pub fn module_id(&self, module_id: u32) -> Option<Either<String, u32>> {
+        let module_id = unpack_core::ModuleId::new(module_id as usize);
+        if self.module_graph.module(module_id).is_none() {
+            return None;
+        }
+        native_render_id(
+            self.chunk_graph.module_render_id_string(module_id),
+            self.chunk_graph.module_render_id_number(module_id),
+        )
     }
 }
 
@@ -646,14 +707,26 @@ async fn run_compiler_inner(
         output_path: output_path.to_string_lossy().into_owned(),
         watch_dependencies: watch_dependencies(compilation.watch_dependencies()),
     };
-    let module_graph = Arc::new(compilation.into_module_graph());
+    let (module_graph, chunk_graph) = compilation.into_graphs();
 
     NativeRunResult {
         error: None,
         stats: Some(stats),
-        compilation: Some(NativeCompilation { module_graph }),
+        compilation: Some(NativeCompilation {
+            module_graph: Arc::new(module_graph),
+            chunk_graph: Arc::new(chunk_graph),
+        }),
         logs,
     }
+}
+
+fn native_render_id(
+    string_id: Option<&str>,
+    number_id: Option<u32>,
+) -> Option<Either<String, u32>> {
+    string_id
+        .map(|value| Either::A(value.to_string()))
+        .or_else(|| number_id.map(Either::B))
 }
 
 fn native_module_graph_connection(

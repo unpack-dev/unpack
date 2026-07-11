@@ -125,7 +125,13 @@ export interface Stats {
 
 export interface Compilation {
   readonly moduleGraph: ModuleGraph;
+  readonly chunkGraph: ChunkGraph;
   readonly modules: ReadonlySet<Module>;
+}
+
+export interface Chunk {
+  readonly id: string | number | null;
+  readonly name?: string;
 }
 
 export interface Module {
@@ -205,6 +211,29 @@ export interface ModuleGraph {
     fn: (moduleGraph: ModuleGraph, ...args: TArgs) => TResult,
     ...args: TArgs
   ): TResult;
+}
+
+export interface ChunkGraph {
+  getModuleId(module: Module): string | number | null;
+  getModuleChunksIterable(module: Module): Iterable<Chunk>;
+  getOrderedModuleChunksIterable(
+    module: Module,
+    comparator: (left: Chunk, right: Chunk) => number
+  ): Iterable<Chunk>;
+  getModuleChunks(module: Module): readonly Chunk[];
+  getNumberOfModuleChunks(module: Module): number;
+  getNumberOfChunkModules(chunk: Chunk): number;
+  getChunkModulesIterable(chunk: Chunk): Iterable<Module>;
+  getOrderedChunkModulesIterable(
+    chunk: Chunk,
+    comparator: (left: Module, right: Module) => number
+  ): Iterable<Module>;
+  getChunkModules(chunk: Chunk): readonly Module[];
+  getOrderedChunkModules(
+    chunk: Chunk,
+    comparator: (left: Module, right: Module) => number
+  ): readonly Module[];
+  isModuleInChunk(module: Module, chunk: Chunk): boolean;
 }
 
 export interface TapOptions {
@@ -387,6 +416,10 @@ interface NativeCompilation {
   modules(): NativeModule[];
   incomingConnections(moduleId: number): NativeModuleGraphConnection[];
   outgoingConnections(moduleId: number): NativeModuleGraphConnection[];
+  chunks(): NativeChunk[];
+  chunkModules(chunkId: number): number[];
+  moduleChunks(moduleId: number): number[];
+  moduleId(moduleId: number): string | number | null;
 }
 
 interface NativeModule {
@@ -410,6 +443,12 @@ interface NativeModuleGraphConnection {
   parent_block_index?: number;
 }
 
+interface NativeChunk {
+  id: number;
+  name?: string | null;
+  renderId?: string | number | null;
+  render_id?: string | number | null;
+}
 interface NativeRunResult {
   error?: {
     name: string;
@@ -1644,8 +1683,168 @@ class ModuleGraphImpl implements ModuleGraph {
   }
 }
 
+class ChunkImpl implements Chunk {
+  constructor(
+    readonly nativeId: number,
+    readonly id: string | number | null,
+    readonly name: string | undefined
+  ) {}
+}
+
+class SortableSetView<T> extends Set<T> {
+  #lastComparator: ((left: T, right: T) => number) | undefined;
+
+  sortWith(comparator: (left: T, right: T) => number): boolean {
+    if (this.size <= 1 || comparator === this.#lastComparator) return false;
+    const ordered = [...this].sort(comparator);
+    super.clear();
+    for (const value of ordered) super.add(value);
+    this.#lastComparator = comparator;
+    return true;
+  }
+}
+
+const EMPTY_CHUNKS: readonly Chunk[] = [];
+const EMPTY_MODULES: readonly Module[] = [];
+const EMPTY_CHUNK_ITERABLE: SortableSetView<Chunk> = new SortableSetView();
+const EMPTY_MODULE_ITERABLE: SortableSetView<Module> = new SortableSetView();
+
+class ChunkGraphImpl implements ChunkGraph {
+  readonly #nativeCompilation: NativeCompilation | undefined;
+  readonly #modulesById: ReadonlyMap<number, ModuleImpl>;
+  readonly #chunksById: ReadonlyMap<number, ChunkImpl>;
+  readonly #moduleIds = new Map<Module, string | number | null>();
+  readonly #moduleChunks = new Map<Module, readonly Chunk[]>();
+  readonly #chunkModules = new Map<Chunk, readonly Module[]>();
+  readonly #moduleChunkIterables = new Map<Module, SortableSetView<Chunk>>();
+  readonly #chunkModuleIterables = new Map<Chunk, SortableSetView<Module>>();
+  readonly #orderedChunkModules = new Map<
+    Chunk,
+    Map<(left: Module, right: Module) => number, readonly Module[]>
+  >();
+
+  constructor(
+    nativeCompilation: NativeCompilation | undefined,
+    modulesById: ReadonlyMap<number, ModuleImpl>,
+    chunksById: ReadonlyMap<number, ChunkImpl>
+  ) {
+    this.#nativeCompilation = nativeCompilation;
+    this.#modulesById = modulesById;
+    this.#chunksById = chunksById;
+  }
+
+  #loadModuleChunks(module: Module): SortableSetView<Chunk> {
+    const loaded = this.#moduleChunkIterables.get(module);
+    if (loaded) return loaded;
+    if (!(module instanceof ModuleImpl)) return EMPTY_CHUNK_ITERABLE;
+    const chunks = (
+      this.#nativeCompilation?.moduleChunks(module.nativeId) ?? []
+    ).flatMap((id) => {
+        const chunk = this.#chunksById.get(id);
+        return chunk ? [chunk] : [];
+      });
+    const iterable = new SortableSetView<Chunk>(chunks);
+    this.#moduleChunkIterables.set(module, iterable);
+    this.#moduleChunks.set(module, chunks);
+    return iterable;
+  }
+
+  #loadChunkModules(chunk: Chunk): SortableSetView<Module> {
+    const loaded = this.#chunkModuleIterables.get(chunk);
+    if (loaded) return loaded;
+    if (!(chunk instanceof ChunkImpl)) return EMPTY_MODULE_ITERABLE;
+    const modules = (this.#nativeCompilation?.chunkModules(chunk.nativeId) ?? [])
+      .flatMap((id) => {
+        const module = this.#modulesById.get(id);
+        return module ? [module] : [];
+      });
+    const iterable = new SortableSetView<Module>(modules);
+    this.#chunkModuleIterables.set(chunk, iterable);
+    this.#chunkModules.set(chunk, modules);
+    return iterable;
+  }
+
+  getModuleId(module: Module): string | number | null {
+    if (!this.#moduleIds.has(module)) {
+      const id = module instanceof ModuleImpl
+        ? this.#nativeCompilation?.moduleId(module.nativeId) ?? null
+        : null;
+      this.#moduleIds.set(module, id);
+    }
+    return this.#moduleIds.get(module) ?? null;
+  }
+
+  getModuleChunksIterable(module: Module): Iterable<Chunk> {
+    return this.#loadModuleChunks(module);
+  }
+
+  getOrderedModuleChunksIterable(
+    module: Module,
+    comparator: (left: Chunk, right: Chunk) => number
+  ): Iterable<Chunk> {
+    const chunks = this.#loadModuleChunks(module);
+    if (chunks.sortWith(comparator)) {
+      this.#moduleChunks.set(module, [...chunks]);
+    }
+    return chunks;
+  }
+
+  getModuleChunks(module: Module): readonly Chunk[] {
+    this.#loadModuleChunks(module);
+    return this.#moduleChunks.get(module) ?? EMPTY_CHUNKS;
+  }
+
+  getNumberOfModuleChunks(module: Module): number {
+    return this.getModuleChunks(module).length;
+  }
+
+  getNumberOfChunkModules(chunk: Chunk): number {
+    return this.getChunkModules(chunk).length;
+  }
+
+  getChunkModulesIterable(chunk: Chunk): Iterable<Module> {
+    return this.#loadChunkModules(chunk);
+  }
+
+  getOrderedChunkModulesIterable(
+    chunk: Chunk,
+    comparator: (left: Module, right: Module) => number
+  ): Iterable<Module> {
+    const modules = this.#loadChunkModules(chunk);
+    modules.sortWith(comparator);
+    return modules;
+  }
+
+  getChunkModules(chunk: Chunk): readonly Module[] {
+    this.#loadChunkModules(chunk);
+    return this.#chunkModules.get(chunk) ?? EMPTY_MODULES;
+  }
+
+  getOrderedChunkModules(
+    chunk: Chunk,
+    comparator: (left: Module, right: Module) => number
+  ): readonly Module[] {
+    let orderedByComparator = this.#orderedChunkModules.get(chunk);
+    if (!orderedByComparator) {
+      orderedByComparator = new Map();
+      this.#orderedChunkModules.set(chunk, orderedByComparator);
+    }
+    let ordered = orderedByComparator.get(comparator);
+    if (!ordered) {
+      ordered = [...this.getChunkModules(chunk)].sort(comparator);
+      orderedByComparator.set(comparator, ordered);
+    }
+    return ordered;
+  }
+
+  isModuleInChunk(module: Module, chunk: Chunk): boolean {
+    return this.#loadChunkModules(chunk).has(module);
+  }
+}
+
 class CompilationImpl implements Compilation {
   readonly moduleGraph: ModuleGraph;
+  readonly chunkGraph: ChunkGraph;
   readonly modules: ReadonlySet<Module>;
 
   constructor(compilation: NativeCompilation | null | undefined) {
@@ -1665,7 +1864,22 @@ class CompilationImpl implements Compilation {
     for (const module of modulesById.values()) {
       module.bindModuleGraph(moduleGraph);
     }
+    const chunksById = new Map(
+      (compilation?.chunks() ?? []).map((chunk) => [
+        chunk.id,
+        new ChunkImpl(
+          chunk.id,
+          chunk.renderId ?? chunk.render_id ?? null,
+          chunk.name ?? undefined
+        )
+      ])
+    );
     this.moduleGraph = moduleGraph;
+    this.chunkGraph = new ChunkGraphImpl(
+      compilation ?? undefined,
+      modulesById,
+      chunksById
+    );
     this.modules = new Set(modulesById.values());
   }
 }
@@ -2413,7 +2627,6 @@ function normalizeNativeStats(stats: NativeStatsJson | null | undefined): StatsJ
     )
   };
 }
-
 function cloneStatsError(error: StatsError): StatsError {
   return {
     message: error.message,

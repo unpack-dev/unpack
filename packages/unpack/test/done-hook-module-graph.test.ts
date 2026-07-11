@@ -5,7 +5,11 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import unpack from "@unpack-js/core";
+import webpack from "webpack";
+import type { Chunk as WebpackChunk } from "webpack";
 import type {
+  Chunk,
+  ChunkGraph,
   Compiler,
   Module,
   ModuleGraphConnection,
@@ -160,6 +164,194 @@ test("done exposes webpack-shaped ModuleGraph queries with cached grouping", asy
   }
 });
 
+// Ported from webpack ChunkGraph's public query contract. A dynamic import is
+// used so both initial and async Chunk membership can be inspected.
+test("done exposes webpack-shaped ChunkGraph membership queries", async () => {
+  const fixture = await createChunkGraphFixture();
+  const compiler = createCompiler(fixture);
+  let inspected = false;
+  let liveChunkGraph: ChunkGraph | undefined;
+
+  compiler.hooks.done.tap("inspect chunk graph", (stats) => {
+    const { chunkGraph, modules } = stats.compilation;
+    assert.equal(stats.compilation.chunkGraph, chunkGraph);
+    liveChunkGraph = chunkGraph;
+    assert.equal(modules.size, 3);
+
+    const entry = findModule(modules, "/src/index.js");
+    const shared = findModule(modules, "/src/shared.js");
+    const lazy = findModule(modules, "/src/lazy.js");
+    const [initialChunk] = chunkGraph.getModuleChunks(entry);
+    const [asyncChunk] = chunkGraph.getModuleChunks(lazy);
+    assert.ok(initialChunk);
+    assert.ok(asyncChunk);
+    assert.notEqual(initialChunk, asyncChunk);
+
+    assert.deepEqual(chunkGraph.getModuleChunks(entry), [initialChunk]);
+    const entryChunksIterable = chunkGraph.getModuleChunksIterable(entry);
+    assert.equal(
+      chunkGraph.getOrderedModuleChunksIterable(entry, compareChunks),
+      entryChunksIterable
+    );
+    assert.deepEqual([...chunkGraph.getModuleChunksIterable(lazy)], [asyncChunk]);
+    assert.equal(chunkGraph.getNumberOfModuleChunks(shared), 1);
+    assert.equal(chunkGraph.isModuleInChunk(shared, initialChunk), true);
+    assert.equal(chunkGraph.isModuleInChunk(shared, asyncChunk), false);
+    assert.equal(chunkGraph.isModuleInChunk(lazy, asyncChunk), true);
+
+    const initialModules = chunkGraph.getChunkModules(initialChunk);
+    const initialModulesIterable = chunkGraph.getChunkModulesIterable(initialChunk);
+    assert.equal(
+      chunkGraph.getOrderedChunkModulesIterable(initialChunk, compareModules),
+      initialModulesIterable
+    );
+    assert.deepEqual(new Set(initialModules), new Set([entry, shared]));
+    assert.equal(chunkGraph.getChunkModules(initialChunk), initialModules);
+    assert.equal(chunkGraph.getNumberOfChunkModules(initialChunk), 2);
+    assert.deepEqual([...chunkGraph.getChunkModulesIterable(asyncChunk)], [lazy]);
+
+    assert.deepEqual(
+      [...chunkGraph.getOrderedChunkModulesIterable(initialChunk, compareModules)],
+      [...initialModules].sort(compareModules)
+    );
+    assert.equal(
+      chunkGraph.getOrderedChunkModules(initialChunk, compareModules),
+      chunkGraph.getOrderedChunkModules(initialChunk, compareModules)
+    );
+    assert.deepEqual(
+      [...chunkGraph.getOrderedModuleChunksIterable(entry, compareChunks)],
+      [initialChunk]
+    );
+    assert.equal(typeof chunkGraph.getModuleId(entry), "string");
+    assert.equal(initialChunk.id, "main");
+    inspected = true;
+  });
+  compiler.hooks.done.tapPromise("observe live chunk graph", async (stats) => {
+    assert.equal(stats.compilation.chunkGraph, liveChunkGraph);
+  });
+
+  try {
+    const stats = await runCompiler(compiler);
+    assert.equal(stats.hasErrors(), false);
+    assert.equal(inspected, true);
+    assert.equal(stats.compilation.chunkGraph, liveChunkGraph);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("ChunkGraph ordered iterables preserve webpack live identity", async () => {
+  const fixture = await createChunkGraphFixture();
+  const unpackCompiler = unpack({
+    context: fixture,
+    mode: "production",
+    entry: { main: "./src/index.js", other: "./src/other.js" },
+    output: { path: join(fixture, "dist-unpack") },
+    sourcemap: false
+  });
+  let unpackInspected = false;
+
+  unpackCompiler.hooks.done.tap("inspect chunk graph identity", (stats) => {
+    const { chunkGraph, modules } = stats.compilation;
+    const shared = findModule(modules, "/src/shared.js");
+    const cachedChunks = chunkGraph.getModuleChunks(shared);
+    assert.equal(cachedChunks.length, 2);
+    const chunksIterable = chunkGraph.getModuleChunksIterable(shared);
+    const comparator = (left: Chunk, right: Chunk): number =>
+      compareStrings(String(right.id), String(left.id));
+    const expected = [...cachedChunks].sort(comparator);
+    assert.equal(
+      chunkGraph.getOrderedModuleChunksIterable(shared, comparator),
+      chunksIterable
+    );
+    const reorderedChunks = chunkGraph.getModuleChunks(shared);
+    assert.notEqual(reorderedChunks, cachedChunks);
+    assert.deepEqual(reorderedChunks, expected);
+    const lazy = findModule(modules, "/src/lazy.js");
+    const cachedLazyChunks = chunkGraph.getModuleChunks(lazy);
+    chunkGraph.getOrderedModuleChunksIterable(lazy, comparator);
+    assert.equal(chunkGraph.getModuleChunks(lazy), cachedLazyChunks);
+    unpackInspected = true;
+  });
+
+  try {
+    await runCompiler(unpackCompiler);
+    assert.equal(unpackInspected, true);
+  } finally {
+    await closeCompiler(unpackCompiler);
+  }
+
+  const compiler = webpack({
+    context: fixture,
+    mode: "production",
+    entry: { main: "./src/index.js", other: "./src/other.js" },
+    output: { path: join(fixture, "dist-webpack") },
+    devtool: false,
+    optimization: {
+      concatenateModules: false,
+      innerGraph: false,
+      minimize: false,
+      providedExports: false,
+      usedExports: false
+    }
+  });
+  let inspected = false;
+
+  compiler.hooks.done.tap("inspect chunk graph identity", (stats) => {
+    const { chunkGraph, chunks: compilationChunks } = stats.compilation;
+    const modules = [...compilationChunks].flatMap((chunk) =>
+      [...chunkGraph.getChunkModulesIterable(chunk)]
+    );
+    const shared = modules.find((candidate) =>
+      (candidate as { resource?: string }).resource?.endsWith(join("src", "shared.js"))
+    );
+    assert.ok(shared, modules.map((module) => module.identifier()).join("\n"));
+    const cachedChunks = chunkGraph.getModuleChunks(shared);
+    assert.equal(cachedChunks.length, 2);
+    const chunks = chunkGraph.getModuleChunksIterable(shared);
+    const comparator = (left: WebpackChunk, right: WebpackChunk): -1 | 0 | 1 =>
+      compareStrings(String(right.id), String(left.id));
+    const expected = [...cachedChunks].sort(comparator);
+    assert.equal(
+      chunkGraph.getOrderedModuleChunksIterable(shared, comparator),
+      chunks
+    );
+    const reorderedChunks = chunkGraph.getModuleChunks(shared);
+    assert.notEqual(reorderedChunks, cachedChunks);
+    assert.deepEqual(reorderedChunks, expected);
+    const lazy = modules.find((candidate) =>
+      (candidate as { resource?: string }).resource?.endsWith(join("src", "lazy.js"))
+    );
+    assert.ok(lazy);
+    const cachedLazyChunks = chunkGraph.getModuleChunks(lazy);
+    chunkGraph.getOrderedModuleChunksIterable(lazy, comparator);
+    assert.equal(chunkGraph.getModuleChunks(lazy), cachedLazyChunks);
+    const [chunk] = chunks;
+    assert.ok(chunk);
+    const chunkModules = chunkGraph.getChunkModulesIterable(chunk);
+    assert.equal(
+      chunkGraph.getOrderedChunkModulesIterable(chunk, (left, right) =>
+        compareStrings(left.identifier(), right.identifier())
+      ),
+      chunkModules
+    );
+    inspected = true;
+  });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      compiler.run((error) => (error ? reject(error) : resolve()));
+    });
+    assert.equal(inspected, true);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      compiler.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 function assertConnection(connection: ModuleGraphConnection): void {
   assert.equal(connection.resolvedOriginModule, connection.originModule);
   assert.equal(connection.resolvedModule, connection.module);
@@ -176,6 +368,18 @@ function findModule(modules: ReadonlySet<Module>, suffix: string): Module {
   );
   assert.ok(module, `expected module ending in ${suffix}`);
   return module;
+}
+
+function compareModules(left: Module, right: Module): number {
+  return left.identifier().localeCompare(right.identifier());
+}
+
+function compareChunks(left: Chunk, right: Chunk): number {
+  return String(left.id).localeCompare(String(right.id));
+}
+
+function compareStrings(left: string, right: string): -1 | 0 | 1 {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function createCompiler(context: string): Compiler {
@@ -204,6 +408,27 @@ async function createGraphFixture(): Promise<string> {
   await writeFixtureFile(
     join(fixture, "src/shared.js"),
     'export const shared = "shared";\n'
+  );
+  return fixture;
+}
+
+async function createChunkGraphFixture(): Promise<string> {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-chunk-graph-"));
+  await writeFixtureFile(
+    join(fixture, "src/index.js"),
+    'import { shared } from "./shared.js";\nconsole.log(shared);\nexport const value = shared;\nexport const load = () => import("./lazy.js");\n'
+  );
+  await writeFixtureFile(
+    join(fixture, "src/shared.js"),
+    'export const shared = "shared";\n'
+  );
+  await writeFixtureFile(
+    join(fixture, "src/lazy.js"),
+    'export const lazy = "lazy";\n'
+  );
+  await writeFixtureFile(
+    join(fixture, "src/other.js"),
+    'import { shared } from "./shared.js";\nconsole.log(shared);\nexport const other = shared;\n'
   );
   return fixture;
 }

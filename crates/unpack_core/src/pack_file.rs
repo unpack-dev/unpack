@@ -1343,8 +1343,9 @@ mod tests {
         assert_eq!(ModuleBuildRecordDto::try_from(&module_record)?, module_dto);
 
         let mut runtime_requirements = RuntimeRequirements::default();
-        runtime_requirements.insert(RuntimeRequirement::Require);
-        runtime_requirements.insert(RuntimeRequirement::EnsureChunk);
+        for requirement in ALL_RUNTIME_REQUIREMENTS {
+            runtime_requirements.insert(requirement);
+        }
         let code_generation_record =
             CodeGenerationRecord::new(CodeGenerationSource::OriginalWithReplacements {
                 prefix: "prefix".to_string(),
@@ -2697,7 +2698,21 @@ impl CodeGenerationRecordDto {
     }
 }
 
-const RUNTIME_REQUIREMENT_MASK: u16 = (1 << 9) - 1;
+const ALL_RUNTIME_REQUIREMENTS: [RuntimeRequirement; 11] = [
+    RuntimeRequirement::ModuleFactories,
+    RuntimeRequirement::ModuleCache,
+    RuntimeRequirement::Require,
+    RuntimeRequirement::DefinePropertyGetters,
+    RuntimeRequirement::HasOwnProperty,
+    RuntimeRequirement::MakeNamespaceObject,
+    RuntimeRequirement::EnsureChunk,
+    RuntimeRequirement::EnsureChunkHandlers,
+    RuntimeRequirement::GetChunkFilename,
+    RuntimeRequirement::ModuleFactoriesAddOnly,
+    RuntimeRequirement::ReturnExportsFromRuntime,
+];
+
+const RUNTIME_REQUIREMENT_MASK: u16 = (1 << ALL_RUNTIME_REQUIREMENTS.len()) - 1;
 
 fn encode_runtime_requirements(requirements: &RuntimeRequirements) -> u16 {
     requirements.iter().fold(0, |mask, requirement| {
@@ -2710,17 +2725,7 @@ fn decode_runtime_requirements(mask: u16) -> Option<RuntimeRequirements> {
         return None;
     }
     let mut requirements = RuntimeRequirements::default();
-    for requirement in [
-        RuntimeRequirement::ModuleFactories,
-        RuntimeRequirement::ModuleCache,
-        RuntimeRequirement::Require,
-        RuntimeRequirement::DefinePropertyGetters,
-        RuntimeRequirement::HasOwnProperty,
-        RuntimeRequirement::MakeNamespaceObject,
-        RuntimeRequirement::EnsureChunk,
-        RuntimeRequirement::GetChunkFilename,
-        RuntimeRequirement::ReturnExportsFromRuntime,
-    ] {
+    for requirement in ALL_RUNTIME_REQUIREMENTS {
         if mask & (1 << runtime_requirement_bit(requirement)) != 0 {
             requirements.insert(requirement);
         }
@@ -2739,6 +2744,8 @@ const fn runtime_requirement_bit(requirement: RuntimeRequirement) -> u16 {
         RuntimeRequirement::EnsureChunk => 6,
         RuntimeRequirement::GetChunkFilename => 7,
         RuntimeRequirement::ReturnExportsFromRuntime => 8,
+        RuntimeRequirement::EnsureChunkHandlers => 9,
+        RuntimeRequirement::ModuleFactoriesAddOnly => 10,
     }
 }
 

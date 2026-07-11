@@ -4,9 +4,9 @@ This note compares the current Unpack implementation with the local webpack chec
 
 ## Webpack alignment boundary
 
-Unpack aims to align with webpack's public API shape and internal implementation model where practical. Existing ADRs define the current alignment shape:
+Unpack explores how far bundler performance can be pushed while aligning as closely as possible with webpack's architecture and functionality. Existing ADRs define the current alignment constraints:
 
-- `0001-align-with-webpack-where-practical.md`: use webpack's public API and implementation model as the default reference, with documented deviations.
+- `0137-explore-performance-ceiling-while-aligning-with-webpack.md`: use webpack's architecture and functionality as the reference constraints for performance exploration, with documented deviations.
 - `0018-use-webpack-like-compilation-pipeline.md`: keep recognizable make, chunk graph, code generation, and asset creation phases.
 - `0031-test-webpack-shaped-output-by-structure-and-semantics.md`: test structure and runtime semantics, not byte-for-byte webpack snapshots.
 

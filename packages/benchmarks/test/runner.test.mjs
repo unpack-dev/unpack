@@ -241,7 +241,21 @@ test("webpack-compatible adapters build the loader benchmark fixture", async () 
     );
     assert.match(loaderEntry, /@material-ui\/core/);
     assert.match(loaderEntry, /\.\/rome\.ts/);
-    assert.match(loaderEntry, /\.\/loader-data\/item0\.benchdata/);
+    assert.doesNotMatch(loaderEntry, /loader-data|benchdata/);
+
+    const rspackConfig = createRspackBenchmarkConfig({
+      fixture: {
+        context: join(workspace, "fixtures", "loader"),
+        entry: "./src/index.js",
+        requiresWebpackLoaders: true
+      },
+      outputDir: join(workspace, "output"),
+      cacheDir: join(workspace, "cache")
+    });
+    assert.equal(rspackConfig.module.rules.length, 1);
+    assert.equal(rspackConfig.module.rules[0].test.test("src/index.js"), true);
+    assert.equal(rspackConfig.module.rules[0].test.test("src/rome.ts"), false);
+    assert.match(rspackConfig.module.rules[0].loader, /swc-loader/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -475,61 +489,8 @@ printf 'raw trace\\n' > "${sourceTraceDir}/trace.log"
   }
 });
 
-test("turbopack adapter materializes loader fixture inputs as JavaScript modules", async () => {
-  const workspace = await mkdtemp(join(tmpdir(), "unpack-benchmarks-"));
-
-  try {
-    const binary = join(workspace, "tools", "turbopack-cli");
-    const argsLog = join(workspace, "turbopack-args.txt");
-    const fixtureContext = join(workspace, "fixture");
-    const cacheDir = join(workspace, "cache");
-
-    await mkdir(join(workspace, "tools"), { recursive: true });
-    await mkdir(join(fixtureContext, "src", "loader-data"), { recursive: true });
-    await writeFile(
-      binary,
-      `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsLog}"\n`,
-      "utf8"
-    );
-    await chmod(binary, 0o755);
-    await writeFile(
-      join(fixtureContext, "src", "index.js"),
-      [
-        'import value0 from "./loader-data/item0.benchdata";',
-        'import value1 from "./loader-data/item1.benchdata";',
-        "export const checksum = value0 + value1;"
-      ].join("\n") + "\n",
-      "utf8"
-    );
-    await writeFile(join(fixtureContext, "src", "loader-data", "item0.benchdata"), "1\n");
-    await writeFile(join(fixtureContext, "src", "loader-data", "item1.benchdata"), "2\n");
-
-    await adapters.turbopack.build({
-      fixture: {
-        context: fixtureContext,
-        entry: "./src/index.js",
-        loaderModuleCount: 2,
-        requiresWebpackLoaders: true
-      },
-      cacheDir,
-      options: {
-        turbopackBinary: binary
-      }
-    });
-
-    const entry = await readFile(join(fixtureContext, "src", "index.js"), "utf8");
-    assert.match(entry, /\.\/loader-data\/item0\.benchdata\.js/);
-    assert.doesNotMatch(entry, /\.\/loader-data\/item0\.benchdata"/);
-
-    const materialized = await readFile(
-      join(fixtureContext, "src", "loader-data", "item0.benchdata.js"),
-      "utf8"
-    );
-    assert.match(materialized, /const value = 1;/);
-    assert.match(materialized, /export default value;/);
-  } finally {
-    await rm(workspace, { recursive: true, force: true });
-  }
+test("turbopack does not claim support for the swc-loader fixture", () => {
+  assert.equal(adapters.turbopack.supportsLoaderFixture, undefined);
 });
 
 test("turbopack prepare patches build shutdown to flush persistent cache", async () => {

@@ -4,7 +4,9 @@ use std::{
     process::Command,
 };
 
-use unpack_core::{AsyncBlockOrigin, ChunkGroupKind, Compiler, CompilerOptions, Entry};
+use unpack_core::{
+    AsyncBlockOrigin, AsyncDependenciesBlockId, ChunkGroupKind, Compiler, CompilerOptions, Entry,
+};
 
 #[tokio::test]
 async fn seal_orchestrates_post_make_phases() -> Result<(), Box<dyn std::error::Error>> {
@@ -804,7 +806,7 @@ async fn nested_async_groups_terminate_and_collapse_available_back_edges()
     assert_eq!(
         chunk_graph.block_chunk_group(AsyncBlockOrigin {
             module: b_module.id(),
-            block_index: 0,
+            block: AsyncDependenciesBlockId::new(0),
         }),
         None,
         "B-to-A edge must collapse because A is already available on the loading path"
@@ -929,13 +931,13 @@ async fn nested_shared_parent_shrink_rescans_newly_required_modules()
     let c_from_p = chunk_graph
         .block_chunk_group(AsyncBlockOrigin {
             module: p,
-            block_index: 0,
+            block: AsyncDependenciesBlockId::new(0),
         })
         .expect("P-to-C must map to an Async Chunk Group");
     let c_from_q = chunk_graph
         .block_chunk_group(AsyncBlockOrigin {
             module: q,
-            block_index: 0,
+            block: AsyncDependenciesBlockId::new(0),
         })
         .expect("Q-to-C must reuse the Async Chunk Group");
     assert_eq!(c_from_p, c_from_q);
@@ -947,7 +949,7 @@ async fn nested_shared_parent_shrink_rescans_newly_required_modules()
     let y_group = chunk_graph
         .block_chunk_group(AsyncBlockOrigin {
             module: x,
-            block_index: 0,
+            block: AsyncDependenciesBlockId::new(0),
         })
         .expect("rescanning X must retain its nested Y split point");
     assert!(
@@ -986,7 +988,7 @@ fn chunk_group_topology(
                 format!(
                     "async:{}:{}",
                     module.identity().resource.display(),
-                    origin.block_index
+                    origin.block.index()
                 )
             }
         }

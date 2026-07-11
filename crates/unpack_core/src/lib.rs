@@ -45,7 +45,9 @@ pub use exports_info::ExportsInfo;
 pub use loader::{LoaderFuture, LoaderRequest, LoaderRunner, MatchedLoader, ModuleRule};
 pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions};
 pub use module::{Module, ModuleId, ModuleIdentity, ModuleType};
-pub use module_graph::{ModuleGraph, ModuleGraphConnection};
+pub use module_graph::{
+    AsyncDependenciesBlockId, DependencyId, ModuleGraph, ModuleGraphConnection,
+};
 pub use normal_module_factory::{FactorizedModule, NormalModuleFactory};
 pub use resolver::{ResolveOptions, ResolvedResource, UnpackResolver};
 pub use snapshot::{SnapshotOptions, SnapshotPathPattern, SnapshotStrategy};

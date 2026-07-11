@@ -32,6 +32,9 @@ pub enum Error {
         message: String,
     },
 
+    #[error("loader rules failed for {path}: {message}")]
+    LoaderRules { path: PathBuf, message: String },
+
     #[error("unsupported dynamic import in {path}: {message}")]
     UnsupportedDynamicImport { path: PathBuf, message: String },
 
@@ -63,6 +66,7 @@ impl Error {
                 | Self::Read { .. }
                 | Self::Parse { .. }
                 | Self::Loader { .. }
+                | Self::LoaderRules { .. }
                 | Self::UnsupportedDynamicImport { .. }
                 | Self::CodeGeneration { .. }
         )

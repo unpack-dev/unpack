@@ -42,7 +42,7 @@ pub use dependency::{
 };
 pub use error::{Error, Result};
 pub use exports_info::ExportsInfo;
-pub use loader::{LoaderFuture, LoaderRequest, LoaderRunner, ModuleRule};
+pub use loader::{LoaderFuture, LoaderRequest, LoaderRunner, MatchedLoader, ModuleRule};
 pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions};
 pub use module::{Module, ModuleId, ModuleIdentity, ModuleType};
 pub use module_graph::{ModuleGraph, ModuleGraphConnection};

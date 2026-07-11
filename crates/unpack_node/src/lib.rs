@@ -64,14 +64,15 @@ pub struct NativeCompilerOptions {
     #[napi(js_name = "infrastructureLogging")]
     pub infrastructure_logging: NativeInfrastructureLoggingOptions,
     pub sourcemap: bool,
-    #[napi(js_name = "moduleRule")]
-    pub module_rule: Option<NativeModuleRule>,
+    #[napi(js_name = "moduleRules")]
+    pub module_rules: Vec<NativeModuleRule>,
 }
 
 #[napi(object)]
 pub struct NativeModuleRule {
     pub test: String,
     pub loader: String,
+    pub options: String,
 }
 
 #[napi(object)]
@@ -210,16 +211,16 @@ pub struct NativeFlushResult {
 #[napi(js_name = "createCompiler")]
 pub fn create_compiler(
     options: NativeCompilerOptions,
-    loader_callback: Option<Function<'_, FnArgs<(String, String, String)>, String>>,
+    loader_callback: Option<Function<'_, FnArgs<(String, String, String, String)>, String>>,
 ) -> Result<NativeCompiler> {
     init_internal_tracing_from_env();
     NativeCompiler::new(options, loader_callback)
 }
 
 type NativeLoaderCallback = ThreadsafeFunction<
-    FnArgs<(String, String, String)>,
+    FnArgs<(String, String, String, String)>,
     String,
-    FnArgs<(String, String, String)>,
+    FnArgs<(String, String, String, String)>,
     Status,
     false,
 >;
@@ -245,6 +246,7 @@ impl LoaderRunner for NativeLoaderRunner {
                     loader.clone(),
                     resource.clone(),
                     request.source,
+                    request.options,
                 )))
                 .await
                 .map_err(|error| CoreError::Loader {
@@ -338,7 +340,7 @@ fn internal_tracing_filter() -> Option<String> {
 impl NativeCompiler {
     fn new(
         options: NativeCompilerOptions,
-        loader_callback: Option<Function<'_, FnArgs<(String, String, String)>, String>>,
+        loader_callback: Option<Function<'_, FnArgs<(String, String, String, String)>, String>>,
     ) -> Result<Self> {
         let context = PathBuf::from(&options.context);
         let output_path = PathBuf::from(&options.output_path);
@@ -353,14 +355,15 @@ impl NativeCompiler {
         compiler_options.infrastructure_logging =
             infrastructure_logging_options_from_native(options.infrastructure_logging);
         compiler_options.sourcemap = options.sourcemap;
-        compiler_options.module_rule = options
-            .module_rule
+        compiler_options.module_rules = options
+            .module_rules
+            .into_iter()
             .map(|rule| {
-                ModuleRule::new(&rule.test, rule.loader).map_err(|error| {
+                ModuleRule::new(&rule.test, rule.loader, rule.options).map_err(|error| {
                     napi::Error::from_reason(format!("options.module.rules[0].test: {error}"))
                 })
             })
-            .transpose()?;
+            .collect::<Result<Vec<_>>>()?;
         compiler_options.loader_runner = loader_callback
             .map(|callback| {
                 let callback: NativeLoaderCallback = callback
@@ -634,7 +637,8 @@ fn stats_error(error: &CoreError) -> NativeStatsError {
         },
         CoreError::Read { path, message }
         | CoreError::Parse { path, message }
-        | CoreError::Loader { path, message, .. } => NativeStatsError {
+        | CoreError::Loader { path, message, .. }
+        | CoreError::LoaderRules { path, message } => NativeStatsError {
             message: error.to_string(),
             path: Some(path.to_string_lossy().into_owned()),
             request: None,

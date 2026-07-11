@@ -25,6 +25,7 @@ export interface ModuleOptions {
 export interface ModuleRule {
   test: RegExp;
   loader: string;
+  options?: Record<string, unknown>;
 }
 
 export type Mode = "development" | "production" | "none";
@@ -157,12 +158,13 @@ interface NormalizedOptions {
   cache: NormalizedCacheOptions;
   snapshot: NormalizedSnapshotOptions;
   infrastructureLogging: NormalizedInfrastructureLoggingOptions;
-  moduleRule?: NormalizedModuleRule;
+  moduleRules: NormalizedModuleRule[];
 }
 
 interface NormalizedModuleRule {
   test: string;
   loader: string;
+  options: string;
 }
 
 interface NormalizedCacheOptions {
@@ -297,7 +299,12 @@ interface NativeCompiler {
 interface NativeBinding {
   createCompiler(
     options: NormalizedOptions,
-    loaderRunner?: (loader: string, resource: string, source: string) => string
+    loaderRunner?: (
+      loader: string,
+      resource: string,
+      source: string,
+      options: string
+    ) => string
   ): NativeCompiler;
 }
 
@@ -313,29 +320,37 @@ const unpackToolchainBuildDependencies = [
 ];
 
 type LoaderFunction = (
-  this: { resourcePath: string; rootContext: string },
+  this: {
+    resourcePath: string;
+    rootContext: string;
+    sourceMap: false;
+    getOptions(): Record<string, unknown>;
+    async(): (error: unknown, source?: unknown) => void;
+  },
   source: string
 ) => unknown;
 
+type LoaderState =
+  | { failed: false; loader: LoaderFunction }
+  | { failed: true; error: unknown };
+
 class LoaderRuntime {
-  #loader: LoaderFunction | undefined;
-  #loadAttempted = false;
-  #loadError: unknown;
+  readonly #loaders = new Map<string, LoaderState>();
 
   constructor(private readonly rootContext: string) {}
 
   beginCompilation(): void {
-    this.#loader = undefined;
-    this.#loadAttempted = false;
-    this.#loadError = undefined;
+    this.#loaders.clear();
   }
 
-  readonly run = (loaderPath: string, resourcePath: string, source: string): string => {
-    if (this.#loader === undefined) {
-      if (this.#loadAttempted) {
-        throw this.#loadError;
-      }
-      this.#loadAttempted = true;
+  readonly run = (
+    loaderPath: string,
+    resourcePath: string,
+    source: string,
+    serializedOptions: string
+  ): string => {
+    let state = this.#loaders.get(loaderPath);
+    if (state === undefined) {
       try {
         const resolvedLoaderPath = require.resolve(loaderPath);
         delete require.cache[resolvedLoaderPath];
@@ -343,19 +358,44 @@ class LoaderRuntime {
         if (typeof loaded !== "function") {
           throw new TypeError(`loader ${loaderPath} must export a CommonJS function`);
         }
-        this.#loader = loaded as LoaderFunction;
+        state = { failed: false, loader: loaded as LoaderFunction };
       } catch (error) {
-        this.#loadError = error;
-        throw error;
+        state = { failed: true, error };
       }
+      this.#loaders.set(loaderPath, state);
     }
+    if (state.failed) throw state.error;
 
-    const result = this.#loader.call(
-      { resourcePath, rootContext: this.rootContext },
+    let callbackCalled = false;
+    let callbackError: unknown;
+    let callbackSource: unknown;
+    const callback = (error: unknown, transformedSource?: unknown): void => {
+      callbackCalled = true;
+      callbackError = error;
+      callbackSource = transformedSource;
+    };
+
+    const result = state.loader.call(
+      {
+        resourcePath,
+        rootContext: this.rootContext,
+        sourceMap: false,
+        getOptions: () => JSON.parse(serializedOptions) as Record<string, unknown>,
+        async: () => callback
+      },
       source
     );
+    if (callbackCalled) {
+      if (callbackError != null) throw callbackError;
+      if (typeof callbackSource !== "string") {
+        throw new TypeError(`loader ${loaderPath} callback must provide a string`);
+      }
+      return callbackSource;
+    }
     if (typeof result !== "string") {
-      throw new TypeError(`loader ${loaderPath} must return a string`);
+      throw new TypeError(
+        `loader ${loaderPath} must return a string or invoke its callback synchronously`
+      );
     }
     return result;
   };
@@ -377,7 +417,7 @@ class CompilerImpl implements Compiler {
   readonly #loaderRuntime: LoaderRuntime | undefined;
 
   constructor(options: NormalizedOptions) {
-    this.#loaderRuntime = options.moduleRule
+    this.#loaderRuntime = options.moduleRules.length > 0
       ? new LoaderRuntime(options.context)
       : undefined;
     this.#nativeCompiler = native.createCompiler(options, this.#loaderRuntime?.run);
@@ -913,19 +953,34 @@ class StatsImpl implements Stats {
 
 export default function unpack(
   options: UnpackOptions,
+  callback: RunCallback
+): Compiler | null;
+export default function unpack(
+  options: UnpackOptions,
+  callback?: undefined
+): Compiler;
+export default function unpack(
+  options: UnpackOptions,
   callback?: RunCallback
-): Compiler {
+): Compiler | null {
   if (callback !== undefined) {
     assertFunction(callback, "callback");
   }
 
-  const compiler = new CompilerImpl(normalizeOptions(options));
+  let compiler: Compiler;
+  try {
+    compiler = new CompilerImpl(normalizeOptions(options));
+  } catch (error) {
+    if (callback === undefined) {
+      throw error;
+    }
+
+    const constructionError = toError(error, "InfrastructureError");
+    defer(() => callback(constructionError));
+    return null;
+  }
   if (callback) {
-    compiler.run((runErr, stats) => {
-      compiler.close((closeErr) => {
-        callback(runErr ?? closeErr, stats);
-      });
-    });
+    compiler.run(callback);
   }
   return compiler;
 }
@@ -973,8 +1028,8 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     options.sourcemap === undefined
       ? true
       : assertBoolean(options.sourcemap, "options.sourcemap");
-  const moduleRule = normalizeModuleOptions(options.module);
-  if (moduleRule && sourcemap) {
+  const moduleRules = normalizeModuleOptions(options.module);
+  if (moduleRules.length > 0 && sourcemap) {
     throw new TypeError("options.sourcemap must be false when options.module.rules is configured");
   }
 
@@ -986,35 +1041,41 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     cache: normalizeCacheOptions(options.cache, normalizedContext, mode, name),
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
-    ...(moduleRule === undefined ? {} : { moduleRule })
+    moduleRules
   };
 }
 
-function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedModuleRule | undefined {
-  if (module === undefined) return undefined;
+function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedModuleRule[] {
+  if (module === undefined) return [];
   assertPlainObject(module, "options.module");
   assertKnownKeys(module, ["rules"], "options.module");
   if (!Array.isArray(module.rules)) {
     throw new TypeError("options.module.rules must be an array");
   }
-  if (module.rules.length > 1) {
-    throw new TypeError("options.module.rules supports at most one rule");
-  }
-  const rule = module.rules[0];
-  if (rule === undefined) return undefined;
-  assertPlainObject(rule, "options.module.rules[0]");
-  assertKnownKeys(rule, ["test", "loader"], "options.module.rules[0]");
-  if (!(rule.test instanceof RegExp)) {
-    throw new TypeError("options.module.rules[0].test must be a RegExp");
-  }
-  if (rule.test.flags !== "") {
-    throw new TypeError("options.module.rules[0].test must not use flags");
-  }
-  const loader = assertString(rule.loader, "options.module.rules[0].loader");
-  if (!isAbsolute(loader)) {
-    throw new TypeError("options.module.rules[0].loader must be an absolute path");
-  }
-  return { test: rule.test.source, loader };
+  return module.rules.map((rule, index) => {
+    const name = `options.module.rules[${index}]`;
+    assertPlainObject(rule, name);
+    assertKnownKeys(rule, ["test", "loader", "options"], name);
+    if (!(rule.test instanceof RegExp)) {
+      throw new TypeError(`${name}.test must be a RegExp`);
+    }
+    if (rule.test.flags !== "") {
+      throw new TypeError(`${name}.test must not use flags`);
+    }
+    const loader = assertString(rule.loader, `${name}.loader`);
+    if (!isAbsolute(loader)) {
+      throw new TypeError(`${name}.loader must be an absolute path`);
+    }
+    const options = rule.options ?? {};
+    assertPlainObject(options, `${name}.options`);
+    let serializedOptions: string;
+    try {
+      serializedOptions = JSON.stringify(options);
+    } catch {
+      throw new TypeError(`${name}.options must be JSON-serializable`);
+    }
+    return { test: rule.test.source, loader, options: serializedOptions };
+  });
 }
 
 function normalizeEntry(entry: UnpackOptions["entry"]): NormalizedEntry[] {

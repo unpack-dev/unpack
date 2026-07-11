@@ -107,28 +107,16 @@ test("module rules reject unsupported loader configuration synchronously", () =>
   const invalidOptions: Array<[UnpackOptions, RegExp]> = [
     [{ ...base, module: { rules: [{ test: /x/i, loader: absoluteLoader }] } }, /must not use flags/],
     [{ ...base, module: { rules: [{ test: /x/, loader: "./loader.cjs" }] } }, /absolute path/],
-    [
-      {
-        ...base,
-        module: {
-          rules: [
-            { test: /x/, loader: absoluteLoader },
-            { test: /y/, loader: absoluteLoader }
-          ]
-        }
-      },
-      /at most one rule/
-    ],
     [{ entry: "./src/index.js", module: { rules: [{ test: /x/, loader: absoluteLoader }] } }, /sourcemap must be false/],
     [{ ...base, module: { rules: [{ test: /x(?=y)/, loader: absoluteLoader }] } }, /look-around/],
     [
       {
         ...base,
         module: {
-          rules: [{ test: /x/, loader: absoluteLoader, options: {} }]
+          rules: [{ test: /x/, loader: absoluteLoader, use: [] }]
         }
       } as unknown as UnpackOptions,
-      /unknown option 'options'/
+      /unknown option 'use'/
     ]
   ];
 

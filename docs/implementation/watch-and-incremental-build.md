@@ -65,4 +65,4 @@ Expose the JavaScript API after the native and core lifecycle is stateful.
 - `compiler.watch(watchOptions, handler)` starts a watch session and performs the initial compilation.
 - The returned `Watching` exposes `close(callback)` and `invalidate()`.
 - `watchOptions` initially supports `aggregateTimeout`, `ignored`, and `poll`.
-- `unpack(options, callback)` remains a single run plus automatic compiler close.
+- `unpack(options, callback)` performs a single run and leaves the successfully returned Compiler caller-owned and reusable until explicit close.

@@ -1,6 +1,6 @@
 # Cross-Bundler Benchmark
 
-The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack on the `large` and `loader` Benchmark Fixtures. The `large` fixture is derived from webpack's `benchmark/cases/all` workload and generated locally so benchmark runs do not need network access. The `loader` fixture uses the same `large` workload with an added webpack-compatible loader pipeline shared by Unpack, webpack, and Rspack. The Turbopack CLI adapter materializes equivalent JavaScript modules for the loader inputs because the pinned standalone CLI does not expose webpack loader rules. Adapters without a loader-fixture path report `unsupported`. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
+The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack on the `large` and `loader` Benchmark Fixtures. The `large` fixture is derived from webpack's `benchmark/cases/all` workload and generated locally so benchmark runs do not need network access. The `loader` fixture uses the same module graph and checksum as `large`, but Unpack, webpack, and Rspack run every JavaScript module plus the fixture's `rome.ts` entry through `swc-loader`. Adapters without webpack-compatible loader rules report `unsupported`. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
 
 ## Local Run
 
@@ -56,7 +56,7 @@ trace server with `pnpm next internal trace <trace.log>` or
 
 ## Result Shape
 
-The runner emits a Markdown summary and can write the raw JSON report with `--output-json`.
+The runner emits a Markdown summary with the loader results in the first table and the results without loaders in a separate second table. It can also write the raw JSON report with `--output-json`.
 
 Important fields:
 

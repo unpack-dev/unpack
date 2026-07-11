@@ -67,12 +67,26 @@ export async function runBenchmark(options = {}) {
 }
 
 export function toSummaryMarkdown(report) {
+  const groups = [
+    ["### Loader Benchmarks", report.results.filter((result) => result.fixture === "loader")],
+    [
+      "### Benchmarks Without Loaders",
+      report.results.filter((result) => result.fixture !== "loader")
+    ]
+  ].filter(([, results]) => results.length > 0);
+
+  return `${groups
+    .map(([heading, results]) => `${heading}\n\n${toSummaryTable(results)}`)
+    .join("\n\n")}\n`;
+}
+
+function toSummaryTable(results) {
   const lines = [
     "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | no_cache_build_ms | output_bytes | status |",
     "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"
   ];
 
-  for (const result of report.results) {
+  for (const result of results) {
     lines.push(
       [
         result.fixture,
@@ -87,7 +101,7 @@ export function toSummaryMarkdown(report) {
     );
   }
 
-  return `${lines.join("\n")}\n`;
+  return lines.join("\n");
 }
 
 async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, options }) {

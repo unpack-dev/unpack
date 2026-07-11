@@ -3,7 +3,6 @@ import { dirname, join } from "node:path";
 
 const WEBPACK_ALL_COMMIT = "d3a1ca290b4b887757a45901288ea30f86b2f842";
 const LARGE_BASE_CHECKSUM = 100000;
-const LOADER_MODULE_COUNT = 300;
 const THREE_COPY_COUNT = 10;
 const THREE_PARTS_PER_COPY = 20;
 const ROME_MODULE_COUNT = 80;
@@ -20,9 +19,7 @@ export const FIXTURE_SHAPES = {
   loader: {
     name: "loader",
     kind: "loader",
-    moduleCount: LOADER_MODULE_COUNT,
-    expectedChecksum:
-      largeExpectedChecksum() + loaderExpectedChecksum(LOADER_MODULE_COUNT)
+    expectedChecksum: largeExpectedChecksum()
   }
 };
 
@@ -168,11 +165,7 @@ export async function createBenchmarkFixture(rootDir, shape) {
   await rm(context, { recursive: true, force: true });
   await mkdir(context, { recursive: true });
 
-  if (shape.kind === "loader") {
-    await writeLoaderFixture(context, shape);
-  } else {
-    await writeWebpackAllFixture(context, shape);
-  }
+  await writeWebpackAllFixture(context, shape);
 
   return {
     name: shape.name,
@@ -180,7 +173,6 @@ export async function createBenchmarkFixture(rootDir, shape) {
     entry: "./src/index.js",
     expectedChecksum: shape.expectedChecksum,
     fixtureKind: shape.kind,
-    loaderModuleCount: shape.moduleCount ?? 0,
     requiresWebpackLoaders: shape.kind === "loader",
     warmBuildMutationApplied: false
   };
@@ -195,10 +187,7 @@ export async function applyWarmBuildMutation(fixture) {
   await writeSource(
     join(fixture.context, "src/index.js"),
     webpackAllEntrySource(
-      {
-        kind: fixture.fixtureKind,
-        moduleCount: fixture.loaderModuleCount
-      },
+      { kind: fixture.fixtureKind },
       { excludedCopy: WARM_BUILD_GRAPH_COPY }
     )
   );
@@ -212,7 +201,7 @@ async function writeWebpackAllFixture(context, shape) {
     benchmarkCase: {
       source: "webpack/benchmark/cases/all",
       commit: WEBPACK_ALL_COMMIT,
-      loaderOverlay: shape.kind === "loader"
+      loaderTransform: shape.kind === "loader" ? "swc-loader" : null
     },
     dependencies: WEBPACK_ALL_DEPENDENCIES
   });
@@ -230,21 +219,6 @@ async function writeWebpackAllFixture(context, shape) {
   await writeWebpackAllPackages(context);
   await writeThreeCopies(context);
   await writeRomeTree(context);
-}
-
-async function writeLoaderFixture(context, shape) {
-  await writeWebpackAllFixture(context, shape);
-  await writeSource(
-    join(context, "loaders/benchmark-loader.cjs"),
-    benchmarkLoaderSource()
-  );
-
-  for (let index = 0; index < shape.moduleCount; index += 1) {
-    await writeSource(
-      join(context, `src/loader-data/item${index}.benchdata`),
-      `${index + 1}\n`
-    );
-  }
 }
 
 async function writeWebpackAllPackages(context) {
@@ -468,11 +442,9 @@ ${copyImports.join("\n")}
 import "./rome.ts";
 
 import { benchmarkChecksum } from "./__benchmark_checksum.js";
-${loaderEntryImports(shape)}
 
 ${copyChecksumSource}
-${loaderChecksumSource(shape)}
-export const checksum = benchmarkChecksum + copyChecksum + loaderChecksum;
+export const checksum = benchmarkChecksum + copyChecksum;
 export default { checksum };
 
 console.log("Hello World", checksum);
@@ -504,54 +476,6 @@ function romeEntrySource() {
   return `import "./rome/internal/cli/cli";
 
 console.log("Hello World");
-`;
-}
-
-function loaderEntryImports(shape) {
-  if (shape.kind !== "loader") {
-    return "";
-  }
-
-  const imports = [];
-  for (let index = 0; index < shape.moduleCount; index += 1) {
-    imports.push(`import value${index} from "./loader-data/item${index}.benchdata";`);
-  }
-
-  return `
-// webpack-compatible loader overlay
-${imports.join("\n")}
-`;
-}
-
-function loaderChecksumSource(shape) {
-  if (shape.kind !== "loader") {
-    return "const loaderChecksum = 0;";
-  }
-
-  const values = [];
-  for (let index = 0; index < shape.moduleCount; index += 1) {
-    values.push(`value${index}`);
-  }
-
-  return `const loaderValues = [
-  ${values.join(",\n  ")}
-];
-
-const loaderChecksum = loaderValues.reduce((total, value) => total + value, 0);`;
-}
-
-function benchmarkLoaderSource() {
-  return `module.exports = function benchmarkLoader(source) {
-  const value = Number.parseInt(String(source).trim(), 10);
-  if (!Number.isFinite(value)) {
-    throw new Error("benchmark loader expected a numeric payload");
-  }
-  return [
-    \`const value = \${value};\`,
-    "export default value;",
-    "export { value as loadedValue };"
-  ].join("\\n");
-};
 `;
 }
 
@@ -635,10 +559,6 @@ export const helperName = ${JSON.stringify(helper)};
 
 function checksumSource(checksum) {
   return `export const benchmarkChecksum = ${checksum};\n`;
-}
-
-function loaderExpectedChecksum(moduleCount) {
-  return (moduleCount * (moduleCount + 1)) / 2;
 }
 
 function largeExpectedChecksum() {

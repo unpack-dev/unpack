@@ -68,6 +68,7 @@ mod tests {
             PackFileReadStats {
                 index_reads: 1,
                 content_reads: 0,
+                content_pack_reads: 0,
                 content_bytes_read: 0,
                 decoded_records: 0,
                 retained_content_bytes: 0,
@@ -94,6 +95,98 @@ mod tests {
         assert!(stats.content_bytes_read > 0);
         assert_eq!(stats.decoded_records, 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn uncompressed_content_pack_is_read_once_and_reused_across_records()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let first = PackFileAddress::new("unpack/dummy", b"first");
+        let second = PackFileAddress::new("unpack/dummy", b"second");
+        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let mut batch = PackFileWriteBatch::new();
+        batch.insert(&registry, first.clone(), None, DummyItem(vec![1; 96]))?;
+        batch.insert(&registry, second.clone(), None, DummyItem(vec![2; 96]))?;
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::ReplaceAll,
+            batch,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_000), DEFAULT_MAX_AGE),
+                PackFileCompression::None,
+            ),
+        )?;
+
+        let index = decode_index(&fs::read(PackFile::index_path(temp.path()))?)
+            .expect("decode uncompressed PackFile index");
+        let first_content = &index.entries[&first].content;
+        let second_content = &index.entries[&second].content;
+        assert_eq!(first_content.file, second_content.file);
+        let content_path = temp.path().join(&first_content.file);
+        let pack_size = usize::try_from(first_content.pack_size)?;
+
+        let mut reopened =
+            PackFile::open_with_options(temp.path(), registry, PackFileOpenOptions::new(false));
+        assert_eq!(
+            reopened.get::<DummyItem>(&first, None).as_deref(),
+            Some(&DummyItem(vec![1; 96]))
+        );
+        assert_eq!(reopened.read_stats().content_pack_reads, 1);
+        assert_eq!(reopened.read_stats().retained_content_bytes, pack_size);
+
+        fs::remove_file(content_path)?;
+        assert_eq!(
+            reopened.get::<DummyItem>(&second, None).as_deref(),
+            Some(&DummyItem(vec![2; 96]))
+        );
+        assert_eq!(reopened.read_stats().content_pack_reads, 1);
+        assert_eq!(reopened.read_stats().retained_content_bytes, pack_size);
+        Ok(())
+    }
+
+    #[test]
+    fn retained_content_pack_rejects_conflicting_index_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let first = PackFileAddress::new("unpack/dummy", b"first");
+        let second = PackFileAddress::new("unpack/dummy", b"second");
+        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let mut batch = PackFileWriteBatch::new();
+        batch.insert(&registry, first.clone(), None, DummyItem(vec![1; 32]))?;
+        batch.insert(&registry, second.clone(), None, DummyItem(vec![2; 32]))?;
+        PackFile::publish_batch_with_options(
+            temp.path(),
+            None,
+            PublicationBase::ReplaceAll,
+            batch,
+            PackFilePublicationOptions::new(
+                PackFileRetention::new(AccessStamp::from_millis(1_000), DEFAULT_MAX_AGE),
+                PackFileCompression::None,
+            ),
+        )?;
+
+        let index_path = PackFile::index_path(temp.path());
+        let mut index = decode_index(&fs::read(&index_path)?).expect("decode PackFile index");
+        assert_eq!(
+            index.entries[&first].content.file,
+            index.entries[&second].content.file
+        );
+        index
+            .entries
+            .get_mut(&second)
+            .expect("second entry should exist")
+            .content
+            .compression = PackFileCompression::Gzip;
+        fs::write(index_path, encode_index(&index)?)?;
+
+        let mut reopened = PackFile::open(temp.path(), registry);
+        assert_eq!(
+            reopened.get::<DummyItem>(&first, None).as_deref(),
+            Some(&DummyItem(vec![1; 32]))
+        );
+        assert!(reopened.get::<DummyItem>(&second, None).is_none());
         Ok(())
     }
 
@@ -251,7 +344,7 @@ mod tests {
         let record = CodeGenerationRecordDto {
             source: CodeGenerationSourceDto::OriginalWithReplacements {
                 prefix: "(() => {\n".to_string(),
-                original_source: "export const value = before;".to_string(),
+                original_source_len: 28,
                 original_name: "./src/index.js".to_string(),
                 replacements: vec![CodeGenerationReplacementDto {
                     start: 21,
@@ -262,6 +355,7 @@ mod tests {
                 }],
                 suffix: "\n})".to_string(),
             },
+            runtime_requirements: RUNTIME_REQUIREMENT_MASK,
         };
         let registry =
             CodecRegistry::new().with_code_generation_record(CodeGenerationRecordCodec::current());
@@ -294,13 +388,14 @@ mod tests {
             source: CodeGenerationSourceDto::Raw {
                 source: "throw new Error('failed module');".to_string(),
             },
+            runtime_requirements: 0,
         };
-        assert_eq!(codec.decode(&codec.encode(&raw)?), Some(raw));
+        assert_eq!(codec.decode(&codec.encode(&raw)?), Some(raw.clone()));
 
         let invalid_range = CodeGenerationRecordDto {
             source: CodeGenerationSourceDto::OriginalWithReplacements {
                 prefix: String::new(),
-                original_source: "short".to_string(),
+                original_source_len: 5,
                 original_name: "./short.js".to_string(),
                 replacements: vec![CodeGenerationReplacementDto {
                     start: 0,
@@ -311,6 +406,7 @@ mod tests {
                 }],
                 suffix: String::new(),
             },
+            runtime_requirements: 0,
         };
         assert!(codec.encode(&invalid_range).is_err());
 
@@ -318,9 +414,21 @@ mod tests {
             source: CodeGenerationSourceDto::Raw {
                 source: "valid".to_string(),
             },
+            runtime_requirements: 0,
         })?;
-        unknown_tag[0] = 0xff;
+        unknown_tag[4] = 0xff;
         assert!(codec.decode(&unknown_tag).is_none());
+
+        let unknown_requirement = CodeGenerationRecordDto {
+            source: CodeGenerationSourceDto::Raw {
+                source: "valid".to_string(),
+            },
+            runtime_requirements: 1 << 15,
+        };
+        assert!(codec.encode(&unknown_requirement).is_err());
+        let mut corrupted_requirement = codec.encode(&raw)?;
+        corrupted_requirement[..4].copy_from_slice(&(1_u32 << 15).to_le_bytes());
+        assert!(codec.decode(&corrupted_requirement).is_none());
         Ok(())
     }
 
@@ -1234,23 +1342,29 @@ mod tests {
         let module_record = ModuleBuildRecord::try_from(module_dto.clone())?;
         assert_eq!(ModuleBuildRecordDto::try_from(&module_record)?, module_dto);
 
-        let code_generation_source = CodeGenerationSource::OriginalWithReplacements {
-            prefix: "prefix".to_string(),
-            original_source: "before".to_string(),
-            original_name: "./fixture.js".to_string(),
-            replacements: vec![CodeGenerationReplacement {
-                start: 0,
-                end: 6,
-                content: "after".to_string(),
-                name: None,
-                enforce: ReplacementEnforce::Normal,
-            }],
-            suffix: "suffix".to_string(),
-        };
-        let code_generation_dto = CodeGenerationRecordDto::from(&code_generation_source);
+        let mut runtime_requirements = RuntimeRequirements::default();
+        for requirement in ALL_RUNTIME_REQUIREMENTS {
+            runtime_requirements.insert(requirement);
+        }
+        let code_generation_record =
+            CodeGenerationRecord::new(CodeGenerationSource::OriginalWithReplacements {
+                prefix: "prefix".to_string(),
+                original_source_len: 6,
+                original_name: "./fixture.js".to_string(),
+                replacements: vec![CodeGenerationReplacement {
+                    start: 0,
+                    end: 6,
+                    content: "after".to_string(),
+                    name: None,
+                    enforce: ReplacementEnforce::Normal,
+                }],
+                suffix: "suffix".to_string(),
+            })
+            .with_runtime_requirements(runtime_requirements);
+        let code_generation_dto = CodeGenerationRecordDto::from(&code_generation_record);
         assert_eq!(
-            CodeGenerationSource::try_from(code_generation_dto)?,
-            code_generation_source
+            CodeGenerationRecord::try_from(code_generation_dto)?,
+            code_generation_record
         );
         Ok(())
     }
@@ -1442,7 +1556,8 @@ mod tests {
 
         let path = PathBytes(vec![b'/', b'p', b'k', b'g', 0xff]);
         assert_eq!(
-            path.to_path_buf()
+            path.clone()
+                .into_path_buf()
                 .expect("Linux path bytes should be recoverable")
                 .as_os_str()
                 .as_bytes(),
@@ -1742,11 +1857,7 @@ use std::{
 
 use brotli::{CompressorWriter, Decompressor};
 use flate2::{Compression as GzipLevel, read::GzDecoder, write::GzEncoder};
-#[cfg(test)]
 use rspack_sources::ReplacementEnforce;
-
-#[cfg(test)]
-use crate::code_generation_record::{CodeGenerationReplacement, CodeGenerationSource};
 
 use crate::{
     AsyncDependenciesBlock, ConstDependency, Dependency, EntryDependency,
@@ -1756,8 +1867,12 @@ use crate::{
     ModuleDependency, ModuleIdentity, ModuleType, NullDependency, SourceRange,
     build_cache::{ModuleBuildRecord, ResolveRecord},
     cache_hash::stable_hash,
+    code_generation_record::{
+        CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationSource,
+    },
     parser::ParsedModule,
     rendered_source::RenderedSource,
+    runtime::{RuntimeRequirement, RuntimeRequirements},
     snapshot::{PersistentManagedItemState, PersistentSnapshotEntry, Snapshot},
 };
 
@@ -1789,13 +1904,11 @@ const BROTLI_WINDOW_BITS: u32 = 22;
 const GZIP_LEVEL: u32 = 6;
 const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
 const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c001");
-#[cfg(test)]
-const CODE_GENERATION_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.cgen.c001");
+const CODE_GENERATION_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.cgen.c003");
 const ASSET_RENDER_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.astr.c001");
 pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.resolve.1");
 pub(crate) const MODULE_BUILD_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.moduleb.1");
-#[cfg(test)]
 pub(crate) const CODE_GENERATION_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.codegen.1");
 pub(crate) const ASSET_RENDER_RECORD_TYPE_ID: StableTypeId =
@@ -1980,13 +2093,13 @@ impl PathBytes {
     }
 
     #[cfg(unix)]
-    pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
-        Some(PathBuf::from(std::ffi::OsString::from_vec(self.0.clone())))
+    pub(crate) fn into_path_buf(self) -> Option<PathBuf> {
+        Some(PathBuf::from(std::ffi::OsString::from_vec(self.0)))
     }
 
     #[cfg(not(unix))]
-    pub(crate) fn to_path_buf(&self) -> Option<PathBuf> {
-        String::from_utf8(self.0.clone()).ok().map(PathBuf::from)
+    pub(crate) fn into_path_buf(self) -> Option<PathBuf> {
+        String::from_utf8(self.0).ok().map(PathBuf::from)
     }
 }
 
@@ -2074,13 +2187,12 @@ pub(crate) struct AssetRenderRecordDto {
     pub(crate) source_map: Option<String>,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeGenerationRecordDto {
     pub(crate) source: CodeGenerationSourceDto,
+    pub(crate) runtime_requirements: u16,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CodeGenerationSourceDto {
     Raw {
@@ -2088,14 +2200,13 @@ pub(crate) enum CodeGenerationSourceDto {
     },
     OriginalWithReplacements {
         prefix: String,
-        original_source: String,
+        original_source_len: u32,
         original_name: String,
         replacements: Vec<CodeGenerationReplacementDto>,
         suffix: String,
     },
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeGenerationReplacementDto {
     pub(crate) start: u32,
@@ -2105,7 +2216,6 @@ pub(crate) struct CodeGenerationReplacementDto {
     pub(crate) enforce: ReplacementEnforceDto,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplacementEnforceDto {
     Pre,
@@ -2465,7 +2575,7 @@ impl TryFrom<&ModuleBuildRecord> for ModuleBuildRecordDto {
     type Error = io::Error;
 
     fn try_from(record: &ModuleBuildRecord) -> io::Result<Self> {
-        let (parsed, source, source_hash) = record.cloned_parts();
+        let (parsed, source, source_hash) = record.persistent_parts();
         let source_hash = source_hash.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2473,8 +2583,8 @@ impl TryFrom<&ModuleBuildRecord> for ModuleBuildRecordDto {
             )
         })?;
         let dto = Self {
-            parsed: ParsedModuleDto::try_from(&parsed)?,
-            source,
+            parsed: ParsedModuleDto::try_from(parsed)?,
+            source: source.to_string(),
             source_hash,
             snapshot: SnapshotDto::try_from(record.snapshot())?,
         };
@@ -2487,31 +2597,36 @@ impl TryFrom<ModuleBuildRecordDto> for ModuleBuildRecord {
     type Error = io::Error;
 
     fn try_from(record: ModuleBuildRecordDto) -> io::Result<Self> {
-        validate_module_build_record(&record)?;
-        Ok(ModuleBuildRecord::new(
-            ParsedModule::try_from(&record.parsed)?,
-            record.source,
-            Snapshot::try_from(record.snapshot)?,
+        let ModuleBuildRecordDto {
+            parsed,
+            source,
+            source_hash,
+            snapshot,
+        } = record;
+        Ok(ModuleBuildRecord::from_persistent_parts(
+            ParsedModule::try_from(parsed)?,
+            source,
+            source_hash,
+            Snapshot::try_from(snapshot)?,
         ))
     }
 }
 
-#[cfg(test)]
-impl From<&CodeGenerationSource> for CodeGenerationRecordDto {
-    fn from(record: &CodeGenerationSource) -> Self {
-        let source = match record {
+impl From<&CodeGenerationRecord> for CodeGenerationRecordDto {
+    fn from(record: &CodeGenerationRecord) -> Self {
+        let source = match record.source() {
             CodeGenerationSource::Raw { source } => CodeGenerationSourceDto::Raw {
                 source: source.clone(),
             },
             CodeGenerationSource::OriginalWithReplacements {
                 prefix,
-                original_source,
+                original_source_len,
                 original_name,
                 replacements,
                 suffix,
             } => CodeGenerationSourceDto::OriginalWithReplacements {
                 prefix: prefix.clone(),
-                original_source: original_source.clone(),
+                original_source_len: *original_source_len,
                 original_name: original_name.clone(),
                 replacements: replacements
                     .iter()
@@ -2530,27 +2645,37 @@ impl From<&CodeGenerationSource> for CodeGenerationRecordDto {
                 suffix: suffix.clone(),
             },
         };
-        Self { source }
+        Self {
+            source,
+            runtime_requirements: encode_runtime_requirements(record.runtime_requirements()),
+        }
     }
 }
 
-#[cfg(test)]
-impl TryFrom<CodeGenerationRecordDto> for CodeGenerationSource {
+impl TryFrom<CodeGenerationRecordDto> for CodeGenerationRecord {
     type Error = io::Error;
 
     fn try_from(record: CodeGenerationRecordDto) -> io::Result<Self> {
         validate_code_generation_record(&record)?;
-        let source = match record.source {
+        Ok(record.into_record_after_codec_validation())
+    }
+}
+
+impl CodeGenerationRecordDto {
+    pub(crate) fn into_record_after_codec_validation(self) -> CodeGenerationRecord {
+        let runtime_requirements = decode_runtime_requirements(self.runtime_requirements)
+            .expect("Code Generation codec must reject unknown Runtime Requirements");
+        let source = match self.source {
             CodeGenerationSourceDto::Raw { source } => CodeGenerationSource::Raw { source },
             CodeGenerationSourceDto::OriginalWithReplacements {
                 prefix,
-                original_source,
+                original_source_len,
                 original_name,
                 replacements,
                 suffix,
             } => CodeGenerationSource::OriginalWithReplacements {
                 prefix,
-                original_source,
+                original_source_len,
                 original_name,
                 replacements: replacements
                     .into_iter()
@@ -2569,7 +2694,58 @@ impl TryFrom<CodeGenerationRecordDto> for CodeGenerationSource {
                 suffix,
             },
         };
-        Ok(source)
+        CodeGenerationRecord::new(source).with_runtime_requirements(runtime_requirements)
+    }
+}
+
+const ALL_RUNTIME_REQUIREMENTS: [RuntimeRequirement; 11] = [
+    RuntimeRequirement::ModuleFactories,
+    RuntimeRequirement::ModuleCache,
+    RuntimeRequirement::Require,
+    RuntimeRequirement::DefinePropertyGetters,
+    RuntimeRequirement::HasOwnProperty,
+    RuntimeRequirement::MakeNamespaceObject,
+    RuntimeRequirement::EnsureChunk,
+    RuntimeRequirement::EnsureChunkHandlers,
+    RuntimeRequirement::GetChunkFilename,
+    RuntimeRequirement::ModuleFactoriesAddOnly,
+    RuntimeRequirement::ReturnExportsFromRuntime,
+];
+
+const RUNTIME_REQUIREMENT_MASK: u16 = (1 << ALL_RUNTIME_REQUIREMENTS.len()) - 1;
+
+fn encode_runtime_requirements(requirements: &RuntimeRequirements) -> u16 {
+    requirements.iter().fold(0, |mask, requirement| {
+        mask | (1 << runtime_requirement_bit(requirement))
+    })
+}
+
+fn decode_runtime_requirements(mask: u16) -> Option<RuntimeRequirements> {
+    if mask & !RUNTIME_REQUIREMENT_MASK != 0 {
+        return None;
+    }
+    let mut requirements = RuntimeRequirements::default();
+    for requirement in ALL_RUNTIME_REQUIREMENTS {
+        if mask & (1 << runtime_requirement_bit(requirement)) != 0 {
+            requirements.insert(requirement);
+        }
+    }
+    Some(requirements)
+}
+
+const fn runtime_requirement_bit(requirement: RuntimeRequirement) -> u16 {
+    match requirement {
+        RuntimeRequirement::ModuleFactories => 0,
+        RuntimeRequirement::ModuleCache => 1,
+        RuntimeRequirement::Require => 2,
+        RuntimeRequirement::DefinePropertyGetters => 3,
+        RuntimeRequirement::HasOwnProperty => 4,
+        RuntimeRequirement::MakeNamespaceObject => 5,
+        RuntimeRequirement::EnsureChunk => 6,
+        RuntimeRequirement::GetChunkFilename => 7,
+        RuntimeRequirement::ReturnExportsFromRuntime => 8,
+        RuntimeRequirement::EnsureChunkHandlers => 9,
+        RuntimeRequirement::ModuleFactoriesAddOnly => 10,
     }
 }
 
@@ -2610,7 +2786,7 @@ fn validate_module_build_record(record: &ModuleBuildRecordDto) -> io::Result<()>
 }
 
 fn path_from_bytes(path: PathBytes) -> io::Result<PathBuf> {
-    path.to_path_buf().ok_or_else(|| {
+    path.into_path_buf().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "PackFile path bytes are invalid on this platform",
@@ -2749,32 +2925,34 @@ impl TryFrom<&ParsedModule> for ParsedModuleDto {
     }
 }
 
-impl TryFrom<&ParsedModuleDto> for ParsedModule {
+impl TryFrom<ParsedModuleDto> for ParsedModule {
     type Error = io::Error;
 
-    fn try_from(parsed: &ParsedModuleDto) -> io::Result<Self> {
+    fn try_from(parsed: ParsedModuleDto) -> io::Result<Self> {
+        let ParsedModuleDto {
+            dependencies,
+            blocks,
+            presentational_dependencies,
+        } = parsed;
         Ok(Self {
-            dependencies: parsed
-                .dependencies
-                .iter()
+            dependencies: dependencies
+                .into_iter()
                 .map(dependency_from_dto)
                 .collect::<io::Result<_>>()?,
-            blocks: parsed
-                .blocks
-                .iter()
+            blocks: blocks
+                .into_iter()
                 .map(|block| {
                     Ok(AsyncDependenciesBlock::new(
                         block
                             .dependencies
-                            .iter()
+                            .into_iter()
                             .map(dependency_from_dto)
                             .collect::<io::Result<_>>()?,
                     ))
                 })
                 .collect::<io::Result<_>>()?,
-            presentational_dependencies: parsed
-                .presentational_dependencies
-                .iter()
+            presentational_dependencies: presentational_dependencies
+                .into_iter()
                 .map(dependency_from_dto)
                 .collect::<io::Result<_>>()?,
         })
@@ -2829,7 +3007,7 @@ fn dependency_to_dto(dependency: &Dependency) -> io::Result<DependencyDto> {
     })
 }
 
-fn dependency_from_dto(dependency: &DependencyDto) -> io::Result<Dependency> {
+fn dependency_from_dto(dependency: DependencyDto) -> io::Result<Dependency> {
     Ok(match dependency {
         DependencyDto::Entry { module } => Dependency::Entry(EntryDependency {
             module: module_dependency_from_dto(module)?,
@@ -2837,7 +3015,7 @@ fn dependency_from_dto(dependency: &DependencyDto) -> io::Result<Dependency> {
         DependencyDto::HarmonyImportSideEffect { module, import_var } => {
             Dependency::HarmonyImportSideEffect(HarmonyImportSideEffectDependency {
                 module: module_dependency_from_dto(module)?,
-                import_var: import_var.clone(),
+                import_var,
             })
         }
         DependencyDto::HarmonyImportSpecifier {
@@ -2848,32 +3026,29 @@ fn dependency_from_dto(dependency: &DependencyDto) -> io::Result<Dependency> {
             shorthand,
         } => Dependency::HarmonyImportSpecifier(HarmonyImportSpecifierDependency {
             module: module_dependency_from_dto(module)?,
-            ids: ids.clone(),
-            name: name.clone(),
-            usage_range: (*usage_range).into(),
-            shorthand: *shorthand,
+            ids,
+            name,
+            usage_range: usage_range.into(),
+            shorthand,
         }),
         DependencyDto::HarmonyExportHeader {
             declaration_range,
             statement_range,
         } => Dependency::HarmonyExportHeader(HarmonyExportHeaderDependency {
             declaration_range: declaration_range.map(Into::into),
-            statement_range: (*statement_range).into(),
+            statement_range: statement_range.into(),
         }),
         DependencyDto::HarmonyExportSpecifier { id, name } => {
-            Dependency::HarmonyExportSpecifier(HarmonyExportSpecifierDependency {
-                id: id.clone(),
-                name: name.clone(),
-            })
+            Dependency::HarmonyExportSpecifier(HarmonyExportSpecifierDependency { id, name })
         }
         DependencyDto::HarmonyExportExpression {
             range,
             statement_range,
             declaration_id,
         } => Dependency::HarmonyExportExpression(HarmonyExportExpressionDependency {
-            range: (*range).into(),
-            statement_range: (*statement_range).into(),
-            declaration_id: declaration_id.clone(),
+            range: range.into(),
+            statement_range: statement_range.into(),
+            declaration_id,
         }),
         DependencyDto::HarmonyExportImportedSpecifier {
             module,
@@ -2882,14 +3057,14 @@ fn dependency_from_dto(dependency: &DependencyDto) -> io::Result<Dependency> {
             is_star,
         } => Dependency::HarmonyExportImportedSpecifier(HarmonyExportImportedSpecifierDependency {
             module: module_dependency_from_dto(module)?,
-            ids: ids.clone(),
-            name: name.clone(),
-            is_star: *is_star,
+            ids,
+            name,
+            is_star,
         }),
         DependencyDto::Null => Dependency::Null(NullDependency),
         DependencyDto::Const { expression, range } => Dependency::Const(ConstDependency {
-            expression: expression.clone(),
-            range: (*range).into(),
+            expression,
+            range: range.into(),
         }),
         DependencyDto::Import { module } => Dependency::Import(ImportDependency {
             module: module_dependency_from_dto(module)?,
@@ -2916,10 +3091,10 @@ fn module_dependency_to_dto(dependency: &ModuleDependency) -> io::Result<ModuleD
     })
 }
 
-fn module_dependency_from_dto(dependency: &ModuleDependencyDto) -> io::Result<ModuleDependency> {
+fn module_dependency_from_dto(dependency: ModuleDependencyDto) -> io::Result<ModuleDependency> {
     Ok(ModuleDependency {
-        request: dependency.request.clone(),
-        user_request: dependency.user_request.clone(),
+        request: dependency.request,
+        user_request: dependency.user_request,
         source_order: dependency
             .source_order
             .map(usize::try_from)
@@ -2962,7 +3137,6 @@ impl PackFileItem for ModuleBuildRecordDto {
     const TYPE_ID: StableTypeId = MODULE_BUILD_RECORD_TYPE_ID;
 }
 
-#[cfg(test)]
 impl PackFileItem for CodeGenerationRecordDto {
     const TYPE_ID: StableTypeId = CODE_GENERATION_RECORD_TYPE_ID;
 }
@@ -3040,7 +3214,6 @@ impl CodecRegistry {
         self
     }
 
-    #[cfg(test)]
     pub(crate) fn with_code_generation_record(mut self, codec: CodeGenerationRecordCodec) -> Self {
         self.register::<CodeGenerationRecordDto, _>(codec);
         self
@@ -3168,13 +3341,11 @@ impl ItemCodec<ModuleBuildRecordDto> for ModuleBuildRecordCodec {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CodeGenerationRecordCodec {
     codec_id: StableCodecId,
 }
 
-#[cfg(test)]
 impl CodeGenerationRecordCodec {
     pub(crate) const fn current() -> Self {
         Self {
@@ -3183,7 +3354,6 @@ impl CodeGenerationRecordCodec {
     }
 }
 
-#[cfg(test)]
 impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
     fn codec_id(&self) -> StableCodecId {
         self.codec_id
@@ -3192,6 +3362,7 @@ impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
     fn encode(&self, value: &CodeGenerationRecordDto) -> io::Result<Vec<u8>> {
         validate_code_generation_record(value)?;
         let mut encoder = Encoder::default();
+        encoder.write_u32(u32::from(value.runtime_requirements));
         match &value.source {
             CodeGenerationSourceDto::Raw { source } => {
                 encoder.write_u8(0);
@@ -3199,14 +3370,14 @@ impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
             }
             CodeGenerationSourceDto::OriginalWithReplacements {
                 prefix,
-                original_source,
+                original_source_len,
                 original_name,
                 replacements,
                 suffix,
             } => {
                 encoder.write_u8(1);
                 encoder.write_record_string(prefix)?;
-                encoder.write_record_string(original_source)?;
+                encoder.write_u32(*original_source_len);
                 encoder.write_record_string(original_name)?;
                 encoder.write_count(replacements.len())?;
                 for replacement in replacements {
@@ -3228,13 +3399,14 @@ impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
 
     fn decode(&self, bytes: &[u8]) -> Option<CodeGenerationRecordDto> {
         let mut decoder = Decoder::new(bytes);
+        let runtime_requirements = u16::try_from(decoder.read_u32()?).ok()?;
         let source = match decoder.read_u8()? {
             0 => CodeGenerationSourceDto::Raw {
                 source: decoder.read_record_string()?,
             },
             1 => {
                 let prefix = decoder.read_record_string()?;
-                let original_source = decoder.read_record_string()?;
+                let original_source_len = decoder.read_u32()?;
                 let original_name = decoder.read_record_string()?;
                 let replacement_count = decoder.read_count()?;
                 let mut replacements = Vec::with_capacity(replacement_count);
@@ -3254,7 +3426,7 @@ impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
                 }
                 CodeGenerationSourceDto::OriginalWithReplacements {
                     prefix,
-                    original_source,
+                    original_source_len,
                     original_name,
                     replacements,
                     suffix: decoder.read_record_string()?,
@@ -3263,16 +3435,24 @@ impl ItemCodec<CodeGenerationRecordDto> for CodeGenerationRecordCodec {
             _ => return None,
         };
         decoder.finish()?;
-        let record = CodeGenerationRecordDto { source };
+        let record = CodeGenerationRecordDto {
+            source,
+            runtime_requirements,
+        };
         validate_code_generation_record(&record).ok()?;
         Some(record)
     }
 }
 
-#[cfg(test)]
 fn validate_code_generation_record(record: &CodeGenerationRecordDto) -> io::Result<()> {
+    if record.runtime_requirements & !RUNTIME_REQUIREMENT_MASK != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Code Generation Record contains unknown Runtime Requirements",
+        ));
+    }
     let CodeGenerationSourceDto::OriginalWithReplacements {
-        original_source,
+        original_source_len,
         replacements,
         ..
     } = &record.source
@@ -3292,11 +3472,7 @@ fn validate_code_generation_record(record: &CodeGenerationRecordDto) -> io::Resu
                 "Code Generation Record replacement end is invalid",
             )
         })?;
-        if start > end
-            || end > original_source.len()
-            || !original_source.is_char_boundary(start)
-            || !original_source.is_char_boundary(end)
-        {
+        if start > end || end > usize::try_from(*original_source_len).unwrap_or(usize::MAX) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Code Generation Record contains an invalid replacement range",
@@ -4151,6 +4327,7 @@ struct ContentReference {
 struct PackFileReadStats {
     index_reads: usize,
     content_reads: usize,
+    content_pack_reads: usize,
     content_bytes_read: usize,
     decoded_records: usize,
     retained_content_bytes: usize,
@@ -4163,9 +4340,45 @@ pub(crate) struct PackFile {
     index: PackFileIndex,
     access_updates: BTreeMap<PackFileAddress, AccessStamp>,
     allow_collecting_memory: bool,
-    content_buffers: HashMap<PathBuf, Vec<u8>>,
+    content_buffers: HashMap<PathBuf, RetainedContentPack>,
     #[cfg(test)]
     reads: PackFileReadStats,
+}
+
+#[derive(Debug)]
+struct RetainedContentPack {
+    compression: PackFileCompression,
+    pack_size: u64,
+    content: Arc<[u8]>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PackFileRestore<T> {
+    registry: CodecRegistry,
+    type_id: StableTypeId,
+    codec_id: StableCodecId,
+    checksum: u64,
+    content: Arc<[u8]>,
+    start: usize,
+    end: usize,
+    marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: PackFileItem> PackFileRestore<T> {
+    pub(crate) fn decode(self) -> Option<T> {
+        let frame = self.content.get(self.start..self.end)?;
+        let (type_id, codec_id, payload) = decode_indexed_content(frame, self.checksum)?;
+        if type_id != self.type_id || codec_id != self.codec_id {
+            return None;
+        }
+        self.registry.decode::<T>(type_id, codec_id, payload)
+    }
+}
+
+struct LoadedContent {
+    content: Arc<[u8]>,
+    start: usize,
+    end: usize,
 }
 
 impl PackFile {
@@ -4249,36 +4462,14 @@ impl PackFile {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn get<T: PackFileItem>(
         &mut self,
         address: &PackFileAddress,
         etag: Option<&PackFileETag>,
     ) -> Option<Arc<T>> {
-        let entry = self.index.entries.get(address)?.clone();
-        if entry.etag.as_ref() != etag || entry.type_id != T::TYPE_ID {
-            return None;
-        }
-        if self.registry.codecs.get(&entry.type_id)?.codec_id() != entry.codec_id {
-            return None;
-        }
-
-        #[cfg(test)]
-        {
-            self.reads.content_reads += 1;
-        }
-        let frame = self.read_content_frame(&entry.content)?;
-        #[cfg(test)]
-        {
-            self.reads.content_bytes_read += frame.len();
-        }
-        if checksum(&frame) != entry.content.checksum {
-            return None;
-        }
-        let (type_id, codec_id, payload) = decode_content(&frame)?;
-        if type_id != entry.type_id || codec_id != entry.codec_id {
-            return None;
-        }
-        let value = self.registry.decode::<T>(type_id, codec_id, payload)?;
+        let restore = self.prepare_restore(address, etag)?;
+        let value = restore.decode()?;
         #[cfg(test)]
         {
             self.reads.decoded_records += 1;
@@ -4286,29 +4477,108 @@ impl PackFile {
         Some(Arc::new(value))
     }
 
-    fn read_content_frame(&mut self, reference: &ContentReference) -> Option<Vec<u8>> {
-        let path = self.root.join(&reference.file);
-        if reference.compression == PackFileCompression::None {
-            return read_content_reference(&path, reference);
+    pub(crate) fn prepare_restore<T: PackFileItem>(
+        &mut self,
+        address: &PackFileAddress,
+        etag: Option<&PackFileETag>,
+    ) -> Option<PackFileRestore<T>> {
+        let entry = self.index.entries.get(address)?.clone();
+        if entry.etag.as_ref() != etag || entry.type_id != T::TYPE_ID {
+            return None;
         }
+        if self.registry.codecs.get(&entry.type_id)?.codec_id() != entry.codec_id {
+            return None;
+        }
+        #[cfg(test)]
+        {
+            self.reads.content_reads += 1;
+        }
+        let loaded = self.load_content(&entry.content)?;
+        #[cfg(test)]
+        {
+            self.reads.content_bytes_read += loaded.end.checked_sub(loaded.start)?;
+        }
+        Some(PackFileRestore {
+            registry: self.registry.clone(),
+            type_id: entry.type_id,
+            codec_id: entry.codec_id,
+            checksum: entry.content.checksum,
+            content: loaded.content,
+            start: loaded.start,
+            end: loaded.end,
+            marker: std::marker::PhantomData,
+        })
+    }
 
+    fn load_content(&mut self, reference: &ContentReference) -> Option<LoadedContent> {
+        let path = self.root.join(&reference.file);
         if self.allow_collecting_memory {
-            let pack = read_content_pack(&path, reference.compression, reference.pack_size)?;
-            return content_frame_from_pack(&pack, reference);
+            if reference.compression == PackFileCompression::None {
+                let content = Arc::<[u8]>::from(read_content_reference(&path, reference)?);
+                let end = content.len();
+                return Some(LoadedContent {
+                    content,
+                    start: 0,
+                    end,
+                });
+            }
+            #[cfg(test)]
+            {
+                self.reads.content_pack_reads += 1;
+            }
+            let content = Arc::<[u8]>::from(read_content_pack(
+                &path,
+                reference.compression,
+                reference.pack_size,
+            )?);
+            let (start, end) = content_frame_range(content.len(), reference)?;
+            return Some(LoadedContent {
+                content,
+                start,
+                end,
+            });
         }
 
         if !self.content_buffers.contains_key(&reference.file) {
-            let pack = read_content_pack(&path, reference.compression, reference.pack_size)?;
+            #[cfg(test)]
+            {
+                self.reads.content_pack_reads += 1;
+            }
+            let pack = Arc::<[u8]>::from(read_content_pack(
+                &path,
+                reference.compression,
+                reference.pack_size,
+            )?);
             #[cfg(test)]
             {
                 self.reads.retained_content_bytes =
                     self.reads.retained_content_bytes.checked_add(pack.len())?;
             }
-            self.content_buffers.insert(reference.file.clone(), pack);
+            self.content_buffers.insert(
+                reference.file.clone(),
+                RetainedContentPack {
+                    compression: reference.compression,
+                    pack_size: reference.pack_size,
+                    content: pack,
+                },
+            );
         }
-        content_frame_from_pack(self.content_buffers.get(&reference.file)?, reference)
+        let retained = self.content_buffers.get(&reference.file)?;
+        if retained.compression != reference.compression
+            || retained.pack_size != reference.pack_size
+        {
+            return None;
+        }
+        let content = Arc::clone(&retained.content);
+        let (start, end) = content_frame_range(content.len(), reference)?;
+        Some(LoadedContent {
+            content,
+            start,
+            end,
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn get_resolve_record(
         &mut self,
         address: &PackFileAddress,
@@ -4317,6 +4587,7 @@ impl PackFile {
         self.get(address, etag)
     }
 
+    #[cfg(test)]
     pub(crate) fn get_module_build_record(
         &mut self,
         address: &PackFileAddress,
@@ -4952,10 +5223,22 @@ fn read_decompressed_pack(reader: impl Read, expected_size: usize) -> Option<Vec
 }
 
 fn content_frame_from_pack(pack: &[u8], reference: &ContentReference) -> Option<Vec<u8>> {
+    Some(content_frame_slice_from_pack(pack, reference)?.to_vec())
+}
+
+fn content_frame_slice_from_pack<'a>(
+    pack: &'a [u8],
+    reference: &ContentReference,
+) -> Option<&'a [u8]> {
+    let (start, end) = content_frame_range(pack.len(), reference)?;
+    pack.get(start..end)
+}
+
+fn content_frame_range(pack_len: usize, reference: &ContentReference) -> Option<(usize, usize)> {
     let start = usize::try_from(reference.offset).ok()?;
     let length = usize::try_from(reference.length).ok()?;
     let end = start.checked_add(length)?;
-    Some(pack.get(start..end)?.to_vec())
+    (end <= pack_len).then_some((start, end))
 }
 
 fn read_content_reference(path: &Path, reference: &ContentReference) -> Option<Vec<u8>> {
@@ -5128,6 +5411,27 @@ fn encode_content(
 
 fn decode_content(bytes: &[u8]) -> Option<(StableTypeId, StableCodecId, &[u8])> {
     let body = decode_frame(bytes, CONTENT_MAGIC, MAX_CONTENT_BYTES)?;
+    decode_content_body(body, true)
+}
+
+fn decode_indexed_content(
+    bytes: &[u8],
+    expected_checksum: u64,
+) -> Option<(StableTypeId, StableCodecId, &[u8])> {
+    // The checksummed index binds the frame checksum and bounds. Verify
+    // the complete referenced frame once, then parse its two legacy nested
+    // checksums without hashing the same payload two more times.
+    if checksum(bytes) != expected_checksum {
+        return None;
+    }
+    let body = decode_frame_unchecked(bytes, CONTENT_MAGIC, MAX_CONTENT_BYTES)?;
+    decode_content_body(body, false)
+}
+
+fn decode_content_body(
+    body: &[u8],
+    verify_payload_checksum: bool,
+) -> Option<(StableTypeId, StableCodecId, &[u8])> {
     let mut decoder = Decoder::new(body);
     let type_id = StableTypeId(decoder.read_exact()?);
     let codec_id = StableCodecId(decoder.read_exact()?);
@@ -5141,7 +5445,8 @@ fn decode_content(bytes: &[u8]) -> Option<(StableTypeId, StableCodecId, &[u8])> 
     let payload = body.get(start..end)?;
     decoder.position = end;
     decoder.finish()?;
-    (checksum(payload) == expected_checksum).then_some((type_id, codec_id, payload))
+    (!verify_payload_checksum || checksum(payload) == expected_checksum)
+        .then_some((type_id, codec_id, payload))
 }
 
 fn encode_frame(magic: &[u8], body: &[u8], maximum: usize) -> io::Result<Vec<u8>> {
@@ -5169,6 +5474,19 @@ fn encode_frame(magic: &[u8], body: &[u8], maximum: usize) -> io::Result<Vec<u8>
 }
 
 fn decode_frame<'a>(bytes: &'a [u8], magic: &[u8], maximum: usize) -> Option<&'a [u8]> {
+    let (body, expected_checksum) = decode_frame_parts(bytes, magic, maximum)?;
+    (checksum(body) == expected_checksum).then_some(body)
+}
+
+fn decode_frame_unchecked<'a>(bytes: &'a [u8], magic: &[u8], maximum: usize) -> Option<&'a [u8]> {
+    decode_frame_parts(bytes, magic, maximum).map(|(body, _)| body)
+}
+
+fn decode_frame_parts<'a>(
+    bytes: &'a [u8],
+    magic: &[u8],
+    maximum: usize,
+) -> Option<(&'a [u8], u64)> {
     if bytes.len() > maximum || !bytes.starts_with(magic) {
         return None;
     }
@@ -5181,7 +5499,7 @@ fn decode_frame<'a>(bytes: &'a [u8], magic: &[u8], maximum: usize) -> Option<&'a
         return None;
     }
     let body = bytes.get(header_end..end)?;
-    (checksum(body) == expected_checksum).then_some(body)
+    Some((body, expected_checksum))
 }
 
 fn checksum(bytes: &[u8]) -> u64 {

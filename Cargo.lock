@@ -1381,6 +1381,7 @@ version = "0.1.0"
 dependencies = [
  "brotli",
  "codspeed-divan-compat",
+ "dashmap",
  "filetime",
  "flate2",
  "futures",

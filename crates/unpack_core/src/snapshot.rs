@@ -1,15 +1,15 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use std::collections::BTreeMap;
+use dashmap::DashMap;
+use regex::RegexBuilder;
 
 use crate::{Error, Result};
-use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,19 +121,16 @@ pub(crate) struct FileSystemInfo {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SnapshotCache {
-    file_snapshots: Arc<Mutex<HashMap<FileSnapshotCacheKey, FileSnapshot>>>,
-    context_timestamp_hashes: Arc<Mutex<HashMap<PathBuf, DirectoryTimestampHash>>>,
-    context_content_hashes: Arc<Mutex<HashMap<PathBuf, u64>>>,
-    managed_item_states: Arc<Mutex<HashMap<PathBuf, Option<ManagedItemState>>>>,
+    file_snapshots: Arc<DashMap<FileSnapshotCacheKey, FileSnapshot>>,
+    context_timestamp_hashes: Arc<DashMap<PathBuf, DirectoryTimestampHash>>,
+    context_content_hashes: Arc<DashMap<PathBuf, u64>>,
+    managed_item_states: Arc<DashMap<PathBuf, Option<ManagedItemState>>>,
 }
 
 impl SnapshotCache {
     fn managed_path_is_valid(&self, snapshot: &ManagedPathSnapshot) -> bool {
-        let mut states = self
+        let state = self
             .managed_item_states
-            .lock()
-            .expect("snapshot cache mutex should not be poisoned");
-        let state = states
             .entry(snapshot.root.clone())
             .or_insert_with(|| ManagedItemState::create(&snapshot.root));
         state.as_ref() == Some(&snapshot.state)
@@ -1002,20 +999,14 @@ impl FileSnapshot {
         };
         if let Some(snapshot) = cache
             .file_snapshots
-            .lock()
-            .expect("snapshot cache mutex should not be poisoned")
             .get(&key)
-            .cloned()
+            .map(|snapshot| snapshot.clone())
         {
             return Some(snapshot);
         }
 
         let snapshot = Self::create_from_path(path, strategy).await.ok()?;
-        cache
-            .file_snapshots
-            .lock()
-            .expect("snapshot cache mutex should not be poisoned")
-            .insert(key, snapshot.clone());
+        cache.file_snapshots.insert(key, snapshot.clone());
         Some(snapshot)
     }
 
@@ -1094,7 +1085,10 @@ impl ManagedPathSnapshot {
     }
 
     fn is_valid_with_cache(&self, cache: Option<&SnapshotCache>) -> bool {
-        cache.map_or_else(|| self.is_valid(), |cache| cache.managed_path_is_valid(self))
+        cache.map_or_else(
+            || self.is_valid(),
+            |cache| cache.managed_path_is_valid(self),
+        )
     }
 }
 
@@ -1161,13 +1155,7 @@ fn directory_timestamp_hash(
     cache: Option<&SnapshotCache>,
 ) -> Result<DirectoryTimestampHash> {
     if let Some(cache) = cache {
-        if let Some(hash) = cache
-            .context_timestamp_hashes
-            .lock()
-            .expect("snapshot cache mutex should not be poisoned")
-            .get(path)
-            .copied()
-        {
+        if let Some(hash) = cache.context_timestamp_hashes.get(path).map(|hash| *hash) {
             return Ok(hash);
         }
     }
@@ -1176,8 +1164,6 @@ fn directory_timestamp_hash(
     if let Some(cache) = cache {
         cache
             .context_timestamp_hashes
-            .lock()
-            .expect("snapshot cache mutex should not be poisoned")
             .insert(path.to_path_buf(), hash);
     }
     Ok(hash)
@@ -1244,13 +1230,7 @@ fn directory_content_hash(
     cache: Option<&SnapshotCache>,
 ) -> Result<u64> {
     if let Some(cache) = cache {
-        if let Some(hash) = cache
-            .context_content_hashes
-            .lock()
-            .expect("snapshot cache mutex should not be poisoned")
-            .get(path)
-            .copied()
-        {
+        if let Some(hash) = cache.context_content_hashes.get(path).map(|hash| *hash) {
             return Ok(hash);
         }
     }
@@ -1259,8 +1239,6 @@ fn directory_content_hash(
     if let Some(cache) = cache {
         cache
             .context_content_hashes
-            .lock()
-            .expect("snapshot cache mutex should not be poisoned")
             .insert(path.to_path_buf(), hash);
     }
     Ok(hash)

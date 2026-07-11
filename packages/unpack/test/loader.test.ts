@@ -49,6 +49,47 @@ test("a synchronous CommonJS loader transforms a module before parsing", async (
   }
 });
 
+test("an asynchronous loader callback transforms a module with rule options", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-async-loader-"));
+  const loader = join(fixture, "loader.cjs");
+  await writeFixtureFile(
+    join(fixture, "src/index.js"),
+    'import value from "./value.benchdata";\nexport { value };\n'
+  );
+  await writeFixtureFile(join(fixture, "src/value.benchdata"), "6\n");
+  await writeFixtureFile(
+    loader,
+    [
+      "module.exports = function (source) {",
+      "  const callback = this.async();",
+      "  const { multiplier } = this.getOptions();",
+      "  setTimeout(() => {",
+      "    callback(null, `export default ${Number.parseInt(source.trim(), 10) * multiplier};`);",
+      "  }, 5);",
+      "};",
+      ""
+    ].join("\n")
+  );
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist") },
+    sourcemap: false,
+    module: {
+      rules: [{ test: /\.benchdata$/, loader, options: { multiplier: 7 } }]
+    }
+  });
+
+  try {
+    const stats = await runCompiler(compiler);
+    assert.equal(stats.hasErrors(), false);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /42/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("a loader is not loaded when its rule does not match", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "unpack-loader-no-match-"));
   await writeFixtureFile(join(fixture, "src/index.js"), 'import value from "./value.js";\nexport { value };\n');

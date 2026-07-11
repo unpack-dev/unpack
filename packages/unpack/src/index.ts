@@ -304,7 +304,7 @@ interface NativeBinding {
       resource: string,
       source: string,
       options: string
-    ) => string
+    ) => Promise<string>
   ): NativeCompiler;
 }
 
@@ -343,12 +343,12 @@ class LoaderRuntime {
     this.#loaders.clear();
   }
 
-  readonly run = (
+  readonly run = async (
     loaderPath: string,
     resourcePath: string,
     source: string,
     serializedOptions: string
-  ): string => {
+  ): Promise<string> => {
     let state = this.#loaders.get(loaderPath);
     if (state === undefined) {
       try {
@@ -366,38 +366,59 @@ class LoaderRuntime {
     }
     if (state.failed) throw state.error;
 
-    let callbackCalled = false;
-    let callbackError: unknown;
-    let callbackSource: unknown;
-    const callback = (error: unknown, transformedSource?: unknown): void => {
-      callbackCalled = true;
-      callbackError = error;
-      callbackSource = transformedSource;
-    };
+    return new Promise<string>((resolve, reject) => {
+      let callbackRequested = false;
+      let settled = false;
+      const complete = (error: unknown, transformedSource?: unknown): void => {
+        if (settled) return;
+        settled = true;
+        if (error != null) {
+          reject(error);
+        } else if (typeof transformedSource === "string") {
+          resolve(transformedSource);
+        } else {
+          reject(new TypeError(`loader ${loaderPath} callback must provide a string`));
+        }
+      };
+      const callback = (error: unknown, transformedSource?: unknown): void => {
+        complete(error, transformedSource);
+      };
 
-    const result = state.loader.call(
-      {
-        resourcePath,
-        rootContext: this.rootContext,
-        sourceMap: false,
-        getOptions: () => JSON.parse(serializedOptions) as Record<string, unknown>,
-        async: () => callback
-      },
-      source
-    );
-    if (callbackCalled) {
-      if (callbackError != null) throw callbackError;
-      if (typeof callbackSource !== "string") {
-        throw new TypeError(`loader ${loaderPath} callback must provide a string`);
+      let result: unknown;
+      try {
+        result = state.loader.call(
+          {
+            resourcePath,
+            rootContext: this.rootContext,
+            sourceMap: false,
+            getOptions: () => JSON.parse(serializedOptions) as Record<string, unknown>,
+            async: () => {
+              callbackRequested = true;
+              return callback;
+            }
+          },
+          source
+        );
+      } catch (error) {
+        complete(error);
+        return;
       }
-      return callbackSource;
-    }
-    if (typeof result !== "string") {
-      throw new TypeError(
-        `loader ${loaderPath} must return a string or invoke its callback synchronously`
-      );
-    }
-    return result;
+
+      if (typeof result === "string") {
+        complete(null, result);
+      } else if (result instanceof Promise) {
+        result.then(
+          (transformedSource) => complete(null, transformedSource),
+          (error) => complete(error)
+        );
+      } else if (!callbackRequested) {
+        complete(
+          new TypeError(
+            `loader ${loaderPath} must return a string, a Promise, or request a callback`
+          )
+        );
+      }
+    });
   };
 }
 

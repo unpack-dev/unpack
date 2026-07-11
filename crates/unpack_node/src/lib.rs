@@ -9,7 +9,7 @@ use std::{
 
 use napi::{
     Result, Status,
-    bindgen_prelude::{FnArgs, Function},
+    bindgen_prelude::{FnArgs, Function, Promise},
     threadsafe_function::ThreadsafeFunction,
 };
 use napi_derive::napi;
@@ -211,7 +211,9 @@ pub struct NativeFlushResult {
 #[napi(js_name = "createCompiler")]
 pub fn create_compiler(
     options: NativeCompilerOptions,
-    loader_callback: Option<Function<'_, FnArgs<(String, String, String, String)>, String>>,
+    loader_callback: Option<
+        Function<'_, FnArgs<(String, String, String, String)>, Promise<String>>,
+    >,
 ) -> Result<NativeCompiler> {
     init_internal_tracing_from_env();
     NativeCompiler::new(options, loader_callback)
@@ -219,7 +221,7 @@ pub fn create_compiler(
 
 type NativeLoaderCallback = ThreadsafeFunction<
     FnArgs<(String, String, String, String)>,
-    String,
+    Promise<String>,
     FnArgs<(String, String, String, String)>,
     Status,
     false,
@@ -241,7 +243,7 @@ impl LoaderRunner for NativeLoaderRunner {
         Box::pin(async move {
             let loader = request.loader.to_string_lossy().into_owned();
             let resource = request.resource.to_string_lossy().into_owned();
-            callback
+            let promise = callback
                 .call_async_catch(FnArgs::from((
                     loader.clone(),
                     resource.clone(),
@@ -250,10 +252,15 @@ impl LoaderRunner for NativeLoaderRunner {
                 )))
                 .await
                 .map_err(|error| CoreError::Loader {
-                    loader: PathBuf::from(loader),
-                    path: PathBuf::from(resource),
+                    loader: PathBuf::from(&loader),
+                    path: PathBuf::from(&resource),
                     message: error.to_string(),
-                })
+                })?;
+            promise.await.map_err(|error| CoreError::Loader {
+                loader: PathBuf::from(loader),
+                path: PathBuf::from(resource),
+                message: error.to_string(),
+            })
         })
     }
 }
@@ -340,7 +347,9 @@ fn internal_tracing_filter() -> Option<String> {
 impl NativeCompiler {
     fn new(
         options: NativeCompilerOptions,
-        loader_callback: Option<Function<'_, FnArgs<(String, String, String, String)>, String>>,
+        loader_callback: Option<
+            Function<'_, FnArgs<(String, String, String, String)>, Promise<String>>,
+        >,
     ) -> Result<Self> {
         let context = PathBuf::from(&options.context);
         let output_path = PathBuf::from(&options.output_path);

@@ -38,8 +38,8 @@ Necessity:
 Unpack's `NormalModuleFactory` resolves a dependency request, matches the
 optional minimal `module.rules` condition, and builds a `ModuleIdentity`. The
 first loader slice supports non-overlapping unflagged regular-expression rules,
-absolute CommonJS loaders, JSON options, direct string returns, and callbacks
-that complete synchronously. Matching modules remain
+absolute CommonJS loaders, JSON options, direct string or Promise returns, and
+asynchronous callbacks. Matching modules remain
 `JavaScriptAuto`; the loader path participates in module identity, file
 dependencies, watch dependencies, and Module Build Record validation.
 

@@ -548,8 +548,7 @@ function swcLoaderRule(test, syntax) {
         target: "es2022"
       },
       module: { type: "es6" },
-      sourceMaps: false,
-      sync: true
+      sourceMaps: false
     }
   };
 }

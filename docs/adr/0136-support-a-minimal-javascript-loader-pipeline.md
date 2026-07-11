@@ -13,7 +13,7 @@ matching loader is included in `ModuleIdentity`, becomes a file and cache
 dependency, receives UTF-8 source through a Node threadsafe callback, and must
 return JavaScript source synchronously as a string. The loader runs with a
 minimal context containing `resourcePath`, `rootContext`, `getOptions`,
-`sourceMap: false`, and a synchronous callback returned by `async`. Loader loading,
+`sourceMap: false`, and an asynchronous callback returned by `async`. Loader loading,
 execution, and return-type failures are module-attributable Compilation errors.
 
 Loader modules are reloaded once per Compilation and reused for every matching
@@ -23,7 +23,7 @@ first implementation does not track the loader's transitive CommonJS
 dependencies and does not guarantee execution order between resources.
 
 Loader chains, relative or package loader resolution, overlapping rule composition,
-pitch, callbacks that complete asynchronously, raw buffers, emitted files, additional loader
+pitch, raw buffers, emitted files, additional loader
 dependencies, and source-map composition remain unsupported. Configurations
 with loader rules therefore require `sourcemap: false`. These surfaces should
 only open when their observable behavior can be represented by the compilation

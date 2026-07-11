@@ -82,7 +82,7 @@ export function toSummaryMarkdown(report, baselineReport) {
     .map(([heading, results]) => `${heading}\n\n${toSummaryTable(results, baselines)}`)
     .join("\n\n");
   const comparisonNote = baselineReport
-    ? "\n\n> Delta is `(current - main) / main`. Positive timing deltas mean slower than the latest main result; negative timing deltas mean faster."
+    ? "\n\n> Delta vs main: `+` means slower or larger; `−` means faster or smaller. Calculated as `(current - main) / main`."
     : "";
 
   return `${summary}${comparisonNote}\n`;

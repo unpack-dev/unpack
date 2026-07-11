@@ -57,7 +57,7 @@ test("summary compares measurements with matching latest main results", () => {
     summary,
     /\| 10\.0 \(\+25\.0%\) \| 5\.0 \(\+100\.0%\) \| 8\.0 \(-20\.0%\) \| 100 \(-50\.0%\) \| success \|/
   );
-  assert.match(summary, /Positive timing deltas mean slower than the latest main result/);
+  assert.match(summary, /`\+` means slower or larger; `−` means faster or smaller/);
 });
 
 test("summary omits inline deltas when main has no matching result", () => {

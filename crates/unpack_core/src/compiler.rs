@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::{
-    CacheOptions, Compilation, InfrastructureLoggingOptions, ResolveOptions, Result,
-    SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+    CacheOptions, Compilation, InfrastructureLoggingOptions, LoaderRunner, ModuleRule,
+    ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
 };
 use tracing::Instrument;
 
@@ -35,6 +35,8 @@ pub struct CompilerOptions {
     pub resolve: ResolveOptions,
     pub snapshot: SnapshotOptions,
     pub infrastructure_logging: InfrastructureLoggingOptions,
+    pub module_rule: Option<ModuleRule>,
+    pub loader_runner: Option<Arc<dyn LoaderRunner>>,
     pub parallelism: usize,
     pub sourcemap: bool,
 }
@@ -48,6 +50,8 @@ impl CompilerOptions {
             resolve: default_resolve_options(),
             snapshot: SnapshotOptions::default(),
             infrastructure_logging: InfrastructureLoggingOptions::disabled(),
+            module_rule: None,
+            loader_runner: None,
             parallelism: 100,
             sourcemap: true,
         }

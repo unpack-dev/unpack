@@ -6,7 +6,7 @@ use std::{
 use tokio::sync::OnceCell;
 
 use crate::{
-    Dependency, ModuleIdentity, Result, SnapshotStrategy, UnpackResolver,
+    Dependency, ModuleIdentity, ModuleRule, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{NormalModuleFactoryCache, ResolveRecord, ResolveRequest},
     snapshot::{FileSystemInfo, SnapshotCache},
 };
@@ -19,6 +19,7 @@ pub struct NormalModuleFactory {
     resolve_snapshot_strategy: SnapshotStrategy,
     runtime_factorize_cache: RuntimeFactorizeCache,
     snapshot_cache: SnapshotCache,
+    module_rule: Option<ModuleRule>,
 }
 
 // Per-compilation singleflight cache; separate from BuildCache so cache:false
@@ -41,7 +42,13 @@ impl NormalModuleFactory {
             resolve_snapshot_strategy,
             runtime_factorize_cache: Arc::new(Mutex::new(HashMap::new())),
             snapshot_cache,
+            module_rule: None,
         }
+    }
+
+    pub(crate) fn with_module_rule(mut self, module_rule: Option<ModuleRule>) -> Self {
+        self.module_rule = module_rule;
+        self
     }
 
     pub async fn factorize(
@@ -62,12 +69,13 @@ impl NormalModuleFactory {
                 )
                 .await
             {
-                return Ok(FactorizedModule::from_resolve_record(&record));
+                return Ok(self.apply_module_rule(FactorizedModule::from_resolve_record(&record)));
             }
         }
 
         self.factorize_with_runtime_cache(context, request, resolve_request)
             .await
+            .map(|factorized| self.apply_module_rule(factorized))
     }
 
     async fn factorize_with_runtime_cache(
@@ -140,6 +148,21 @@ impl NormalModuleFactory {
         self.cache.store(resolve_request, None, record);
 
         Ok(factorized)
+    }
+
+    fn apply_module_rule(&self, mut factorized: FactorizedModule) -> FactorizedModule {
+        let Some(rule) = self
+            .module_rule
+            .as_ref()
+            .filter(|rule| rule.matches(&factorized.resource))
+        else {
+            return factorized;
+        };
+
+        let loader = rule.loader().to_path_buf();
+        factorized.identity.loaders = vec![loader.to_string_lossy().into_owned()];
+        factorized.file_dependencies.insert(loader);
+        factorized
     }
 }
 

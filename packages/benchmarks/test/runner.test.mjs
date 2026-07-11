@@ -218,14 +218,15 @@ test("webpack-compatible adapters build the loader benchmark fixture", async () 
     const report = await runBenchmark({
       workspaceDir: workspace,
       fixtures: ["loader"],
-      bundlers: ["webpack", "rspack"],
+      bundlers: ["unpack", "webpack", "rspack"],
       adapters: {
+        unpack: adapters.unpack,
         webpack: adapters.webpack,
         rspack: adapters.rspack
       }
     });
 
-    assert.equal(report.results.length, 2);
+    assert.equal(report.results.length, 3);
     for (const result of report.results) {
       assert.equal(result.fixture, "loader");
       assert.equal(result.status, "success");

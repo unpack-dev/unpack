@@ -11,8 +11,9 @@ use tokio::{
 };
 
 use crate::{
-    CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, ModuleGraph, ModuleId,
-    ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
+    CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, LoaderRequest,
+    LoaderRunner, ModuleGraph, ModuleId, ModuleIdentity, NormalModuleFactory, Result,
+    SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     cache_hash::stable_hash,
     parser::{ParsedModule, parse_module_dependencies},
@@ -37,6 +38,7 @@ struct MakeServices {
     module_snapshot_strategy: SnapshotStrategy,
     file_system_info: FileSystemInfo,
     snapshot_cache: SnapshotCache,
+    loader_runner: Option<Arc<dyn LoaderRunner>>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -132,11 +134,13 @@ pub(crate) async fn run(
             file_system_info.clone(),
             options.snapshot.resolve,
             snapshot_cache.clone(),
-        ),
+        )
+        .with_module_rule(options.module_rule.clone()),
         module_build_cache: build_cache.module_builds(),
         file_system_info,
         module_snapshot_strategy: options.snapshot.module,
         snapshot_cache,
+        loader_runner: options.loader_runner.clone(),
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
 
@@ -388,7 +392,7 @@ impl BuildTask {
             }
         }
 
-        let source = match tokio::fs::read_to_string(&self.resource).await {
+        let raw_source = match tokio::fs::read_to_string(&self.resource).await {
             Ok(source) => source,
             Err(error) => {
                 let error = Error::read(&self.resource, error);
@@ -398,6 +402,41 @@ impl BuildTask {
                     .fail_module(self.module_id, error, String::new())?;
                 return Ok(Vec::new());
             }
+        };
+        let source = if let Some(loader) = self.identity.loaders.first() {
+            let loader = PathBuf::from(loader);
+            let Some(loader_runner) = services.loader_runner.as_ref() else {
+                let error = Error::Loader {
+                    loader,
+                    path: self.resource.clone(),
+                    message: "loader runner is unavailable".to_string(),
+                };
+                state
+                    .lock()
+                    .await
+                    .fail_module(self.module_id, error, raw_source)?;
+                return Ok(Vec::new());
+            };
+            match loader_runner
+                .run(LoaderRequest {
+                    loader,
+                    resource: self.resource.clone(),
+                    source: raw_source.clone(),
+                })
+                .await
+            {
+                Ok(source) => source,
+                Err(error) if error.is_compilation_error() => {
+                    state
+                        .lock()
+                        .await
+                        .fail_module(self.module_id, error, raw_source)?;
+                    return Ok(Vec::new());
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            raw_source.clone()
         };
         let parsed = match parse_module_dependencies(&self.resource, &source) {
             Ok(parsed) => parsed,
@@ -421,10 +460,33 @@ impl BuildTask {
             return Ok(process_dependencies.into_iter().collect());
         }
 
-        let snapshot = services
-            .file_system_info
-            .create_file_snapshot(&self.resource, &source, services.module_snapshot_strategy)
-            .await?;
+        let mut snapshots = vec![
+            services
+                .file_system_info
+                .create_file_snapshot(
+                    &self.resource,
+                    &raw_source,
+                    services.module_snapshot_strategy,
+                )
+                .await?,
+        ];
+        for loader in &self.identity.loaders {
+            let loader = PathBuf::from(loader);
+            let loader_source = tokio::fs::read_to_string(&loader)
+                .await
+                .map_err(|error| Error::read(&loader, error))?;
+            snapshots.push(
+                services
+                    .file_system_info
+                    .create_file_snapshot(
+                        &loader,
+                        &loader_source,
+                        services.module_snapshot_strategy,
+                    )
+                    .await?,
+            );
+        }
+        let snapshot = services.file_system_info.merge_snapshots(snapshots.iter());
         let record = ModuleBuildRecord::new(parsed.clone(), source.clone(), snapshot);
         let source_hash = record.source_hash();
 

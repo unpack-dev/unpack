@@ -9,7 +9,7 @@ use std::{
 
 use napi::{
     Result, Status,
-    bindgen_prelude::{FnArgs, Function, Promise},
+    bindgen_prelude::{Either, FnArgs, Function, Promise},
     threadsafe_function::ThreadsafeFunction,
 };
 use napi_derive::napi;
@@ -176,6 +176,8 @@ pub struct NativeStatsJson {
     pub watch_dependencies: NativeWatchDependencies,
     #[napi(js_name = "moduleGraph")]
     pub module_graph: NativeModuleGraph,
+    #[napi(js_name = "chunkGraph")]
+    pub chunk_graph: NativeChunkGraph,
 }
 
 #[napi(object)]
@@ -206,6 +208,29 @@ pub struct NativeModuleGraphConnection {
     pub weak: bool,
     #[napi(js_name = "parentBlockIndex")]
     pub parent_block_index: i32,
+}
+
+#[napi(object)]
+pub struct NativeChunkGraph {
+    pub chunks: Vec<NativeChunk>,
+    #[napi(js_name = "moduleIds")]
+    pub module_ids: Vec<NativeModuleRenderId>,
+}
+
+#[napi(object)]
+pub struct NativeChunk {
+    pub id: u32,
+    pub name: Option<String>,
+    #[napi(js_name = "renderId")]
+    pub render_id: Option<Either<String, u32>>,
+    pub modules: Vec<u32>,
+}
+
+#[napi(object)]
+pub struct NativeModuleRenderId {
+    pub module: u32,
+    #[napi(js_name = "renderId")]
+    pub render_id: Option<Either<String, u32>>,
 }
 
 #[napi(object)]
@@ -614,9 +639,53 @@ async fn run_compiler_inner(
             output_path: output_path.to_string_lossy().into_owned(),
             watch_dependencies: watch_dependencies(compilation.watch_dependencies()),
             module_graph: module_graph(compilation.module_graph()),
+            chunk_graph: chunk_graph(compilation.chunk_graph(), compilation.module_graph()),
         }),
         logs,
     }
+}
+
+fn chunk_graph(
+    graph: &unpack_core::ChunkGraph,
+    module_graph: &unpack_core::ModuleGraph,
+) -> NativeChunkGraph {
+    NativeChunkGraph {
+        chunks: graph
+            .chunks()
+            .iter()
+            .map(|chunk| NativeChunk {
+                id: chunk.id().index().try_into().unwrap_or(u32::MAX),
+                name: chunk.name().map(str::to_string),
+                render_id: native_render_id(chunk.render_id_string(), chunk.render_id_number()),
+                modules: graph
+                    .chunk_modules(chunk.id())
+                    .iter()
+                    .copied()
+                    .map(native_module_id)
+                    .collect(),
+            })
+            .collect(),
+        module_ids: module_graph
+            .modules()
+            .iter()
+            .map(|module| NativeModuleRenderId {
+                module: native_module_id(module.id()),
+                render_id: native_render_id(
+                    graph.module_render_id_string(module.id()),
+                    graph.module_render_id_number(module.id()),
+                ),
+            })
+            .collect(),
+    }
+}
+
+fn native_render_id(
+    string_id: Option<&str>,
+    number_id: Option<u32>,
+) -> Option<Either<String, u32>> {
+    string_id
+        .map(|value| Either::A(value.to_string()))
+        .or_else(|| number_id.map(Either::B))
 }
 
 fn module_graph(graph: &unpack_core::ModuleGraph) -> NativeModuleGraph {

@@ -68,6 +68,14 @@ impl Chunk {
         self.name.as_deref()
     }
 
+    pub fn render_id_string(&self) -> Option<&str> {
+        self.render_id.as_ref().and_then(RenderId::as_string)
+    }
+
+    pub fn render_id_number(&self) -> Option<u32> {
+        self.render_id.as_ref().and_then(RenderId::as_number)
+    }
+
     pub(crate) fn render_id(&self) -> &RenderId {
         self.render_id
             .as_ref()
@@ -521,6 +529,14 @@ impl ChunkGraph {
         self.module_render_ids
             .get(module.index())
             .and_then(Option::as_ref)
+    }
+
+    pub fn module_render_id_string(&self, module: ModuleId) -> Option<&str> {
+        self.module_render_id(module).and_then(RenderId::as_string)
+    }
+
+    pub fn module_render_id_number(&self, module: ModuleId) -> Option<u32> {
+        self.module_render_id(module).and_then(RenderId::as_number)
     }
 
     pub(crate) fn set_module_render_id(&mut self, module: ModuleId, render_id: RenderId) {

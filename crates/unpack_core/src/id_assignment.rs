@@ -12,6 +12,22 @@ pub enum RenderId {
     Number(u32),
 }
 
+impl RenderId {
+    pub(crate) fn as_string(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Number(_) => None,
+        }
+    }
+
+    pub(crate) fn as_number(&self) -> Option<u32> {
+        match self {
+            Self::Number(value) => Some(*value),
+            Self::String(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NamedIdCandidate<K> {
     item: K,

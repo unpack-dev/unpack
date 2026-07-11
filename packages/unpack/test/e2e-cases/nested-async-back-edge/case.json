@@ -1,0 +1,5 @@
+{
+  "runtimeExpression": "require('../runner.cjs')(entry)",
+  "expected": ["a", "b", "a", true],
+  "expectedAssets": ["main.js", "src_a_js.js", "src_b_js.js"]
+}

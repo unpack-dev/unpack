@@ -89,41 +89,73 @@ Necessity:
 
 ## Chunk graph
 
-Unpack creates one entrypoint chunk group per entry, assigns statically reachable modules to the initial chunk, creates or reuses async chunk groups for dynamic import targets, excludes modules already present in the parent initial chunk, and stores many-to-many module/chunk membership.
+Unpack creates one entrypoint chunk group per entry, assigns statically reachable
+modules to the initial chunk, and creates or reuses async chunk groups by dynamic
+import target. A terminating worklist recursively discovers nested blocks. Each
+Async Chunk plan intersects modules available after every parent loading group,
+then emits the target's static closure minus that intersection. Newly discovered
+parents can only shrink the intersection and add required factories. A dynamic
+import back to a module already available after its parent group creates no Chunk
+Group edge and remains a Promise-based require in generated code. When global
+target reuse discovers reciprocal cross-import parents, materialization omits a
+redundant parent edge that would close a Chunk Group cycle while retaining the
+Dependency Block's target mapping. A separate logical runtime-tree adjacency
+retains every loading relationship, including the omitted material edge; runtime
+requirement traversal is cycle-safe and therefore still reaches both sides for
+each Entrypoint. Each Entrypoint keeps its own Runtime Modules and installed chunk
+state while requirements from all logically reachable nested groups propagate to
+its runtime tree.
 
 Webpack's `buildChunkGraph` is much broader. It tracks runtime per chunk group, chunk loading and async chunk flags, named async chunk reuse, async entrypoints, available-module masks, skipped modules, conditional connections, nested blocks, pre/post order indices, child/parent updates, and block-to-chunk-group links.
 
 Necessity:
 
 - Unpack's chunk group and many-to-many membership model is necessary because it preserves the shape needed for later split chunks and runtime chunks.
-- Excluding parent initial modules is necessary for basic async chunk correctness.
+- Intersecting parent available-module sets is necessary: excluding a module
+  seen on only one path would make the shared payload unusable from another.
 - Split chunks, cache groups, min-size/min-chunks/max-request rules, runtime chunks, and named chunk options are not necessary for the first implementation.
-- Nested async blocks are a current required semantic: Unpack only scans async blocks found in initial modules when creating async groups, while webpack recursively processes nested dependency blocks. A dynamic import reachable from an async chunk must create its own async chunk group; ignoring it is a parity gap against Unpack's chosen dynamic import semantics, not a compatibility luxury.
+- Recursive nested-block processing and available-module back-edge collapse are
+  required parts of Unpack's implemented dynamic-import semantics.
 
 ## Runtime and asset generation
 
 Unpack emits webpack-shaped Node/CommonJS output with a fixed module table,
 module cache, core `__webpack_require__`, and CommonJS entry startup. Generated
 code declares Runtime Requirements; a fixed-point resolver selects ordered
-Runtime Modules for export getters, own-property checks, and namespace marking.
-Static-only Bundles therefore omit chunk ensure, filename lookup, handler, and
-Node loading code. Entrypoints with dynamic imports temporarily retain the
-legacy `__webpack_require__.e`, `__webpack_require__.f.require`,
-`__webpack_require__.u`, and require-based async chunk installation path. Source
-maps remain available for generated assets.
+Runtime Modules for export getters, own-property checks, namespace marking,
+chunk ensuring, filename lookup, add-only module-factory exposure, and cohesive
+Node require chunk loading. Static-only Bundles omit all asynchronous helpers.
+For runtime trees with loadable Async Chunks, the Node loader registers payload
+factories, executes optional payload runtime, then marks every payload chunk ID
+loaded; load and runtime failures leave installation retryable. Asset emission
+and filename lookup share one fixed id-based JavaScript filename resolver.
+Source maps remain available for generated assets.
 
 Webpack renders runtime behavior through runtime modules and runtime requirements. Its Node require chunk loading module computes output paths, conditions loading on chunk type, handles installed chunk state, supports optional on-chunk-load hooks, external install hooks, HMR, base URI, and generated filename templates.
 
 Necessity:
 
 - Starting with fixed Node require chunk loading is intentional and covered by ADR `0032`.
-- Runtime Requirements now drive the implemented static Runtime Modules. The
-  legacy asynchronous runtime remains a staged migration gap.
+- Runtime Requirements drive both static helpers and the implemented Node
+  require Chunk Loading Runtime; the legacy monolithic async path is removed.
 - Browser JSONP, ESM chunk loading, HMR, public path, chunk filename templates, and external chunk installation are future target features, not current requirements.
+
+The Node-runtime closure coordinates with the API-alignment and benchmark
+tracks (#140, #145, and #147). The JavaScript package entry remains ESM-only,
+while emitted entry assets intentionally use CommonJS startup. Render IDs are
+readable and deterministic with controlled churn, but are not a byte-for-byte
+webpack ID contract. Context modules, CommonJS parsing/interop, loaders,
+plugins, tree shaking, module concatenation, browser loading targets, and other
+unimplemented options remain explicit unsupported surfaces.
 
 ## ESM code generation
 
 Unpack preserves source and applies templates for const replacements, import side effects, import specifier reads, export headers, export specifiers, default exports, re-exports, and dynamic imports. It intentionally uses webpack-shaped names and getter-based export bindings.
+
+Init fragments follow webpack's cyclic-Harmony ordering: compatibility setup runs
+first, export getters are installed before ordinary imports execute, and star
+re-exports run after their import namespace is available. This keeps early
+namespace reads safe while preserving later live-binding updates.
 
 Webpack templates include additional behavior for used exports, inlined exports, export presence diagnostics, CommonJS/default interop, module concatenation, deferred imports, dead branch imports, async modules, namespace object variants, and precise star re-export conflict handling.
 

@@ -1,0 +1,10 @@
+{
+  "entry": {
+    "a": "./src/a.js",
+    "b": "./src/b.js"
+  },
+  "entryAsset": "a.js",
+  "runtimeExpression": "require('../runner.cjs')()",
+  "expected": [["a", "feature", "shared"], ["b", "feature", "shared"], 2],
+  "expectedAssets": ["a.js", "b.js", "src_feature_js.js"]
+}

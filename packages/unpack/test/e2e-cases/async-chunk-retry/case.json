@@ -1,5 +1,5 @@
 {
   "runtimeExpression": "require('../runner.cjs')(entry)",
-  "expected": ["entry:async:feature-ok", "entry:async:feature-ok", 1],
+  "expected": [true, "transient payload runtime", "feature", 2, "feature"],
   "expectedAssets": ["main.js", "src_feature_js.js"]
 }

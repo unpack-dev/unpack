@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet, VecDeque},
+};
 
 use crate::{
     CompilerOptions, ModuleGraph, ModuleId,
@@ -178,6 +181,93 @@ pub struct AsyncBlockOrigin {
     pub block_index: usize,
 }
 
+struct EntrypointAsyncPlan {
+    group: ChunkGroupId,
+    available_modules: HashSet<ModuleId>,
+    modules: Vec<ModuleId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LogicalChunkGroup {
+    Entrypoint(usize),
+    Async(ModuleId),
+}
+
+struct AsyncParentPlan {
+    available_modules: HashSet<ModuleId>,
+    origins: Vec<AsyncBlockOrigin>,
+}
+
+struct AsyncChunkPlan {
+    target: ModuleId,
+    static_modules: Vec<ModuleId>,
+    available_before: HashSet<ModuleId>,
+    available_after: HashSet<ModuleId>,
+    parents: HashMap<LogicalChunkGroup, AsyncParentPlan>,
+}
+
+impl AsyncChunkPlan {
+    fn new(
+        target: ModuleId,
+        static_modules: Vec<ModuleId>,
+        parent: LogicalChunkGroup,
+        parent_available: &HashSet<ModuleId>,
+        origin: AsyncBlockOrigin,
+    ) -> Self {
+        let available_before = parent_available.clone();
+        let mut available_after = available_before.clone();
+        available_after.extend(static_modules.iter().copied());
+        Self {
+            target,
+            static_modules,
+            available_before,
+            available_after,
+            parents: HashMap::from([(
+                parent,
+                AsyncParentPlan {
+                    available_modules: parent_available.clone(),
+                    origins: vec![origin],
+                },
+            )]),
+        }
+    }
+
+    fn add_parent(
+        &mut self,
+        parent: LogicalChunkGroup,
+        parent_available: &HashSet<ModuleId>,
+        origin: AsyncBlockOrigin,
+    ) -> bool {
+        let parent_plan = self
+            .parents
+            .entry(parent)
+            .or_insert_with(|| AsyncParentPlan {
+                available_modules: parent_available.clone(),
+                origins: Vec::new(),
+            });
+        parent_plan.available_modules = parent_available.clone();
+        if !parent_plan.origins.contains(&origin) {
+            parent_plan.origins.push(origin);
+        }
+
+        let mut parents = self.parents.values();
+        let mut available_before = parents
+            .next()
+            .map(|parent| parent.available_modules.clone())
+            .expect("Async Chunk Plan must retain at least one parent");
+        for parent in parents {
+            available_before.retain(|module| parent.available_modules.contains(module));
+        }
+        let mut available_after = available_before.clone();
+        available_after.extend(self.static_modules.iter().copied());
+        let changed =
+            self.available_before != available_before || self.available_after != available_after;
+        self.available_before = available_before;
+        self.available_after = available_after;
+        changed
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ChunkGraph {
     chunks: Vec<Chunk>,
@@ -187,6 +277,8 @@ pub struct ChunkGraph {
     module_chunks: Vec<Vec<ChunkId>>,
     module_render_ids: Vec<Option<RenderId>>,
     block_chunk_groups: HashMap<AsyncBlockOrigin, ChunkGroupId>,
+    // Includes logical loading edges omitted from the materialized graph to break cycles.
+    runtime_chunk_group_children: Vec<Vec<ChunkGroupId>>,
     module_runtime_requirements: Vec<RuntimeRequirements>,
     chunk_runtime_requirements: Vec<RuntimeRequirements>,
     runtime_tree_requirements: HashMap<ChunkGroupId, RuntimeRequirements>,
@@ -200,7 +292,7 @@ impl ChunkGraph {
         entries: &[ModuleId],
     ) -> Self {
         let mut graph = Self::default();
-        let mut async_groups_by_target = HashMap::new();
+        let mut entrypoint_plans = Vec::new();
         for (entry_index, entry_module) in entries.iter().copied().enumerate() {
             let entry_name = options
                 .entries
@@ -222,58 +314,111 @@ impl ChunkGraph {
                 graph.connect_chunk_and_module(entry_chunk, *module);
             }
 
-            let initial_set = initial_modules.iter().copied().collect::<HashSet<_>>();
-            let mut async_origins = Vec::new();
-            for module in &initial_modules {
-                if let Some(module_ref) = module_graph.module(*module) {
-                    for (block_index, block) in module_ref.blocks().iter().enumerate() {
-                        if block
-                            .dependencies()
+            entrypoint_plans.push(EntrypointAsyncPlan {
+                group: entry_group,
+                available_modules: initial_modules.iter().copied().collect(),
+                modules: initial_modules,
+            });
+        }
+
+        let mut async_plans = HashMap::<ModuleId, AsyncChunkPlan>::new();
+        let mut pending = (0..entrypoint_plans.len())
+            .map(LogicalChunkGroup::Entrypoint)
+            .collect::<VecDeque<_>>();
+        while let Some(parent) = pending.pop_front() {
+            let (parent_modules, parent_available) = match parent {
+                LogicalChunkGroup::Entrypoint(index) => (
+                    entrypoint_plans[index].modules.clone(),
+                    entrypoint_plans[index].available_modules.clone(),
+                ),
+                LogicalChunkGroup::Async(target) => {
+                    let plan = async_plans
+                        .get(&target)
+                        .expect("pending Async Chunk Plan must exist");
+                    (
+                        plan.static_modules
                             .iter()
-                            .any(|dep| dep.is_import_dependency())
-                        {
-                            async_origins.push(AsyncBlockOrigin {
-                                module: *module,
-                                block_index,
-                            });
-                        }
+                            .filter(|module| !plan.available_before.contains(module))
+                            .copied()
+                            .collect(),
+                        plan.available_after.clone(),
+                    )
+                }
+            };
+
+            for (origin, target) in
+                dynamic_import_origins(module_graph, parent_modules.iter().copied())
+            {
+                if parent_available.contains(&target) {
+                    continue;
+                }
+                if let Some(plan) = async_plans.get_mut(&target) {
+                    if plan.add_parent(parent, &parent_available, origin) {
+                        pending.push_back(LogicalChunkGroup::Async(target));
                     }
+                } else {
+                    let static_modules = collect_static_reachable(module_graph, target, None);
+                    async_plans.insert(
+                        target,
+                        AsyncChunkPlan::new(
+                            target,
+                            static_modules,
+                            parent,
+                            &parent_available,
+                            origin,
+                        ),
+                    );
+                    pending.push_back(LogicalChunkGroup::Async(target));
                 }
             }
+        }
 
-            for origin in async_origins {
-                let Some(target) = import_block_target(module_graph, origin) else {
-                    continue;
+        let mut ordered_targets = async_plans.keys().copied().collect::<Vec<_>>();
+        ordered_targets
+            .sort_by(|left, right| compare_module_identities(module_graph, *left, *right));
+
+        let mut materialized_groups = HashMap::new();
+        for target in &ordered_targets {
+            let plan = &async_plans[target];
+            let origin = plan
+                .parents
+                .values()
+                .flat_map(|parent| parent.origins.iter().copied())
+                .min_by(|left, right| compare_async_origins(module_graph, *left, *right))
+                .expect("Async Chunk Plan must have at least one parent origin");
+            let chunk = graph.add_chunk(None, vec![plan.target]);
+            let group = graph.add_chunk_group(ChunkGroupKind::Async, Some(origin));
+            graph.connect_chunk_and_group(chunk, group);
+            for module in plan
+                .static_modules
+                .iter()
+                .filter(|module| !plan.available_before.contains(module))
+            {
+                graph.connect_chunk_and_module(chunk, *module);
+            }
+            materialized_groups.insert(*target, group);
+        }
+
+        for target in ordered_targets {
+            let child_group = materialized_groups[&target];
+            let plan = &async_plans[&target];
+            let mut parents = plan.parents.iter().collect::<Vec<_>>();
+            parents.sort_by(|(left, _), (right, _)| {
+                compare_logical_groups(module_graph, **left, **right)
+            });
+            for (parent, parent_plan) in parents {
+                let parent_group = match parent {
+                    LogicalChunkGroup::Entrypoint(index) => entrypoint_plans[*index].group,
+                    LogicalChunkGroup::Async(target) => materialized_groups[target],
                 };
-                let async_modules =
-                    collect_static_reachable(module_graph, target, Some(&initial_set));
-                if async_modules.is_empty() {
-                    continue;
-                }
-
-                let async_group = if let Some(group) = async_groups_by_target.get(&target).copied()
-                {
-                    group
+                if !chunk_group_reaches(&graph, child_group, parent_group) {
+                    graph.connect_chunk_groups(parent_group, child_group);
                 } else {
-                    let chunk = graph.add_chunk(None, vec![target]);
-                    let group = graph.add_chunk_group(ChunkGroupKind::Async, Some(origin));
-                    graph.connect_chunk_and_group(chunk, group);
-                    async_groups_by_target.insert(target, group);
-                    group
-                };
-
-                if let Some(chunk) = graph.chunk_groups()[async_group.index()]
-                    .chunks()
-                    .first()
-                    .copied()
-                {
-                    for module in async_modules {
-                        graph.connect_chunk_and_module(chunk, module);
-                    }
+                    graph.connect_runtime_chunk_groups(parent_group, child_group);
                 }
-
-                graph.block_chunk_groups.insert(origin, async_group);
-                graph.connect_chunk_groups(entry_group, async_group);
+                for origin in &parent_plan.origins {
+                    graph.block_chunk_groups.insert(*origin, child_group);
+                }
             }
         }
 
@@ -297,6 +442,7 @@ impl ChunkGraph {
     ) -> ChunkGroupId {
         let id = ChunkGroupId::new(self.chunk_groups.len());
         self.chunk_groups.push(ChunkGroup::new(id, kind, origin));
+        self.runtime_chunk_group_children.push(Vec::new());
         id
     }
 
@@ -308,6 +454,13 @@ impl ChunkGraph {
     fn connect_chunk_groups(&mut self, parent: ChunkGroupId, child: ChunkGroupId) {
         self.chunk_groups[parent.index()].add_child(child);
         self.chunk_groups[child.index()].add_parent(parent);
+        self.connect_runtime_chunk_groups(parent, child);
+    }
+
+    fn connect_runtime_chunk_groups(&mut self, parent: ChunkGroupId, child: ChunkGroupId) {
+        if !self.runtime_chunk_group_children[parent.index()].contains(&child) {
+            self.runtime_chunk_group_children[parent.index()].push(child);
+        }
     }
 
     pub fn split_chunk(
@@ -430,7 +583,11 @@ impl ChunkGraph {
                 for chunk in group.chunks() {
                     requirements.extend(&self.chunk_runtime_requirements[chunk.index()]);
                 }
-                pending.extend(group.children().iter().copied());
+                pending.extend(
+                    self.runtime_chunk_group_children[group_id.index()]
+                        .iter()
+                        .copied(),
+                );
             }
             requirements.extend(&entry_startup_runtime_requirements());
             let (processed, modules) = resolve_runtime_modules(&requirements);
@@ -503,6 +660,102 @@ fn collect_static_reachable(
     }
 
     modules
+}
+
+fn dynamic_import_origins(
+    module_graph: &ModuleGraph,
+    modules: impl IntoIterator<Item = ModuleId>,
+) -> Vec<(AsyncBlockOrigin, ModuleId)> {
+    let mut origins = Vec::new();
+    for module in modules {
+        let module_ref = module_graph
+            .module(module)
+            .expect("Chunk planning must reference an existing Module");
+        for (block_index, block) in module_ref.blocks().iter().enumerate() {
+            if !block
+                .dependencies()
+                .iter()
+                .any(|dependency| dependency.is_import_dependency())
+            {
+                continue;
+            }
+            let origin = AsyncBlockOrigin {
+                module,
+                block_index,
+            };
+            if let Some(target) = import_block_target(module_graph, origin) {
+                origins.push((origin, target));
+            }
+        }
+    }
+    origins.sort_by(|(left_origin, left_target), (right_origin, right_target)| {
+        compare_async_origins(module_graph, *left_origin, *right_origin)
+            .then_with(|| compare_module_identities(module_graph, *left_target, *right_target))
+    });
+    origins.dedup();
+    origins
+}
+
+fn compare_async_origins(
+    module_graph: &ModuleGraph,
+    left: AsyncBlockOrigin,
+    right: AsyncBlockOrigin,
+) -> Ordering {
+    compare_module_identities(module_graph, left.module, right.module)
+        .then(left.block_index.cmp(&right.block_index))
+}
+
+fn compare_logical_groups(
+    module_graph: &ModuleGraph,
+    left: LogicalChunkGroup,
+    right: LogicalChunkGroup,
+) -> Ordering {
+    match (left, right) {
+        (LogicalChunkGroup::Entrypoint(left), LogicalChunkGroup::Entrypoint(right)) => {
+            left.cmp(&right)
+        }
+        (LogicalChunkGroup::Entrypoint(_), LogicalChunkGroup::Async(_)) => Ordering::Less,
+        (LogicalChunkGroup::Async(_), LogicalChunkGroup::Entrypoint(_)) => Ordering::Greater,
+        (LogicalChunkGroup::Async(left), LogicalChunkGroup::Async(right)) => {
+            compare_module_identities(module_graph, left, right)
+        }
+    }
+}
+
+fn compare_module_identities(
+    module_graph: &ModuleGraph,
+    left: ModuleId,
+    right: ModuleId,
+) -> Ordering {
+    let left_identity = module_graph
+        .module(left)
+        .expect("Chunk planning order must reference an existing Module")
+        .identity();
+    let right_identity = module_graph
+        .module(right)
+        .expect("Chunk planning order must reference an existing Module")
+        .identity();
+    left_identity.cmp(right_identity)
+}
+
+fn chunk_group_reaches(graph: &ChunkGraph, start: ChunkGroupId, target: ChunkGroupId) -> bool {
+    let mut visited = HashSet::new();
+    let mut pending = VecDeque::from([start]);
+    while let Some(group) = pending.pop_front() {
+        if group == target {
+            return true;
+        }
+        if !visited.insert(group) {
+            continue;
+        }
+        pending.extend(
+            graph.chunk_groups()[group.index()]
+                .children()
+                .iter()
+                .copied(),
+        );
+    }
+    false
 }
 
 fn import_block_target(module_graph: &ModuleGraph, origin: AsyncBlockOrigin) -> Option<ModuleId> {

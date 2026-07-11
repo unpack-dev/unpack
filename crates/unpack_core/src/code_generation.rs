@@ -7,8 +7,8 @@ use rspack_sources::{ConcatSource, OriginalSource, RawStringSource, ReplaceSourc
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AsyncBlockOrigin, Chunk, ChunkGraph, ChunkGroupKind, CompilerOptions, ConstDependency,
-    Dependency, Error, ExportsInfo, HarmonyExportExpressionDependency,
+    AsyncBlockOrigin, AsyncDependenciesBlockId, Chunk, ChunkGraph, ChunkGroupKind, CompilerOptions,
+    ConstDependency, Dependency, DependencyId, Error, ExportsInfo, HarmonyExportExpressionDependency,
     HarmonyExportHeaderDependency, HarmonyExportImportedSpecifierDependency,
     HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
     HarmonyImportSpecifierDependency, ImportDependency, Module, ModuleGraph, ModuleId, SourceRange,
@@ -82,7 +82,7 @@ fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
 
     for dependency_id in 0..module.dependencies().len() {
         module_graph
-            .module_for_dependency(module.id(), None, dependency_id)
+            .module_for_dependency(module.id(), None, DependencyId::new(dependency_id))
             .and_then(|target| module_render_ids.get(&target))
             .hash(&mut hasher);
     }
@@ -90,14 +90,18 @@ fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
     for (block_index, block) in module.blocks().iter().enumerate() {
         for dependency_id in 0..block.dependencies().len() {
             module_graph
-                .module_for_dependency(module.id(), Some(block_index), dependency_id)
+                .module_for_dependency(
+                    module.id(),
+                    Some(AsyncDependenciesBlockId::new(block_index)),
+                    DependencyId::new(dependency_id),
+                )
                 .and_then(|target| module_render_ids.get(&target))
                 .hash(&mut hasher);
         }
         chunk_graph
             .block_chunk_group(AsyncBlockOrigin {
                 module: module.id(),
-                block_index,
+                block: AsyncDependenciesBlockId::new(block_index),
             })
             .and_then(|group_id| {
                 chunk_graph.chunk_groups()[group_id.index()]
@@ -711,7 +715,7 @@ fn generate_module_code(
             dependency,
             module_id,
             None,
-            Some(dependency_id),
+            Some(DependencyId::new(dependency_id)),
             module_graph,
             chunk_graph,
             module.exports_info(),
@@ -726,8 +730,8 @@ fn generate_module_code(
             apply_dependency_template(
                 dependency,
                 module_id,
-                Some(block_index),
-                Some(dependency_id),
+                Some(AsyncDependenciesBlockId::new(block_index)),
+                Some(DependencyId::new(dependency_id)),
                 module_graph,
                 chunk_graph,
                 module.exports_info(),
@@ -797,8 +801,8 @@ fn push_init_fragment(
 fn apply_dependency_template(
     dependency: &Dependency,
     module_id: ModuleId,
-    origin_block: Option<usize>,
-    dependency_id: Option<usize>,
+    origin_block: Option<AsyncDependenciesBlockId>,
+    dependency_id: Option<DependencyId>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     exports_info: &ExportsInfo,
@@ -905,7 +909,7 @@ fn apply_export_header_dependency(dep: &HarmonyExportHeaderDependency, source: &
 fn apply_harmony_import_side_effect_dependency(
     dep: &HarmonyImportSideEffectDependency,
     module_id: ModuleId,
-    dependency_id: Option<usize>,
+    dependency_id: Option<DependencyId>,
     module_graph: &ModuleGraph,
     module_render_ids: &HashMap<ModuleId, RenderId>,
     init_fragments: &mut Vec<InitFragment>,
@@ -926,7 +930,7 @@ fn apply_harmony_import_side_effect_dependency(
 fn apply_harmony_import_specifier_dependency(
     dep: &HarmonyImportSpecifierDependency,
     module_id: ModuleId,
-    dependency_id: Option<usize>,
+    dependency_id: Option<DependencyId>,
     module_graph: &ModuleGraph,
     module_render_ids: &HashMap<ModuleId, RenderId>,
     source: &mut ReplaceSource,
@@ -1003,7 +1007,7 @@ fn apply_harmony_export_expression_dependency(
 fn apply_harmony_export_imported_specifier_dependency(
     dep: &HarmonyExportImportedSpecifierDependency,
     module_id: ModuleId,
-    dependency_id: Option<usize>,
+    dependency_id: Option<DependencyId>,
     module_graph: &ModuleGraph,
     exports_info: &ExportsInfo,
     module_render_ids: &HashMap<ModuleId, RenderId>,
@@ -1040,8 +1044,8 @@ fn apply_harmony_export_imported_specifier_dependency(
 fn apply_import_dependency(
     dep: &ImportDependency,
     module_id: ModuleId,
-    origin_block: Option<usize>,
-    dependency_id: Option<usize>,
+    origin_block: Option<AsyncDependenciesBlockId>,
+    dependency_id: Option<DependencyId>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     module_render_ids: &HashMap<ModuleId, RenderId>,
@@ -1056,7 +1060,7 @@ fn apply_import_dependency(
     let target_id = json_render_id(&module_render_ids[&target]);
     let origin = AsyncBlockOrigin {
         module: module_id,
-        block_index,
+        block: block_index,
     };
     let expression = if let Some(group_id) = chunk_graph.block_chunk_group(origin) {
         runtime_requirements.insert(RuntimeRequirement::EnsureChunk);

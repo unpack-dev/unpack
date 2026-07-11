@@ -47,6 +47,7 @@ pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, Infrastructure
 pub use module::{Module, ModuleId, ModuleIdentity, ModuleType};
 pub use module_graph::{
     AsyncDependenciesBlockId, DependencyId, ModuleGraph, ModuleGraphConnection,
+    ModuleGraphConnectionId,
 };
 pub use normal_module_factory::{FactorizedModule, NormalModuleFactory};
 pub use resolver::{ResolveOptions, ResolvedResource, UnpackResolver};

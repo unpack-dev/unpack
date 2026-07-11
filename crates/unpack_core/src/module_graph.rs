@@ -12,14 +12,14 @@ pub struct ModuleGraph {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct ModuleGraphConnectionId(usize);
+pub struct ModuleGraphConnectionId(usize);
 
 impl ModuleGraphConnectionId {
-    const fn new(index: usize) -> Self {
+    pub const fn new(index: usize) -> Self {
         Self(index)
     }
 
-    const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         self.0
     }
 }
@@ -74,6 +74,7 @@ impl ModuleGraph {
     ) {
         let connection_id = ModuleGraphConnectionId::new(self.connections.len());
         self.connections.push(ModuleGraphConnection {
+            id: connection_id,
             origin_module,
             origin_block,
             origin_dependency_id,
@@ -150,6 +151,7 @@ struct DependencyLocation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleGraphConnection {
+    pub id: ModuleGraphConnectionId,
     pub origin_module: Option<ModuleId>,
     pub origin_block: Option<AsyncDependenciesBlockId>,
     pub origin_dependency_id: Option<DependencyId>,

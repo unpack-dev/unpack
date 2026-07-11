@@ -1306,13 +1306,16 @@ class StatsImpl implements Stats {
 
 class ModuleImpl implements Module {
   dependencies: readonly Dependency[] = [];
+  readonly #identifier: string;
 
   constructor(
     readonly resource: string,
     readonly type: string,
     readonly providedExports: readonly string[],
-    readonly #identifier: string
-  ) {}
+    identifier: string
+  ) {
+    this.#identifier = identifier;
+  }
 
   identifier(): string {
     return this.#identifier;
@@ -1418,11 +1421,26 @@ class ExportsInfoImpl implements ExportsInfo {
 }
 
 const EMPTY_CONNECTIONS: ReadonlySet<ModuleGraphConnection> = new Set();
+const EMPTY_INCOMING_CONNECTION_GROUPS: ReadonlyMap<
+  Module | null,
+  readonly ModuleGraphConnection[]
+> = new Map();
+const EMPTY_OPTIMIZATION_BAILOUTS: readonly string[] = [];
+const EMPTY_EXPORTS_INFO = new ExportsInfoImpl([]);
 
 class ModuleGraphImpl implements ModuleGraph {
   readonly #connectionByDependency = new Map<Dependency, ModuleGraphConnectionImpl>();
   readonly #incoming = new Map<Module, Set<ModuleGraphConnection>>();
   readonly #outgoing = new Map<Module, Set<ModuleGraphConnection>>();
+  readonly #incomingByOrigin = new Map<
+    Module,
+    ReadonlyMap<Module | null, readonly ModuleGraphConnection[]>
+  >();
+  readonly #outgoingByModule = new Map<
+    Module,
+    ReadonlyMap<Module, readonly ModuleGraphConnection[]>
+  >();
+  readonly #issuers = new Map<Module, Module | null>();
   readonly #exports = new Map<Module, ExportsInfoImpl>();
 
   constructor(
@@ -1452,6 +1470,27 @@ class ModuleGraphImpl implements ModuleGraph {
       this.#connectionByDependency.set(dependency, connection);
       addToSetMap(this.#incoming, target, connection);
       if (origin) addToSetMap(this.#outgoing, origin, connection);
+    }
+    for (const module of modulesById.values()) {
+      const incoming = this.#incoming.get(module);
+      if (incoming) {
+        this.#incomingByOrigin.set(
+          module,
+          groupConnections(incoming, (connection) => connection.originModule)
+        );
+        this.#issuers.set(
+          module,
+          [...incoming].find((connection) => connection.originModule !== null)
+            ?.originModule ?? null
+        );
+      }
+      const outgoing = this.#outgoing.get(module);
+      if (outgoing) {
+        this.#outgoingByModule.set(
+          module,
+          groupConnections(outgoing, (connection) => connection.module)
+        );
+      }
     }
   }
 
@@ -1498,30 +1537,21 @@ class ModuleGraphImpl implements ModuleGraph {
   getIncomingConnectionsByOriginModule(
     module: Module
   ): ReadonlyMap<Module | null, readonly ModuleGraphConnection[]> {
-    return groupConnections(this.getIncomingConnections(module), (connection) =>
-      connection.originModule
-    );
+    return this.#incomingByOrigin.get(module) ?? EMPTY_INCOMING_CONNECTION_GROUPS;
   }
 
   getOutgoingConnectionsByModule(
     module: Module
   ): ReadonlyMap<Module, readonly ModuleGraphConnection[]> | undefined {
-    const connections = this.#outgoing.get(module);
-    if (!connections) return undefined;
-    return groupConnections(connections, (connection) => connection.module);
+    return this.#outgoingByModule.get(module);
   }
 
   getIssuer(module: Module): Module | null | undefined {
-    const incoming = this.#incoming.get(module);
-    if (!incoming) return undefined;
-    for (const connection of incoming) {
-      if (connection.originModule) return connection.originModule;
-    }
-    return null;
+    return this.#issuers.get(module);
   }
 
   getOptimizationBailout(_module: Module): readonly string[] {
-    return [];
+    return EMPTY_OPTIMIZATION_BAILOUTS;
   }
 
   getProvidedExports(module: Module): string[] {
@@ -1536,7 +1566,7 @@ class ModuleGraphImpl implements ModuleGraph {
   }
 
   getExportsInfo(module: Module): ExportsInfoImpl {
-    return this.#exports.get(module) ?? new ExportsInfoImpl([]);
+    return this.#exports.get(module) ?? EMPTY_EXPORTS_INFO;
   }
 
   getExportInfo(module: Module, exportName: string): ExportInfo {

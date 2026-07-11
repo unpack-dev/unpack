@@ -1,6 +1,6 @@
 # Unpack
 
-Unpack is a JavaScript bundling project that aims to align with webpack's bundling outcomes, public JavaScript API shape, and internal compilation model where practical.
+Unpack is a JavaScript bundling project that explores the performance ceiling achievable while aligning as closely as possible with webpack's architecture and functionality.
 
 ## Language
 

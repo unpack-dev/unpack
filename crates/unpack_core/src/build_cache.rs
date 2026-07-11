@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -93,7 +93,7 @@ pub(crate) struct BuildCache {
     build_dependency_file_system_info: FileSystemInfo,
     diagnostics: Arc<CacheDiagnostics>,
     clock: Arc<dyn CacheClock>,
-    inner: Arc<Mutex<BuildCacheInner>>,
+    inner: Arc<BuildCacheInner>,
 }
 
 #[derive(Debug, Clone)]
@@ -327,15 +327,30 @@ pub struct BuildDependency {
 
 #[derive(Debug)]
 struct BuildCacheInner {
-    cache: Cache,
-    dirty_generation: u64,
-    published_generation: u64,
-    initial_store_pending: bool,
+    // Operations that need both locks must acquire `cache` before `publication`.
+    cache: Mutex<Cache>,
+    dirty_generation: AtomicU64,
+    published_generation: AtomicU64,
+    initial_store_pending: AtomicBool,
+    publication: Mutex<CachePublicationState>,
+}
+
+#[derive(Debug)]
+struct CachePublicationState {
     persistent_guard: Option<PackFileGuardDto>,
     persistent_guard_error: Option<String>,
     #[cfg(test)]
     publish_barrier: Option<PublishBarrier>,
-    clock: Arc<dyn CacheClock>,
+}
+
+impl CachePublicationState {
+    fn wait_on_publish_barrier(&mut self) {
+        #[cfg(test)]
+        if let Some(barrier) = self.publish_barrier.take() {
+            barrier.entered.wait();
+            barrier.release.wait();
+        }
+    }
 }
 
 trait CacheClock: fmt::Debug + Send + Sync {
@@ -399,24 +414,29 @@ impl CacheClock for ManualCacheClock {
 }
 
 impl BuildCacheInner {
-    fn new(
-        options: &CacheOptions,
-        clock: Arc<dyn CacheClock>,
-        diagnostics: Arc<CacheDiagnostics>,
-    ) -> Self {
+    fn new(options: &CacheOptions, diagnostics: Arc<CacheDiagnostics>) -> Self {
         let cache = Cache::from_options(options, diagnostics);
         let initial_store_pending = !cache.has_persistent_publication();
         Self {
-            cache,
-            dirty_generation: 0,
-            published_generation: 0,
-            initial_store_pending,
-            persistent_guard: None,
-            persistent_guard_error: None,
-            #[cfg(test)]
-            publish_barrier: None,
-            clock,
+            cache: Mutex::new(cache),
+            dirty_generation: AtomicU64::new(0),
+            published_generation: AtomicU64::new(0),
+            initial_store_pending: AtomicBool::new(initial_store_pending),
+            publication: Mutex::new(CachePublicationState {
+                persistent_guard: None,
+                persistent_guard_error: None,
+                #[cfg(test)]
+                publish_barrier: None,
+            }),
         }
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+                Some(generation.saturating_add(1))
+            })
+            .expect("cache generation update should always succeed");
     }
 }
 
@@ -1802,7 +1822,7 @@ impl BuildCache {
         diagnostics.profile(
             "restore items=0; deserialization items=0; contract=trusted-local,linux-supported,single-writer coordination=none",
         );
-        let inner = BuildCacheInner::new(&options, Arc::clone(&clock), diagnostics.clone());
+        let inner = BuildCacheInner::new(&options, diagnostics.clone());
         Self {
             options,
             build_dependency_snapshot_strategy,
@@ -1810,7 +1830,7 @@ impl BuildCache {
             build_dependency_file_system_info,
             diagnostics,
             clock,
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(inner),
         }
     }
 
@@ -1916,10 +1936,16 @@ impl BuildCache {
             resolve_build_dependencies: SnapshotDto::try_from(&resolve_build_dependencies)
                 .expect("fresh Resolve Build Dependency Snapshot should encode"),
         };
-        let mut inner = self
+        let mut cache = self
             .inner
+            .cache
             .lock()
-            .expect("build cache mutex should not be poisoned");
+            .expect("build cache data mutex should not be poisoned");
+        let mut publication = self
+            .inner
+            .publication
+            .lock()
+            .expect("build cache publication mutex should not be poisoned");
         let build_validation_strategy = if !build_inputs.is_empty()
             && build_inputs
                 .iter()
@@ -1929,7 +1955,7 @@ impl BuildCache {
         } else {
             self.build_dependency_snapshot_strategy
         };
-        let previous_build_inputs_are_valid = inner
+        let previous_build_inputs_are_valid = publication
             .persistent_guard
             .as_ref()
             .and_then(|previous| Snapshot::try_from(previous.build_dependencies.clone()).ok())
@@ -1939,10 +1965,10 @@ impl BuildCache {
                         .build_dependency_file_system_info
                         .is_snapshot_valid_sync(&snapshot, build_validation_strategy)
             });
-        if inner.persistent_guard.is_some() && !previous_build_inputs_are_valid {
-            inner.cache.clear();
+        if publication.persistent_guard.is_some() && !previous_build_inputs_are_valid {
+            cache.clear();
         }
-        let guard_changed = inner.cache.prepare_persistent(
+        let guard_changed = cache.prepare_persistent(
             &guard,
             &build_inputs,
             &resolved_build_inputs,
@@ -1951,9 +1977,9 @@ impl BuildCache {
             self.build_dependency_snapshot_strategy,
             self.resolve_build_dependency_snapshot_strategy,
         );
-        inner.persistent_guard = Some(guard);
+        publication.persistent_guard = Some(guard);
         if guard_changed {
-            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+            self.inner.mark_dirty();
         }
         Ok(())
     }
@@ -1969,40 +1995,39 @@ impl BuildCache {
         if !self.is_writable_filesystem_cache() {
             return None;
         }
-        let inner = self
-            .inner
-            .lock()
-            .expect("build cache mutex should not be poisoned");
-        (inner.dirty_generation > inner.published_generation).then_some(inner.dirty_generation)
+        let published_generation = self.inner.published_generation.load(Ordering::Acquire);
+        // Read dirty second so a concurrent store can only cause a redundant
+        // publication, never hide a generation that still needs publishing.
+        let dirty_generation = self.inner.dirty_generation.load(Ordering::Acquire);
+        (dirty_generation > published_generation).then_some(dirty_generation)
     }
 
     pub(crate) fn initial_store_pending(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("build cache mutex should not be poisoned")
-            .initial_store_pending
+        self.inner.initial_store_pending.load(Ordering::Acquire)
     }
 
     pub(crate) fn publish_generation(&self, target_generation: u64) -> io::Result<()> {
         if !self.is_writable_filesystem_cache() {
             return Ok(());
         }
-        let mut inner = self
+        let mut cache = self
             .inner
+            .cache
             .lock()
-            .expect("build cache mutex should not be poisoned");
-        if target_generation <= inner.published_generation {
+            .expect("build cache data mutex should not be poisoned");
+        if target_generation <= self.inner.published_generation.load(Ordering::Acquire) {
             return Ok(());
         }
-        #[cfg(test)]
-        if let Some(barrier) = inner.publish_barrier.take() {
-            barrier.entered.wait();
-            barrier.release.wait();
-        }
-        if let Some(error) = &inner.persistent_guard_error {
+        let mut publication = self
+            .inner
+            .publication
+            .lock()
+            .expect("build cache publication mutex should not be poisoned");
+        publication.wait_on_publish_barrier();
+        if let Some(error) = &publication.persistent_guard_error {
             return Err(io::Error::new(io::ErrorKind::InvalidData, error.clone()));
         }
-        let guard = inner
+        let guard = publication
             .persistent_guard
             .clone()
             .unwrap_or_else(|| PackFileGuardDto {
@@ -2014,12 +2039,14 @@ impl BuildCache {
                     entries: Vec::new(),
                 },
             });
-        let stamp = inner.clock.now();
-        inner
-            .cache
-            .publish_persistent(guard, stamp, self.options.max_age)?;
-        inner.published_generation = inner.published_generation.max(target_generation);
-        inner.initial_store_pending = false;
+        let stamp = self.clock.now();
+        cache.publish_persistent(guard, stamp, self.options.max_age)?;
+        self.inner
+            .published_generation
+            .fetch_max(target_generation, Ordering::AcqRel);
+        self.inner
+            .initial_store_pending
+            .store(false, Ordering::Release);
         Ok(())
     }
 
@@ -2034,8 +2061,9 @@ impl BuildCache {
         release: Arc<std::sync::Barrier>,
     ) {
         self.inner
+            .publication
             .lock()
-            .expect("build cache mutex should not be poisoned")
+            .expect("build cache publication mutex should not be poisoned")
             .publish_barrier = Some(PublishBarrier { entered, release });
     }
 
@@ -2046,9 +2074,9 @@ impl BuildCache {
         release: Arc<std::sync::Barrier>,
     ) {
         self.inner
-            .lock()
-            .expect("build cache mutex should not be poisoned")
             .cache
+            .lock()
+            .expect("build cache data mutex should not be poisoned")
             .install_restore_barrier(RestoreBarrier { entered, release });
     }
 
@@ -2062,18 +2090,19 @@ impl BuildCache {
 
     #[cfg(test)]
     pub(crate) fn stats(&self) -> BuildCacheStats {
-        let inner = self
+        let cache = self
             .inner
+            .cache
             .lock()
-            .expect("build cache mutex should not be poisoned");
-        let work = inner.cache.work_counters();
+            .expect("build cache data mutex should not be poisoned");
+        let work = cache.work_counters();
         let resolve = work.for_family(CacheItemFamily::Resolve);
         let module = work.for_family(CacheItemFamily::ModuleBuild);
         BuildCacheStats {
-            resolve_entries: inner.cache.entry_count(CacheItemFamily::Resolve),
+            resolve_entries: cache.entry_count(CacheItemFamily::Resolve),
             resolve_hits: resolve.hits,
             resolve_misses: resolve.misses,
-            module_entries: inner.cache.entry_count(CacheItemFamily::ModuleBuild),
+            module_entries: cache.entry_count(CacheItemFamily::ModuleBuild),
             module_hits: module.hits,
             module_misses: module.misses,
         }
@@ -2081,9 +2110,9 @@ impl BuildCache {
 
     pub(crate) fn work_counters(&self) -> CacheWorkCounters {
         self.inner
-            .lock()
-            .expect("build cache mutex should not be poisoned")
             .cache
+            .lock()
+            .expect("build cache data mutex should not be poisoned")
             .work_counters()
     }
 
@@ -2121,9 +2150,9 @@ impl BuildCache {
 
     pub(crate) fn on_compilation_completed(&self) {
         self.inner
-            .lock()
-            .expect("build cache mutex should not be poisoned")
             .cache
+            .lock()
+            .expect("build cache data mutex should not be poisoned")
             .on_compilation_completed();
     }
 }
@@ -2161,14 +2190,15 @@ where
         };
 
         let mut result = {
-            let mut inner = self
+            let mut cache = self
                 .build_cache
                 .inner
+                .cache
                 .lock()
-                .expect("build cache mutex should not be poisoned");
-            let result = inner.cache.begin_get(self.family, &address, etag, stamp);
+                .expect("build cache data mutex should not be poisoned");
+            let result = cache.begin_get(self.family, &address, etag, stamp);
             if result.persistent_access_changed() {
-                inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+                self.build_cache.inner.mark_dirty();
             }
             result
         };
@@ -2179,12 +2209,13 @@ where
                 CacheGet::Deferred(plan) => {
                     let restored = plan.restore.restore();
                     result = {
-                        let mut inner = self
+                        let mut cache = self
                             .build_cache
                             .inner
+                            .cache
                             .lock()
-                            .expect("build cache mutex should not be poisoned");
-                        let result = inner.cache.finish_restore(
+                            .expect("build cache data mutex should not be poisoned");
+                        let result = cache.finish_restore(
                             self.family,
                             &address,
                             etag,
@@ -2193,7 +2224,7 @@ where
                             restored,
                         );
                         if result.persistent_access_changed() {
-                            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+                            self.build_cache.inner.mark_dirty();
                         }
                         result
                     };
@@ -2211,13 +2242,14 @@ where
             namespace: self.namespace,
             identifier: key.cache_identifier(),
         };
-        let mut inner = self
+        let mut cache = self
             .build_cache
             .inner
+            .cache
             .lock()
-            .expect("build cache mutex should not be poisoned");
-        if inner.cache.store(self.family, address, etag, value) {
-            inner.dirty_generation = inner.dirty_generation.saturating_add(1);
+            .expect("build cache data mutex should not be poisoned");
+        if cache.store(self.family, address, etag, value) {
+            self.build_cache.inner.mark_dirty();
         }
     }
 
@@ -2229,9 +2261,9 @@ where
         };
         self.build_cache
             .inner
-            .lock()
-            .expect("build cache mutex should not be poisoned")
             .cache
+            .lock()
+            .expect("build cache data mutex should not be poisoned")
             .evict_memory(self.family, &address);
     }
 }
@@ -2741,9 +2773,9 @@ mod tests {
         assert_eq!(
             build_cache
                 .inner
-                .lock()
-                .expect("build cache mutex should not be poisoned")
                 .cache
+                .lock()
+                .expect("build cache data mutex should not be poisoned")
                 .entry_count(CacheItemFamily::CodeGeneration),
             0
         );

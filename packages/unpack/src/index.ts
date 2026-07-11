@@ -118,11 +118,121 @@ export interface WatchDependencySets {
 }
 
 export interface Stats {
+  readonly compilation: Compilation;
   hasErrors(): boolean;
   toJson(): StatsJson;
 }
 
+export interface Compilation {
+  readonly moduleGraph: ModuleGraph;
+  readonly modules: ReadonlySet<Module>;
+}
+
+export interface Module {
+  readonly resource: string;
+  readonly type: string;
+  readonly dependencies: readonly Dependency[];
+  identifier(): string;
+  readableIdentifier(): string;
+  nameForCondition(): string;
+}
+
+export interface Dependency {
+  readonly type: string;
+  readonly request?: string;
+  readonly weak: boolean;
+  getResourceIdentifier(): string | null;
+}
+
+export interface ModuleGraphConnection {
+  readonly originModule: Module | null;
+  readonly resolvedOriginModule: Module | null;
+  readonly dependency: Dependency;
+  readonly module: Module;
+  readonly resolvedModule: Module;
+  readonly weak: boolean;
+  readonly conditional: false;
+  readonly active: boolean;
+  readonly explanations: ReadonlySet<string>;
+  getActiveState(runtime?: unknown): boolean;
+  isActive(runtime?: unknown): boolean;
+  isTargetActive(runtime?: unknown): boolean;
+}
+
+export interface ExportInfo {
+  readonly name: string;
+  readonly provided: boolean;
+  getUsedName(): string;
+}
+
+export interface ExportsInfo {
+  getProvidedExports(): string[];
+  isExportProvided(exportName: string | readonly string[]): boolean;
+  getExportInfo(exportName: string): ExportInfo;
+  getReadOnlyExportInfo(exportName: string): ExportInfo;
+  getUsedExports(runtime?: unknown): null;
+}
+
+export interface ModuleGraph {
+  getResolvedModule(dependency: Dependency): Module | null;
+  getConnection(dependency: Dependency): ModuleGraphConnection | undefined;
+  getModule(dependency: Dependency): Module | null;
+  getOrigin(dependency: Dependency): Module | null;
+  getResolvedOrigin(dependency: Dependency): Module | null;
+  getParentModule(dependency: Dependency): Module | undefined;
+  getParentBlock(dependency: Dependency): undefined;
+  getParentBlockIndex(dependency: Dependency): number;
+  getIncomingConnections(module: Module): ReadonlySet<ModuleGraphConnection>;
+  getOutgoingConnections(module: Module): ReadonlySet<ModuleGraphConnection>;
+  getIncomingConnectionsByOriginModule(
+    module: Module
+  ): ReadonlyMap<Module | null, readonly ModuleGraphConnection[]>;
+  getOutgoingConnectionsByModule(
+    module: Module
+  ): ReadonlyMap<Module, readonly ModuleGraphConnection[]> | undefined;
+  getIssuer(module: Module): Module | null | undefined;
+  getOptimizationBailout(module: Module): readonly string[];
+  getProvidedExports(module: Module): string[];
+  isExportProvided(
+    module: Module,
+    exportName: string | readonly string[]
+  ): boolean;
+  getExportsInfo(module: Module): ExportsInfo;
+  getExportInfo(module: Module, exportName: string): ExportInfo;
+  getReadOnlyExportInfo(module: Module, exportName: string): ExportInfo;
+  getUsedExports(module: Module, runtime?: unknown): null;
+  cached<TArgs extends unknown[], TResult>(
+    fn: (moduleGraph: ModuleGraph, ...args: TArgs) => TResult,
+    ...args: TArgs
+  ): TResult;
+}
+
+export interface TapOptions {
+  name: string;
+  stage?: number;
+  before?: string | string[];
+}
+
+export interface DoneHook {
+  tap(options: string | TapOptions, callback: (stats: Stats) => void): void;
+  tapAsync(
+    options: string | TapOptions,
+    callback: (stats: Stats, done: (error?: Error | null) => void) => void
+  ): void;
+  tapPromise(
+    options: string | TapOptions,
+    callback: (stats: Stats) => PromiseLike<void>
+  ): void;
+  callAsync(stats: Stats, callback: (error?: Error | null) => void): void;
+  promise(stats: Stats): Promise<void>;
+}
+
+export interface CompilerHooks {
+  readonly done: DoneHook;
+}
+
 export interface Compiler {
+  readonly hooks: CompilerHooks;
   run(callback: RunCallback): void;
   watch(watchOptions: WatchOptions, handler: WatchHandler): Watching;
   close(callback: CloseCallback): void;
@@ -271,6 +381,38 @@ interface NativeStatsJson {
   output_path?: string;
   watchDependencies?: WatchDependencySets;
   watch_dependencies?: WatchDependencySets;
+  moduleGraph?: NativeModuleGraph;
+  module_graph?: NativeModuleGraph;
+}
+
+interface NativeModuleGraph {
+  modules: NativeModule[];
+  connections: NativeModuleGraphConnection[];
+}
+
+interface NativeModule {
+  id: number;
+  identifier: string;
+  resource: string;
+  type: string;
+  providedExports: string[];
+}
+
+interface NativeModuleGraphConnection {
+  originModule?: number | null;
+  origin_module?: number | null;
+  module: number;
+  dependencyType?: string;
+  dependency_type?: string;
+  request?: string | null;
+  weak: boolean;
+  parentBlockIndex?: number;
+  parent_block_index?: number;
+}
+
+interface NormalizedNativeStats {
+  json: StatsJson;
+  moduleGraph: NativeModuleGraph;
 }
 
 interface NativeRunResult {
@@ -423,12 +565,125 @@ class LoaderRuntime {
   };
 }
 
+interface DoneTap {
+  name: string;
+  stage: number;
+  before: Set<string>;
+  run(stats: Stats): Promise<void>;
+}
+
+class DoneHookImpl implements DoneHook {
+  readonly #taps: DoneTap[] = [];
+
+  tap(options: string | TapOptions, callback: (stats: Stats) => void): void {
+    assertFunction(callback, "callback");
+    this.#insert(options, async (stats) => {
+      callback(stats);
+    });
+  }
+
+  tapAsync(
+    options: string | TapOptions,
+    callback: (stats: Stats, done: (error?: Error | null) => void) => void
+  ): void {
+    assertFunction(callback, "callback");
+    this.#insert(
+      options,
+      (stats) =>
+        new Promise<void>((resolve, reject) => {
+          let completed = false;
+          const done = (error?: Error | null): void => {
+            if (completed) return;
+            completed = true;
+            if (error) reject(error);
+            else resolve();
+          };
+          try {
+            callback(stats, done);
+          } catch (error) {
+            done(toError(error, "HookError"));
+          }
+        })
+    );
+  }
+
+  tapPromise(
+    options: string | TapOptions,
+    callback: (stats: Stats) => PromiseLike<void>
+  ): void {
+    assertFunction(callback, "callback");
+    this.#insert(options, async (stats) => {
+      await callback(stats);
+    });
+  }
+
+  callAsync(stats: Stats, callback: (error?: Error | null) => void): void {
+    assertFunction(callback, "callback");
+    void this.promise(stats).then(
+      () => callback(),
+      (error: unknown) => callback(toError(error, "HookError"))
+    );
+  }
+
+  async promise(stats: Stats): Promise<void> {
+    for (const tap of this.#taps) {
+      await tap.run(stats);
+    }
+  }
+
+  #insert(
+    options: string | TapOptions,
+    run: (stats: Stats) => Promise<void>
+  ): void {
+    const normalized = normalizeTapOptions(options);
+    const tap: DoneTap = { ...normalized, run };
+    const before = new Set(tap.before);
+    let index = this.#taps.length;
+    while (index > 0) {
+      const current = this.#taps[index - 1];
+      if (before.has(current.name)) {
+        before.delete(current.name);
+        index -= 1;
+        continue;
+      }
+      if (before.size > 0 || current.stage > tap.stage) {
+        index -= 1;
+        continue;
+      }
+      break;
+    }
+    this.#taps.splice(index, 0, tap);
+  }
+}
+
+function normalizeTapOptions(options: string | TapOptions): Omit<DoneTap, "run"> {
+  if (typeof options === "string") {
+    return { name: assertNonEmptyString(options, "options"), stage: 0, before: new Set() };
+  }
+  assertPlainObject(options, "options");
+  const name = assertNonEmptyString(options.name, "options.name");
+  const stage = options.stage === undefined ? 0 : options.stage;
+  if (typeof stage !== "number" || !Number.isFinite(stage)) {
+    throw new TypeError("options.stage must be a finite number");
+  }
+  const before = options.before === undefined
+    ? []
+    : typeof options.before === "string"
+      ? [options.before]
+      : options.before;
+  if (!Array.isArray(before) || before.some((item) => typeof item !== "string")) {
+    throw new TypeError("options.before must be a string or an array of strings");
+  }
+  return { name, stage, before: new Set(before) };
+}
+
 type CompilerLifecycle =
   | { kind: "open" }
   | { kind: "closing"; operation: Promise<Error | null> }
   | { kind: "closed" };
 
 class CompilerImpl implements Compiler {
+  readonly hooks: CompilerHooks = { done: new DoneHookImpl() };
   #lifecycle: CompilerLifecycle = { kind: "open" };
   #running = false;
   #watching: WatchingImpl | undefined;
@@ -517,10 +772,11 @@ class CompilerImpl implements Compiler {
         );
         this.#hasCompletedFilesystemCompilation = true;
         this.#emitInfrastructureLog("info", "unpack.Compiler", "run completed");
-        this.#deliverRunCallback(
-          callback,
-          null,
-          new StatsImpl(normalizeNativeStats(result.stats))
+        const stats = new StatsImpl(normalizeNativeStats(result.stats));
+        void this.hooks.done.promise(stats).then(
+          () => this.#deliverRunCallback(callback, null, stats),
+          (error: unknown) =>
+            this.#deliverRunCallback(callback, toError(error, "HookError"))
         );
       },
       (error: unknown) => {
@@ -702,7 +958,14 @@ class CompilerImpl implements Compiler {
       );
       this.#hasCompletedFilesystemCompilation = true;
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation completed");
-      handler(null, new StatsImpl(normalizeNativeStats(result.stats)));
+      const stats = new StatsImpl(normalizeNativeStats(result.stats));
+      try {
+        await this.hooks.done.promise(stats);
+      } catch (error) {
+        handler(toError(error, "HookError"));
+        return;
+      }
+      handler(null, stats);
     } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
       this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
@@ -1018,21 +1281,338 @@ class WatchingImpl implements Watching {
 }
 
 class StatsImpl implements Stats {
-  constructor(private readonly json: StatsJson) {}
+  readonly compilation: Compilation;
+  readonly #json: StatsJson;
+
+  constructor(stats: NormalizedNativeStats) {
+    this.#json = stats.json;
+    this.compilation = new CompilationImpl(stats.moduleGraph);
+  }
 
   hasErrors(): boolean {
-    return this.json.errors.length > 0;
+    return this.#json.errors.length > 0;
   }
 
   toJson(): StatsJson {
     return {
-      errors: this.json.errors.map(cloneStatsError),
-      warnings: this.json.warnings.map(cloneStatsError),
-      assets: this.json.assets.map((asset) => ({ ...asset })),
-      outputPath: this.json.outputPath,
-      watchDependencies: cloneWatchDependencies(this.json.watchDependencies)
+      errors: this.#json.errors.map(cloneStatsError),
+      warnings: this.#json.warnings.map(cloneStatsError),
+      assets: this.#json.assets.map((asset) => ({ ...asset })),
+      outputPath: this.#json.outputPath,
+      watchDependencies: cloneWatchDependencies(this.#json.watchDependencies)
     };
   }
+}
+
+class ModuleImpl implements Module {
+  dependencies: readonly Dependency[] = [];
+
+  constructor(
+    readonly resource: string,
+    readonly type: string,
+    readonly providedExports: readonly string[],
+    readonly #identifier: string
+  ) {}
+
+  identifier(): string {
+    return this.#identifier;
+  }
+
+  readableIdentifier(): string {
+    return this.#identifier;
+  }
+
+  nameForCondition(): string {
+    return this.resource;
+  }
+
+  setDependencies(dependencies: readonly Dependency[]): void {
+    this.dependencies = dependencies;
+  }
+}
+
+class DependencyImpl implements Dependency {
+  constructor(
+    readonly type: string,
+    readonly request: string | undefined,
+    readonly weak: boolean,
+    readonly parentBlockIndex: number
+  ) {}
+
+  getResourceIdentifier(): string | null {
+    return this.request === undefined ? null : `context|module${this.request}`;
+  }
+}
+
+class ModuleGraphConnectionImpl implements ModuleGraphConnection {
+  readonly resolvedOriginModule: Module | null;
+  readonly resolvedModule: Module;
+  readonly conditional = false as const;
+  readonly active = true;
+  readonly explanations: ReadonlySet<string> = new Set();
+
+  constructor(
+    readonly originModule: Module | null,
+    readonly dependency: Dependency,
+    readonly module: Module,
+    readonly weak: boolean
+  ) {
+    this.resolvedOriginModule = originModule;
+    this.resolvedModule = module;
+  }
+
+  getActiveState(_runtime?: unknown): boolean {
+    return true;
+  }
+
+  isActive(_runtime?: unknown): boolean {
+    return true;
+  }
+
+  isTargetActive(_runtime?: unknown): boolean {
+    return true;
+  }
+}
+
+class ExportInfoImpl implements ExportInfo {
+  constructor(readonly name: string, readonly provided: boolean) {}
+
+  getUsedName(): string {
+    return this.name;
+  }
+}
+
+class ExportsInfoImpl implements ExportsInfo {
+  readonly #provided: Set<string>;
+  readonly #exports = new Map<string, ExportInfo>();
+
+  constructor(providedExports: readonly string[]) {
+    this.#provided = new Set(providedExports);
+  }
+
+  getProvidedExports(): string[] {
+    return [...this.#provided];
+  }
+
+  isExportProvided(exportName: string | readonly string[]): boolean {
+    const name = typeof exportName === "string" ? exportName : exportName[0];
+    return name !== undefined && this.#provided.has(name);
+  }
+
+  getExportInfo(exportName: string): ExportInfo {
+    let info = this.#exports.get(exportName);
+    if (!info) {
+      info = new ExportInfoImpl(exportName, this.#provided.has(exportName));
+      this.#exports.set(exportName, info);
+    }
+    return info;
+  }
+
+  getReadOnlyExportInfo(exportName: string): ExportInfo {
+    return this.getExportInfo(exportName);
+  }
+
+  getUsedExports(_runtime?: unknown): null {
+    return null;
+  }
+}
+
+const EMPTY_CONNECTIONS: ReadonlySet<ModuleGraphConnection> = new Set();
+
+class ModuleGraphImpl implements ModuleGraph {
+  readonly #connectionByDependency = new Map<Dependency, ModuleGraphConnectionImpl>();
+  readonly #incoming = new Map<Module, Set<ModuleGraphConnection>>();
+  readonly #outgoing = new Map<Module, Set<ModuleGraphConnection>>();
+  readonly #exports = new Map<Module, ExportsInfoImpl>();
+
+  constructor(
+    modulesById: ReadonlyMap<number, ModuleImpl>,
+    connections: readonly NativeModuleGraphConnection[]
+  ) {
+    for (const module of modulesById.values()) {
+      this.#exports.set(module, new ExportsInfoImpl(module.providedExports));
+    }
+    for (const nativeConnection of connections) {
+      const target = modulesById.get(nativeConnection.module);
+      if (!target) continue;
+      const originId = nativeConnection.originModule ?? nativeConnection.origin_module;
+      const origin = originId == null ? null : modulesById.get(originId) ?? null;
+      const dependency = new DependencyImpl(
+        nativeConnection.dependencyType ?? nativeConnection.dependency_type ?? "unknown",
+        nativeConnection.request ?? undefined,
+        nativeConnection.weak,
+        nativeConnection.parentBlockIndex ?? nativeConnection.parent_block_index ?? -1
+      );
+      const connection = new ModuleGraphConnectionImpl(
+        origin,
+        dependency,
+        target,
+        nativeConnection.weak
+      );
+      this.#connectionByDependency.set(dependency, connection);
+      addToSetMap(this.#incoming, target, connection);
+      if (origin) addToSetMap(this.#outgoing, origin, connection);
+    }
+  }
+
+  getResolvedModule(dependency: Dependency): Module | null {
+    return this.getConnection(dependency)?.resolvedModule ?? null;
+  }
+
+  getConnection(dependency: Dependency): ModuleGraphConnectionImpl | undefined {
+    return this.#connectionByDependency.get(dependency);
+  }
+
+  getModule(dependency: Dependency): Module | null {
+    return this.getConnection(dependency)?.module ?? null;
+  }
+
+  getOrigin(dependency: Dependency): Module | null {
+    return this.getConnection(dependency)?.originModule ?? null;
+  }
+
+  getResolvedOrigin(dependency: Dependency): Module | null {
+    return this.getConnection(dependency)?.resolvedOriginModule ?? null;
+  }
+
+  getParentModule(dependency: Dependency): Module | undefined {
+    return this.getConnection(dependency)?.originModule ?? undefined;
+  }
+
+  getParentBlock(_dependency: Dependency): undefined {
+    return undefined;
+  }
+
+  getParentBlockIndex(dependency: Dependency): number {
+    return dependency instanceof DependencyImpl ? dependency.parentBlockIndex : -1;
+  }
+
+  getIncomingConnections(module: Module): ReadonlySet<ModuleGraphConnection> {
+    return this.#incoming.get(module) ?? EMPTY_CONNECTIONS;
+  }
+
+  getOutgoingConnections(module: Module): ReadonlySet<ModuleGraphConnection> {
+    return this.#outgoing.get(module) ?? EMPTY_CONNECTIONS;
+  }
+
+  getIncomingConnectionsByOriginModule(
+    module: Module
+  ): ReadonlyMap<Module | null, readonly ModuleGraphConnection[]> {
+    return groupConnections(this.getIncomingConnections(module), (connection) =>
+      connection.originModule
+    );
+  }
+
+  getOutgoingConnectionsByModule(
+    module: Module
+  ): ReadonlyMap<Module, readonly ModuleGraphConnection[]> | undefined {
+    const connections = this.#outgoing.get(module);
+    if (!connections) return undefined;
+    return groupConnections(connections, (connection) => connection.module);
+  }
+
+  getIssuer(module: Module): Module | null | undefined {
+    const incoming = this.#incoming.get(module);
+    if (!incoming) return undefined;
+    for (const connection of incoming) {
+      if (connection.originModule) return connection.originModule;
+    }
+    return null;
+  }
+
+  getOptimizationBailout(_module: Module): readonly string[] {
+    return [];
+  }
+
+  getProvidedExports(module: Module): string[] {
+    return this.getExportsInfo(module).getProvidedExports();
+  }
+
+  isExportProvided(
+    module: Module,
+    exportName: string | readonly string[]
+  ): boolean {
+    return this.getExportsInfo(module).isExportProvided(exportName);
+  }
+
+  getExportsInfo(module: Module): ExportsInfoImpl {
+    return this.#exports.get(module) ?? new ExportsInfoImpl([]);
+  }
+
+  getExportInfo(module: Module, exportName: string): ExportInfo {
+    return this.getExportsInfo(module).getExportInfo(exportName);
+  }
+
+  getReadOnlyExportInfo(module: Module, exportName: string): ExportInfo {
+    return this.getExportsInfo(module).getReadOnlyExportInfo(exportName);
+  }
+
+  getUsedExports(module: Module, runtime?: unknown): null {
+    return this.getExportsInfo(module).getUsedExports(runtime);
+  }
+
+  cached<TArgs extends unknown[], TResult>(
+    fn: (moduleGraph: ModuleGraph, ...args: TArgs) => TResult,
+    ...args: TArgs
+  ): TResult {
+    return fn(this, ...args);
+  }
+}
+
+class CompilationImpl implements Compilation {
+  readonly moduleGraph: ModuleGraph;
+  readonly modules: ReadonlySet<Module>;
+
+  constructor(graph: NativeModuleGraph) {
+    const modulesById = new Map(
+      graph.modules.map((module) => [
+        module.id,
+        new ModuleImpl(
+          module.resource,
+          module.type,
+          module.providedExports,
+          module.identifier
+        )
+      ])
+    );
+    const moduleGraph = new ModuleGraphImpl(modulesById, graph.connections);
+    for (const module of modulesById.values()) {
+      module.setDependencies(
+        [...moduleGraph.getOutgoingConnections(module)].map(
+          (connection) => connection.dependency
+        )
+      );
+    }
+    this.moduleGraph = moduleGraph;
+    this.modules = new Set(modulesById.values());
+  }
+}
+
+function addToSetMap<TKey, TValue>(
+  map: Map<TKey, Set<TValue>>,
+  key: TKey,
+  value: TValue
+): void {
+  let values = map.get(key);
+  if (!values) {
+    values = new Set();
+    map.set(key, values);
+  }
+  values.add(value);
+}
+
+function groupConnections<TKey>(
+  connections: Iterable<ModuleGraphConnection>,
+  getKey: (connection: ModuleGraphConnection) => TKey
+): ReadonlyMap<TKey, readonly ModuleGraphConnection[]> {
+  const groups = new Map<TKey, ModuleGraphConnection[]>();
+  for (const connection of connections) {
+    const key = getKey(connection);
+    const group = groups.get(key);
+    if (group) group.push(connection);
+    else groups.set(key, [connection]);
+  }
+  return groups;
 }
 
 export default function unpack(
@@ -1731,25 +2311,38 @@ function normalizeWatchPoll(value: unknown): number | undefined {
   throw new TypeError("watchOptions.poll must be true or a positive integer");
 }
 
-function normalizeNativeStats(stats: NativeStatsJson | null | undefined): StatsJson {
+function normalizeNativeStats(
+  stats: NativeStatsJson | null | undefined
+): NormalizedNativeStats {
   if (!stats) {
     return {
-      errors: [],
-      warnings: [],
-      assets: [],
-      outputPath: "",
-      watchDependencies: emptyWatchDependencies()
+      json: {
+        errors: [],
+        warnings: [],
+        assets: [],
+        outputPath: "",
+        watchDependencies: emptyWatchDependencies()
+      },
+      moduleGraph: emptyNativeModuleGraph()
     };
   }
   return {
-    errors: stats.errors.map(cloneStatsError),
-    warnings: (stats.warnings ?? []).map(cloneStatsError),
-    assets: stats.assets.map((asset) => ({ ...asset })),
-    outputPath: stats.outputPath ?? stats.output_path ?? "",
-    watchDependencies: cloneWatchDependencies(
-      stats.watchDependencies ?? stats.watch_dependencies ?? emptyWatchDependencies()
-    )
+    json: {
+      errors: stats.errors.map(cloneStatsError),
+      warnings: (stats.warnings ?? []).map(cloneStatsError),
+      assets: stats.assets.map((asset) => ({ ...asset })),
+      outputPath: stats.outputPath ?? stats.output_path ?? "",
+      watchDependencies: cloneWatchDependencies(
+        stats.watchDependencies ?? stats.watch_dependencies ?? emptyWatchDependencies()
+      )
+    },
+    moduleGraph:
+      stats.moduleGraph ?? stats.module_graph ?? emptyNativeModuleGraph()
   };
+}
+
+function emptyNativeModuleGraph(): NativeModuleGraph {
+  return { modules: [], connections: [] };
 }
 
 function cloneStatsError(error: StatsError): StatsError {

@@ -1,7 +1,11 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
 };
 
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -39,7 +43,64 @@ struct MakeServices {
     file_system_info: FileSystemInfo,
     snapshot_cache: SnapshotCache,
     loader_runner: Option<Arc<dyn LoaderRunner>>,
+    metrics: Arc<MakeMetrics>,
     semaphore: Arc<Semaphore>,
+}
+
+#[derive(Debug)]
+struct MakeMetrics {
+    enabled: bool,
+    factorize_task_ns: AtomicU64,
+    build_task_ns: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MakeTaskMetric {
+    Factorize,
+    Build,
+}
+
+impl MakeMetrics {
+    fn new() -> Self {
+        Self {
+            enabled: tracing::enabled!(target: "unpack_core::make_work", tracing::Level::INFO),
+            factorize_task_ns: AtomicU64::new(0),
+            build_task_ns: AtomicU64::new(0),
+        }
+    }
+
+    fn observe(&self, metric: &AtomicU64, started: Option<Instant>) {
+        if let Some(started) = started {
+            metric.fetch_add(
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    fn observe_task(&self, metric: MakeTaskMetric, started: Option<Instant>) {
+        let total = match metric {
+            MakeTaskMetric::Factorize => &self.factorize_task_ns,
+            MakeTaskMetric::Build => &self.build_task_ns,
+        };
+        self.observe(total, started);
+    }
+
+    fn started(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
+    }
+
+    fn emit(&self) {
+        if !self.enabled {
+            return;
+        }
+        tracing::info!(
+            target: "unpack_core::make_work",
+            factorize_task_ms = self.factorize_task_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            build_task_ms = self.build_task_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            "make_work"
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +203,7 @@ pub(crate) async fn run(
         module_snapshot_strategy: options.snapshot.module,
         snapshot_cache,
         loader_runner: options.loader_runner.clone(),
+        metrics: Arc::new(MakeMetrics::new()),
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
     };
 
@@ -189,6 +251,7 @@ pub(crate) async fn run(
         }
 
         if background_queue.is_empty() {
+            services.metrics.emit();
             return Ok(());
         }
 
@@ -255,12 +318,23 @@ impl MakeTask {
         services: MakeServices,
         state: Arc<Mutex<MakeState>>,
     ) -> Result<Vec<MakeTask>> {
-        match self {
+        let metrics = Arc::clone(&services.metrics);
+        let metric = match &self {
+            Self::Factorize(_) => Some(MakeTaskMetric::Factorize),
+            Self::Build(_) => Some(MakeTaskMetric::Build),
+            Self::Add(_) | Self::ProcessDependencies(_) => None,
+        };
+        let started = metric.and_then(|_| metrics.started());
+        let result = match self {
             Self::Factorize(task) => task.run(services).await,
             Self::Add(task) => task.run(state).await,
             Self::Build(task) => task.run(services, state).await,
             Self::ProcessDependencies(task) => Ok(task.run()),
+        };
+        if let Some(metric) = metric {
+            metrics.observe_task(metric, started);
         }
+        result
     }
 }
 
@@ -475,9 +549,9 @@ impl BuildTask {
         ];
         if let Some(loader) = self.loader.as_ref() {
             let loader = &loader.loader;
-            let loader_source = tokio::fs::read_to_string(&loader)
+            let loader_source = tokio::fs::read_to_string(loader)
                 .await
-                .map_err(|error| Error::read(&loader, error))?;
+                .map_err(|error| Error::read(loader, error))?;
             snapshots.push(
                 services
                     .file_system_info

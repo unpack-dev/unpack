@@ -15,9 +15,9 @@ use tokio::{
 };
 
 use crate::{
-    CompilerOptions, Dependency, DependencyKind, Error, FactorizedModule, LoaderRequest,
-    LoaderRunner, MatchedLoader, ModuleGraph, ModuleId, ModuleIdentity, NormalModuleFactory,
-    Result, SnapshotStrategy, UnpackResolver,
+    AsyncDependenciesBlockId, CompilerOptions, Dependency, DependencyId, DependencyKind, Error,
+    FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleId,
+    ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
     module::BuiltModuleContent,
     parser::{ParsedModule, parse_module_dependencies},
@@ -151,8 +151,8 @@ struct ProcessDependenciesTask {
 #[derive(Debug, Clone)]
 struct QueuedDependency {
     entry_index: Option<usize>,
-    origin_block: Option<usize>,
-    origin_dependency_id: Option<usize>,
+    origin_block: Option<AsyncDependenciesBlockId>,
+    origin_dependency_id: Option<DependencyId>,
     dependency: Dependency,
 }
 
@@ -653,7 +653,7 @@ fn process_dependencies_task(
         .map(|(dependency_id, dependency)| QueuedDependency {
             entry_index: None,
             origin_block: None,
-            origin_dependency_id: Some(dependency_id),
+            origin_dependency_id: Some(DependencyId::new(dependency_id)),
             dependency,
         })
         .collect::<Vec<_>>();
@@ -662,8 +662,8 @@ fn process_dependencies_task(
         dependencies.extend(block.dependencies().iter().cloned().enumerate().map(
             |(dependency_id, dependency)| QueuedDependency {
                 entry_index: None,
-                origin_block: Some(block_index),
-                origin_dependency_id: Some(dependency_id),
+                origin_block: Some(AsyncDependenciesBlockId::new(block_index)),
+                origin_dependency_id: Some(DependencyId::new(dependency_id)),
                 dependency,
             },
         ));

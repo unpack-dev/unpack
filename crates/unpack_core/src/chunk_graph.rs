@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    CompilerOptions, ModuleGraph, ModuleId,
+    AsyncDependenciesBlockId, CompilerOptions, ModuleGraph, ModuleId,
     id_assignment::RenderId,
     runtime::{
         RuntimeModule, RuntimeRequirements, entry_startup_runtime_requirements,
@@ -186,7 +186,7 @@ pub enum ChunkGroupKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncBlockOrigin {
     pub module: ModuleId,
-    pub block_index: usize,
+    pub block: AsyncDependenciesBlockId,
 }
 
 struct EntrypointAsyncPlan {
@@ -697,7 +697,7 @@ fn dynamic_import_origins(
             }
             let origin = AsyncBlockOrigin {
                 module,
-                block_index,
+                block: AsyncDependenciesBlockId::new(block_index),
             };
             if let Some(target) = import_block_target(module_graph, origin) {
                 origins.push((origin, target));
@@ -718,7 +718,7 @@ fn compare_async_origins(
     right: AsyncBlockOrigin,
 ) -> Ordering {
     compare_module_identities(module_graph, left.module, right.module)
-        .then(left.block_index.cmp(&right.block_index))
+        .then(left.block.cmp(&right.block))
 }
 
 fn compare_logical_groups(
@@ -778,7 +778,7 @@ fn import_block_target(module_graph: &ModuleGraph, origin: AsyncBlockOrigin) -> 
     module_graph
         .outgoing_connections(origin.module)
         .find(|connection| {
-            connection.origin_block == Some(origin.block_index)
+            connection.origin_block == Some(origin.block)
                 && connection.dependency.is_import_dependency()
         })
         .map(|connection| connection.module)

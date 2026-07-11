@@ -6,9 +6,48 @@ use crate::{Dependency, Module, ModuleId, ModuleIdentity};
 pub struct ModuleGraph {
     modules: Vec<Module>,
     connections: Vec<ModuleGraphConnection>,
-    outgoing: Vec<Vec<usize>>,
-    incoming: Vec<Vec<usize>>,
-    outgoing_by_location: Vec<HashMap<DependencyLocation, usize>>,
+    outgoing: Vec<Vec<ModuleGraphConnectionId>>,
+    incoming: Vec<Vec<ModuleGraphConnectionId>>,
+    outgoing_by_location: Vec<HashMap<DependencyLocation, ModuleGraphConnectionId>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModuleGraphConnectionId(usize);
+
+impl ModuleGraphConnectionId {
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DependencyId(usize);
+
+impl DependencyId {
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AsyncDependenciesBlockId(usize);
+
+impl AsyncDependenciesBlockId {
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> usize {
+        self.0
+    }
 }
 
 impl ModuleGraph {
@@ -28,13 +67,14 @@ impl ModuleGraph {
     pub(crate) fn connect(
         &mut self,
         origin_module: Option<ModuleId>,
-        origin_block: Option<usize>,
-        origin_dependency_id: Option<usize>,
+        origin_block: Option<AsyncDependenciesBlockId>,
+        origin_dependency_id: Option<DependencyId>,
         dependency: Dependency,
         module: ModuleId,
     ) {
-        let connection_id = self.connections.len();
+        let connection_id = ModuleGraphConnectionId::new(self.connections.len());
         self.connections.push(ModuleGraphConnection {
+            id: connection_id,
             origin_module,
             origin_block,
             origin_dependency_id,
@@ -74,7 +114,7 @@ impl ModuleGraph {
     ) -> impl Iterator<Item = &ModuleGraphConnection> {
         self.outgoing[module.index()]
             .iter()
-            .map(|connection_id| &self.connections[*connection_id])
+            .map(|connection_id| &self.connections[connection_id.index()])
     }
 
     pub fn incoming_connections(
@@ -83,14 +123,14 @@ impl ModuleGraph {
     ) -> impl Iterator<Item = &ModuleGraphConnection> {
         self.incoming[module.index()]
             .iter()
-            .map(|connection_id| &self.connections[*connection_id])
+            .map(|connection_id| &self.connections[connection_id.index()])
     }
 
     pub fn module_for_dependency(
         &self,
         origin_module: ModuleId,
-        origin_block: Option<usize>,
-        dependency_id: usize,
+        origin_block: Option<AsyncDependenciesBlockId>,
+        dependency_id: DependencyId,
     ) -> Option<ModuleId> {
         let location = DependencyLocation {
             block: origin_block,
@@ -99,21 +139,22 @@ impl ModuleGraph {
         self.outgoing_by_location
             .get(origin_module.index())?
             .get(&location)
-            .map(|connection_id| self.connections[*connection_id].module)
+            .map(|connection_id| self.connections[connection_id.index()].module)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DependencyLocation {
-    block: Option<usize>,
-    dependency_id: usize,
+    block: Option<AsyncDependenciesBlockId>,
+    dependency_id: DependencyId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleGraphConnection {
+    pub id: ModuleGraphConnectionId,
     pub origin_module: Option<ModuleId>,
-    pub origin_block: Option<usize>,
-    pub origin_dependency_id: Option<usize>,
+    pub origin_block: Option<AsyncDependenciesBlockId>,
+    pub origin_dependency_id: Option<DependencyId>,
     pub dependency: Dependency,
     pub module: ModuleId,
 }

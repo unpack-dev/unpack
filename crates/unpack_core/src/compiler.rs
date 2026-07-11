@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::{
-    CacheOptions, Compilation, InfrastructureLoggingOptions, LoaderRunner, ModuleRule,
-    ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+    CacheOptions, Compilation, CompilationHooks, InfrastructureLoggingOptions, LoaderRunner,
+    ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
 };
 use tracing::Instrument;
 
@@ -37,6 +37,7 @@ pub struct CompilerOptions {
     pub infrastructure_logging: InfrastructureLoggingOptions,
     pub module_rules: Vec<ModuleRule>,
     pub loader_runner: Option<Arc<dyn LoaderRunner>>,
+    pub compilation_hooks: Option<Arc<dyn CompilationHooks>>,
     pub parallelism: usize,
     pub sourcemap: bool,
 }
@@ -52,6 +53,7 @@ impl CompilerOptions {
             infrastructure_logging: InfrastructureLoggingOptions::disabled(),
             module_rules: Vec::new(),
             loader_runner: None,
+            compilation_hooks: None,
             parallelism: 100,
             sourcemap: true,
         }
@@ -678,7 +680,13 @@ impl Compiler {
         let cache_activity = self.cache_lifecycle.end_idle(idle_reason)?;
         let result = async {
             let mut compilation = self.create_compilation();
+            if let Some(hooks) = &self.options.compilation_hooks {
+                hooks.compilation(&compilation).await?;
+            }
             compilation.make().await?;
+            if let Some(hooks) = &self.options.compilation_hooks {
+                hooks.finish_modules(&compilation).await?;
+            }
             compilation.seal();
             Ok(compilation)
         }

@@ -252,10 +252,16 @@ test("webpack-compatible adapters build the loader benchmark fixture", async () 
       outputDir: join(workspace, "output"),
       cacheDir: join(workspace, "cache")
     });
-    assert.equal(rspackConfig.module.rules.length, 1);
-    assert.equal(rspackConfig.module.rules[0].test.test("src/index.js"), true);
-    assert.equal(rspackConfig.module.rules[0].test.test("src/rome.ts"), false);
-    assert.match(rspackConfig.module.rules[0].loader, /swc-loader/);
+    assert.equal(rspackConfig.module.rules.length, 2);
+    const [javascriptRule, typescriptRule] = rspackConfig.module.rules;
+    assert.equal(javascriptRule.test.test("src/index.js"), true);
+    assert.equal(javascriptRule.test.test("src/rome.ts"), false);
+    assert.match(javascriptRule.loader, /swc-loader/);
+    assert.equal(javascriptRule.options.jsc.parser.syntax, "ecmascript");
+    assert.equal(typescriptRule.test.test("src/index.js"), false);
+    assert.equal(typescriptRule.test.test("src/rome.ts"), true);
+    assert.match(typescriptRule.loader, /swc-loader/);
+    assert.equal(typescriptRule.options.jsc.parser.syntax, "typescript");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

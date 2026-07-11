@@ -1,6 +1,6 @@
 # Cross-Bundler Benchmark
 
-The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack on the `large` and `loader` Benchmark Fixtures. The `large` fixture is derived from webpack's `benchmark/cases/all` workload and generated locally so benchmark runs do not need network access. The `loader` fixture uses the same module graph and checksum as `large`, but webpack and Rspack run every JavaScript module through `swc-loader`. Adapters without webpack-compatible loader rules, including the current Unpack and Turbopack adapters, report `unsupported`. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
+The Cross-Bundler Benchmark compares Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack on the `large` and `loader` Benchmark Fixtures. The `large` fixture is derived from webpack's `benchmark/cases/all` workload and generated locally so benchmark runs do not need network access. The `loader` fixture uses the same module graph and checksum as `large`, but webpack and Rspack run every JavaScript module plus the fixture's `rome.ts` entry through `swc-loader`. Adapters without webpack-compatible loader rules, including the current Unpack and Turbopack adapters, report `unsupported`. The results are diagnostic signals for maintainers; they are not merge gates and they are not compatibility claims.
 
 ## Local Run
 

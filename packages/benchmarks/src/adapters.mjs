@@ -531,19 +531,24 @@ function webpackLoaderRules(fixture) {
   }
 
   return [
-    {
-      test: /\.js$/,
-      loader: SWC_LOADER,
-      options: {
-        jsc: {
-          parser: { syntax: "ecmascript" },
-          target: "es2022"
-        },
-        module: { type: "es6" },
-        sourceMaps: false
-      }
-    }
+    swcLoaderRule(/\.js$/, "ecmascript"),
+    swcLoaderRule(/\.ts$/, "typescript")
   ];
+}
+
+function swcLoaderRule(test, syntax) {
+  return {
+    test,
+    loader: SWC_LOADER,
+    options: {
+      jsc: {
+        parser: { syntax },
+        target: "es2022"
+      },
+      module: { type: "es6" },
+      sourceMaps: false
+    }
+  };
 }
 
 function assertNoWebpackLoaderFixture(fixture, bundler) {

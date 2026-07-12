@@ -84,15 +84,23 @@ the local instructions in:
 - `packages/unpack/test/configCases/README.md` for webpack-style config cases.
 - `packages/unpack/test/e2e-cases/README.md` for emitted-bundle execution cases.
 
-## Issue tracker and triage
+## Agent skills
 
-Issues and PRDs are tracked in GitHub Issues for `unpack-dev/unpack`. External
-pull requests are not a triage request surface. See
-`docs/agents/issue-tracker.md`.
+The repository's Matt skills integration uses the conventions below. Treat
+these as compatibility requirements: preserve their headings, vocabulary, and
+linked policy files when extending this document.
 
-Use the five-label triage vocabulary: `needs-triage`, `needs-info`,
-`ready-for-agent`, `ready-for-human`, and `wontfix`. See
-`docs/agents/triage-labels.md`.
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `unpack-dev/unpack`; external PRs are not a triage request surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default five-label triage vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context repo: read root `CONTEXT.md` and relevant ADRs under `docs/adr/`. See `docs/agents/domain.md`.
 
 ## Pull requests
 

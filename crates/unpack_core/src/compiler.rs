@@ -11,6 +11,7 @@ use crate::{
     ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, cache::Cache,
     compilation::CompilationHookSet, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
     flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
+    module_computation_cache::ModuleComputationCache,
     optimize::side_effects_flag_plugin::SideEffectsFlagPlugin,
 };
 use tracing::Instrument;
@@ -86,6 +87,7 @@ pub struct Compiler {
     options: CompilerOptions,
     cache: Cache,
     cache_lifecycle: Arc<CacheLifecycle>,
+    module_computation_cache: Option<ModuleComputationCache>,
     hooks: CompilerHookSet,
 }
 
@@ -661,6 +663,10 @@ impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
         let cache = Cache::new(options.cache.clone(), options.snapshot.clone());
         let cache_lifecycle = CacheLifecycle::new(cache.clone(), &options.cache);
+        let module_computation_cache = options
+            .cache
+            .cache_unaffected
+            .then(ModuleComputationCache::default);
         let mut hooks = CompilerHookSet::default();
         if options.provided_exports {
             FlagDependencyExportsPlugin.apply(&mut hooks);
@@ -677,6 +683,7 @@ impl Compiler {
             options,
             cache,
             cache_lifecycle,
+            module_computation_cache,
             hooks,
         }
     }
@@ -692,6 +699,7 @@ impl Compiler {
             self.options.clone(),
             UnpackResolver::new(self.options.resolve.clone()),
             self.cache.clone(),
+            self.module_computation_cache.clone(),
             compilation_hooks,
         )
     }
@@ -933,6 +941,166 @@ mod tests {
         assert_ne!(
             first.chunk_graph().chunks().as_ptr(),
             second.chunk_graph().chunks().as_ptr()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_unaffected_reuses_only_module_computations_outside_the_affected_closure()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let changed_path = temp.path().join("changed.js");
+        write(
+            temp.path().join("index.js"),
+            r#"
+                import { changed } from "./changed";
+                import { stable } from "./stable";
+                export const result = `${changed}:${stable}`;
+            "#,
+        )?;
+        write(&changed_path, "export const changed = 'before';")?;
+        write(
+            temp.path().join("stable.js"),
+            "export const stable = 'stable';",
+        )?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache.cache_unaffected = true;
+        options.snapshot.module = crate::SnapshotStrategy::hash();
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        assert!(
+            asset_sources(&first)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("before")
+        );
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("cacheUnaffected should create a Module Computation Cache")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 0,
+                provided_exports_misses: 3,
+                invalidated_modules: 0,
+                static_reachable_hits: 0,
+                static_reachable_misses: 1,
+            }
+        );
+
+        compiler.run().await?;
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("cacheUnaffected should remain compiler-owned")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 3,
+                provided_exports_misses: 3,
+                invalidated_modules: 0,
+                static_reachable_hits: 1,
+                static_reachable_misses: 1,
+            }
+        );
+
+        write(&changed_path, "export const changed = 'after';")?;
+        let changed = compiler.run().await?;
+        assert!(
+            asset_sources(&changed)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("after")
+        );
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("cacheUnaffected should survive multiple Compilations")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 4,
+                provided_exports_misses: 5,
+                invalidated_modules: 2,
+                static_reachable_hits: 1,
+                static_reachable_misses: 2,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filesystem_memory_cache_unaffected_is_independent_of_record_memory_retention()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(
+            temp.path().join("index.js"),
+            "import './dep'; export const value = 1;",
+        )?;
+        write(temp.path().join("dep.js"), "export const dep = 1;")?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(temp.path().join(".cache/unpack/unaffected"));
+        options.cache.max_memory_generations = Some(0);
+        options.cache.cache_unaffected = true;
+        let compiler = Compiler::new(options.clone());
+
+        compiler.run().await?;
+        compiler.run().await?;
+
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("memoryCacheUnaffected should own a separate in-process cache")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 2,
+                provided_exports_misses: 2,
+                invalidated_modules: 0,
+                static_reachable_hits: 1,
+                static_reachable_misses: 1,
+            }
+        );
+        assert_eq!(compiler.cache.stats().module_entries, 0);
+        assert_eq!(
+            compiler
+                .cache
+                .work_counters()
+                .for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 2,
+                misses: 2,
+                stores: 2,
+                restores: 0,
+                evictions: 0,
+            },
+            "ordinary Module Build records should be read without a Memory Cache layer"
+        );
+
+        compiler.flush_cache()?;
+        let later_compiler = Compiler::new(options);
+        later_compiler.run().await?;
+        assert_eq!(
+            later_compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("a later Compiler should own a fresh Module Computation Cache")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 0,
+                provided_exports_misses: 2,
+                invalidated_modules: 0,
+                static_reachable_hits: 0,
+                static_reachable_misses: 1,
+            },
+            "Module Computation memos must not be restored from PackFile"
         );
 
         Ok(())

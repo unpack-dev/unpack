@@ -25,6 +25,7 @@ mod loader;
 mod logging;
 mod make;
 mod module;
+mod module_computation_cache;
 mod module_graph;
 mod module_graph_connection;
 mod normal_module_factory;

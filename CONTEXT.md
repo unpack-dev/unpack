@@ -97,7 +97,7 @@ A benchmark measurement taken after a prior build in the same benchmark job whil
 _Avoid_: Incremental rebuild, watch rebuild
 
 **Watch Build Measurement**:
-A development-mode benchmark measurement of a rebuild within one Watch Lifecycle. The initial compilation is excluded; measurement begins immediately before the benchmark fixture mutation and ends when the resulting compilation completes.
+A development-mode benchmark measurement of a rebuild within one Watch Lifecycle, with Memory Cache enabled and Persistent Cache disabled. The initial compilation is excluded; measurement begins immediately before the benchmark fixture mutation and ends when the resulting compilation completes.
 _Avoid_: Warm build, initial watch compilation
 
 **Tracing**:

@@ -50,9 +50,13 @@ Item families under ADR 0131; the different Rust representation is deliberate,
 while the directory and file boundaries remain webpack-locatable.
 
 This layout change covers the cache-category alignment tracked by issue #217.
-Moving reusable codecs and indexes into a separate `serialization` category is
-the distinct serialization-layout step from that issue and remains follow-up
-work; the private Pack File format and codec behavior do not change here.
+The first serialization-layout slice moves generic Serializer identity,
+registration, type erasure, bounded encoding, and typed decoding into
+`serialization/serializer.rs`. Pack File record codecs remain beside their
+format-specific DTOs, and binary framing plus index persistence remain in the
+private Pack File storage module until later slices establish the corresponding
+Binary Middleware and File Middleware boundaries. The private format and codec
+behavior do not change during these physical moves.
 
 ## Normal module factory
 

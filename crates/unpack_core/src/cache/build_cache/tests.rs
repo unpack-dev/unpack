@@ -4,7 +4,7 @@ use filetime::{FileTime, set_file_mtime};
 use tempfile::tempdir;
 
 use super::*;
-use crate::cache::pack_file_cache_strategy::persistent_codec_registry;
+use crate::cache::pack_file_cache_strategy::persistent_serializer;
 use crate::{
     ModuleIdentity,
     cache::pack_file::PackFile,
@@ -609,7 +609,7 @@ fn pack_revision(options: &CacheOptions) -> u64 {
             .cache_location
             .as_ref()
             .expect("filesystem cache should have a location"),
-        persistent_codec_registry(),
+        persistent_serializer(),
     )
     .revision()
 }

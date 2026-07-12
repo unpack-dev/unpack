@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/tree/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/dependencies
+
 mod const_dependency;
 mod entry_dependency;
 mod harmony_export_expression_dependency;

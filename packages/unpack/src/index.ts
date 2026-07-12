@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/webpack.js
+
 import { createRequire } from "node:module";
 import { statSync, watch as watchFileSystem } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";

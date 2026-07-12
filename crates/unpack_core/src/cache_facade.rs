@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/CacheFacade.js
+
 //! Webpack-aligned Cache Facade and cache-item identity primitives.
 //! This is the narrow caller-facing seam over the shared Cache coordinator.
 

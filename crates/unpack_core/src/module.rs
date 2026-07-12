@@ -242,21 +242,18 @@ impl Module {
     }
 
     pub(crate) fn analyze_provided_exports(&mut self) {
-        self.exports_info = match self.identity.module_type {
-            ModuleType::Json => {
+        self.exports_info = match self.parsed_data() {
+            crate::parser::ParsedModuleData::Json(value) => {
                 let mut names = vec!["default".to_string()];
-                if let crate::parser::ParsedModuleData::Json(serde_json::Value::Object(object)) =
-                    self.parsed_data()
-                {
+                if let serde_json::Value::Object(object) = value {
                     names.extend(object.keys().cloned());
                 }
                 ExportsInfo::from_names(names)
             }
-            ModuleType::Asset
-            | ModuleType::AssetResource
-            | ModuleType::AssetInline
-            | ModuleType::AssetSource => ExportsInfo::from_names(["default".to_string()]),
-            ModuleType::JavaScriptAuto => ExportsInfo::from_dependencies(
+            crate::parser::ParsedModuleData::Asset { .. } => {
+                ExportsInfo::from_names(["default".to_string()])
+            }
+            crate::parser::ParsedModuleData::JavaScript => ExportsInfo::from_dependencies(
                 self.built_content.parsed.dependencies_block.dependencies(),
             ),
         };
@@ -301,13 +298,4 @@ pub enum ModuleType {
     AssetResource,
     AssetInline,
     AssetSource,
-}
-
-impl ModuleType {
-    pub(crate) fn is_asset(self) -> bool {
-        matches!(
-            self,
-            Self::Asset | Self::AssetResource | Self::AssetInline | Self::AssetSource
-        )
-    }
 }

@@ -1,14 +1,15 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/json/JsonGenerator.js
 
 use crate::{
-    Module,
+    Result,
     code_generation_record::{CodeGenerationRecord, CodeGenerationSource},
+    normal_module_factory::ModuleGeneratorContext,
     parser::ParsedModuleData,
     runtime::{RuntimeRequirement, RuntimeRequirements},
 };
 
-pub(crate) fn generate(module: &Module) -> CodeGenerationRecord {
-    let ParsedModuleData::Json(value) = module.parsed_data() else {
+pub(crate) fn generate(context: ModuleGeneratorContext<'_>) -> Result<CodeGenerationRecord> {
+    let ParsedModuleData::Json(value) = context.module.parsed_data() else {
         unreachable!("JSON modules must contain JSON Parser data")
     };
     let serialized = serde_json::to_string(&value).expect("JSON values must serialize");
@@ -36,6 +37,8 @@ pub(crate) fn generate(module: &Module) -> CodeGenerationRecord {
     let mut runtime_requirements = RuntimeRequirements::default();
     runtime_requirements.insert(RuntimeRequirement::DefinePropertyGetters);
 
-    CodeGenerationRecord::new(CodeGenerationSource::Raw { source })
-        .with_runtime_requirements(runtime_requirements)
+    Ok(
+        CodeGenerationRecord::new(CodeGenerationSource::Raw { source })
+            .with_runtime_requirements(runtime_requirements),
+    )
 }

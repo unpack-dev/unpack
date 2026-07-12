@@ -22,6 +22,7 @@ mod flag_dependency_exports_plugin;
 mod flag_dependency_usage_plugin;
 mod hooks;
 mod id_assignment;
+mod javascript;
 mod json;
 mod loader;
 mod logging;

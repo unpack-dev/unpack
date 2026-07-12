@@ -388,15 +388,18 @@ mod tests {
                 .runtime_requirements()
                 .map(|(module, requirements)| (module, *requirements)),
         );
-        let manifest = create_render_manifest(&chunk_graph, &[module], &results);
-        let assets = render_assets(
-            &options,
-            &build_cache,
-            &module_graph,
-            &chunk_graph,
-            &manifest,
-            &results,
+        let hooks = crate::compiler::test_compilation_hooks();
+        let entry_modules = [module];
+        let manifest = create_render_manifest(
+            crate::code_generation::RenderManifestContext {
+                module_graph: &module_graph,
+                chunk_graph: &chunk_graph,
+                entries: &entry_modules,
+                code_generation_results: &results,
+            },
+            &hooks.render_manifest,
         );
+        let assets = render_assets(&options, &build_cache, &manifest, &results);
         let main = assets
             .iter()
             .find(|asset| asset.filename == "main.js")
@@ -442,15 +445,17 @@ mod tests {
                 .runtime_requirements()
                 .map(|(module, requirements)| (module, *requirements)),
         );
-        let manifest = create_render_manifest(&chunk_graph, &entries, &results);
-        render_assets(
-            &options,
-            &build_cache,
-            &module_graph,
-            &chunk_graph,
-            &manifest,
-            &results,
-        )
+        let hooks = crate::compiler::test_compilation_hooks();
+        let manifest = create_render_manifest(
+            crate::code_generation::RenderManifestContext {
+                module_graph: &module_graph,
+                chunk_graph: &chunk_graph,
+                entries: &entries,
+                code_generation_results: &results,
+            },
+            &hooks.render_manifest,
+        );
+        render_assets(&options, &build_cache, &manifest, &results)
     }
 
     fn add_built_module(

@@ -3,15 +3,17 @@
 use std::{collections::BTreeMap, path::Path};
 
 use crate::{
-    ChunkGraph, Module, ModuleGraph, ModuleType,
+    ChunkGraph, Module, ModuleGraph, ModuleType, Result,
     cache_hash::stable_hash,
     code_generation::Asset,
     code_generation_record::{CodeGenerationRecord, CodeGenerationSource},
+    normal_module_factory::ModuleGeneratorContext,
     parser::ParsedModuleData,
     runtime::{RuntimeRequirement, RuntimeRequirements},
 };
 
-pub(crate) fn generate(module: &Module) -> CodeGenerationRecord {
+pub(crate) fn generate(context: ModuleGeneratorContext<'_>) -> Result<CodeGenerationRecord> {
+    let module = context.module;
     let ParsedModuleData::Asset { module_type } = module.parsed_data() else {
         unreachable!("asset modules must contain Asset Parser data")
     };
@@ -29,8 +31,10 @@ pub(crate) fn generate(module: &Module) -> CodeGenerationRecord {
     );
     let mut runtime_requirements = RuntimeRequirements::default();
     runtime_requirements.insert(RuntimeRequirement::DefinePropertyGetters);
-    CodeGenerationRecord::new(CodeGenerationSource::Raw { source })
-        .with_runtime_requirements(runtime_requirements)
+    Ok(
+        CodeGenerationRecord::new(CodeGenerationSource::Raw { source })
+            .with_runtime_requirements(runtime_requirements),
+    )
 }
 
 pub(crate) fn render_resource_assets(

@@ -60,7 +60,7 @@ fn flag_source_side_effects(compilation: &mut Compilation) {
             if module.build_error().is_some() {
                 continue;
             }
-            if crate::parser::source_is_side_effect_free(
+            if crate::javascript::javascript_parser::source_is_side_effect_free(
                 module.identity().resource.as_path(),
                 module.source(),
             ) {

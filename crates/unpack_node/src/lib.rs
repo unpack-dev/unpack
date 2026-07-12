@@ -1035,7 +1035,9 @@ fn stats_error(error: &CoreError) -> NativeStatsError {
             issuer: None,
             stack: None,
         },
-        CoreError::MakeTask { message } | CoreError::Hook { message } => NativeStatsError {
+        CoreError::MakeTask { message }
+        | CoreError::Hook { message }
+        | CoreError::ModuleTypeRegistry { message } => NativeStatsError {
             message: error.to_string(),
             path: None,
             request: None,

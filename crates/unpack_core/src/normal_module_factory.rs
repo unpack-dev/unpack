@@ -1,7 +1,7 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/NormalModuleFactory.js
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,12 +10,133 @@ use dashmap::DashMap;
 use tokio::sync::OnceCell;
 
 use crate::{
-    Dependency, Error, MatchedLoader, ModuleIdentity, ModuleRule, Result, SnapshotStrategy,
-    UnpackResolver,
+    Dependency, Error, MatchedLoader, Module, ModuleGraph, ModuleHandle, ModuleIdentity,
+    ModuleRule, ModuleType, Result, SnapshotStrategy, UnpackResolver,
     cache::{ResolveRecord, ResolveRequest},
     cache_facade::NormalModuleFactoryCache,
+    code_generation_record::CodeGenerationRecord,
+    id_assignment::RenderId,
+    parser::ParsedModule,
     snapshot::{FileSystemInfo, SnapshotCache},
 };
+
+pub(crate) type ModuleParser = for<'a> fn(ModuleParserContext<'a>) -> Result<ParsedModule>;
+pub(crate) type ModuleGenerator =
+    for<'a> fn(ModuleGeneratorContext<'a>) -> Result<CodeGenerationRecord>;
+type DefaultModuleTypeRule = fn(&Path) -> bool;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModuleSourceKind {
+    Text,
+    Binary,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ModuleTypeRegistration {
+    pub parser: ModuleParser,
+    pub generator: ModuleGenerator,
+    pub source_kind: ModuleSourceKind,
+    pub side_effect_free: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ModuleParserContext<'a> {
+    pub module_type: ModuleType,
+    pub resource: &'a Path,
+    pub source: &'a str,
+    pub source_bytes: &'a [u8],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ModuleGeneratorContext<'a> {
+    pub module: &'a Module,
+    pub module_graph: &'a ModuleGraph,
+    pub chunk_graph: &'a crate::ChunkGraph,
+    pub module_render_ids: &'a HashMap<ModuleHandle, RenderId>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ModuleTypeRegistry {
+    registrations: BTreeMap<ModuleType, ModuleTypeRegistration>,
+    default_rules: Vec<(ModuleType, DefaultModuleTypeRule)>,
+    default_module_type: Option<ModuleType>,
+}
+
+impl ModuleTypeRegistry {
+    pub(crate) fn register(
+        &mut self,
+        module_type: ModuleType,
+        registration: ModuleTypeRegistration,
+    ) {
+        assert!(
+            self.registrations
+                .insert(module_type, registration)
+                .is_none(),
+            "module type {module_type:?} must only be registered once"
+        );
+    }
+
+    pub(crate) fn register_default_rule(
+        &mut self,
+        module_type: ModuleType,
+        matches: DefaultModuleTypeRule,
+    ) {
+        self.default_rules.push((module_type, matches));
+    }
+
+    pub(crate) fn set_default_module_type(&mut self, module_type: ModuleType) {
+        assert!(
+            self.default_module_type.replace(module_type).is_none(),
+            "default module type must only be registered once"
+        );
+    }
+
+    pub(crate) fn module_type_for_resource(&self, resource: &Path) -> Result<ModuleType> {
+        self.default_rules
+            .iter()
+            .find_map(|(module_type, matches)| matches(resource).then_some(*module_type))
+            .or(self.default_module_type)
+            .ok_or_else(|| Error::ModuleTypeRegistry {
+                message: format!(
+                    "no plugin registered a default module type for {}",
+                    resource.display()
+                ),
+            })
+    }
+
+    pub(crate) fn registration(&self, module_type: ModuleType) -> Result<ModuleTypeRegistration> {
+        self.registrations
+            .get(&module_type)
+            .copied()
+            .ok_or_else(|| Error::ModuleTypeRegistry {
+                message: format!("no plugin registered module type {module_type:?}"),
+            })
+    }
+
+    pub(crate) fn parse(&self, context: ModuleParserContext<'_>) -> Result<ParsedModule> {
+        (self.registration(context.module_type)?.parser)(context)
+    }
+
+    pub(crate) fn generate(
+        &self,
+        context: ModuleGeneratorContext<'_>,
+    ) -> Result<CodeGenerationRecord> {
+        (self
+            .registration(context.module.identity().module_type)?
+            .generator)(context)
+    }
+}
+
+impl std::fmt::Debug for ModuleTypeRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModuleTypeRegistry")
+            .field("registrations", &self.registrations.keys())
+            .field("default_rules", &self.default_rules.len())
+            .field("default_module_type", &self.default_module_type)
+            .finish()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NormalModuleFactory {
@@ -25,6 +146,7 @@ pub struct NormalModuleFactory {
     resolve_snapshot_strategy: SnapshotStrategy,
     runtime_factorize_cache: RuntimeFactorizeCache,
     snapshot_cache: SnapshotCache,
+    module_types: ModuleTypeRegistry,
     module_rules: Vec<ModuleRule>,
     side_effects: bool,
 }
@@ -40,6 +162,7 @@ impl NormalModuleFactory {
         file_system_info: FileSystemInfo,
         resolve_snapshot_strategy: SnapshotStrategy,
         snapshot_cache: SnapshotCache,
+        module_types: ModuleTypeRegistry,
     ) -> Self {
         Self {
             resolver,
@@ -48,6 +171,7 @@ impl NormalModuleFactory {
             resolve_snapshot_strategy,
             runtime_factorize_cache: Arc::new(DashMap::new()),
             snapshot_cache,
+            module_types,
             module_rules: Vec::new(),
             side_effects: false,
         }
@@ -163,19 +287,15 @@ impl NormalModuleFactory {
     }
 
     fn apply_module_rules(&self, mut factorized: FactorizedModule) -> Result<FactorizedModule> {
-        if factorized
-            .resource
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
-        {
-            factorized.identity.module_type = crate::ModuleType::Json;
-        }
+        factorized.identity.module_type = self
+            .module_types
+            .module_type_for_resource(&factorized.resource)?;
         let mut matching = self
             .module_rules
             .iter()
             .filter(|rule| rule.matches(&factorized.resource));
         let Some(rule) = matching.next() else {
-            return Ok(finalize_module_type_defaults(factorized));
+            return self.finalize_module_type_defaults(factorized);
         };
         if matching.next().is_some() {
             return Err(Error::LoaderRules {
@@ -195,7 +315,20 @@ impl NormalModuleFactory {
         if let Some(has_side_effects) = rule.side_effects() {
             factorized.side_effect_free = Some(!has_side_effects);
         }
-        Ok(finalize_module_type_defaults(factorized))
+        self.finalize_module_type_defaults(factorized)
+    }
+
+    fn finalize_module_type_defaults(
+        &self,
+        mut factorized: FactorizedModule,
+    ) -> Result<FactorizedModule> {
+        let registration = self
+            .module_types
+            .registration(factorized.identity.module_type)?;
+        if factorized.side_effect_free.is_none() && registration.side_effect_free {
+            factorized.side_effect_free = Some(true);
+        }
+        Ok(factorized)
     }
 
     fn apply_factory_metadata(&self, mut factorized: FactorizedModule) -> Result<FactorizedModule> {
@@ -243,15 +376,6 @@ impl FactorizedModule {
     }
 }
 
-fn finalize_module_type_defaults(mut factorized: FactorizedModule) -> FactorizedModule {
-    if factorized.side_effect_free.is_none()
-        && factorized.identity.module_type != crate::ModuleType::JavaScriptAuto
-    {
-        factorized.side_effect_free = Some(true);
-    }
-    factorized
-}
-
 fn package_side_effects(resource: &Path) -> Result<Option<(PathBuf, String, serde_json::Value)>> {
     let mut directory = resource.parent();
     while let Some(current) = directory {
@@ -287,7 +411,7 @@ fn package_side_effects(resource: &Path) -> Result<Option<(PathBuf, String, serd
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use tempfile::tempdir;
 
@@ -296,6 +420,59 @@ mod tests {
         CacheOptions, Dependency, DependencyKind, UnpackResolver, cache::BuildCache,
         resolver::ResolveOptions,
     };
+
+    #[test]
+    fn registry_rejects_unregistered_module_types() {
+        let error = ModuleTypeRegistry::default()
+            .registration(ModuleType::Json)
+            .expect_err("unregistered module type should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("no plugin registered module type Json")
+        );
+    }
+
+    #[test]
+    fn builtin_plugins_register_all_module_types_and_defaults() {
+        let registry = crate::compiler::test_compilation_hooks().normal_module_factory_hooks;
+
+        assert_eq!(
+            registry
+                .module_type_for_resource(Path::new("data.JSON"))
+                .expect("JSON plugin should register its default rule"),
+            ModuleType::Json
+        );
+        assert_eq!(
+            registry
+                .module_type_for_resource(Path::new("index.js"))
+                .expect("JavaScript plugin should register the fallback"),
+            ModuleType::JavaScriptAuto
+        );
+        for module_type in [ModuleType::JavaScriptAuto, ModuleType::Json] {
+            assert_eq!(
+                registry
+                    .registration(module_type)
+                    .expect("text module type should be registered")
+                    .source_kind,
+                ModuleSourceKind::Text
+            );
+        }
+        for module_type in [
+            ModuleType::Asset,
+            ModuleType::AssetResource,
+            ModuleType::AssetInline,
+            ModuleType::AssetSource,
+        ] {
+            assert_eq!(
+                registry
+                    .registration(module_type)
+                    .expect("asset module type should be registered")
+                    .source_kind,
+                ModuleSourceKind::Binary
+            );
+        }
+    }
 
     #[tokio::test]
     async fn runtime_factorize_cache_reuses_results_when_build_cache_is_disabled()
@@ -313,6 +490,7 @@ mod tests {
             FileSystemInfo::new(),
             SnapshotStrategy::timestamp(),
             SnapshotCache::default(),
+            crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
         );
         let dependency = Dependency::new(DependencyKind::StaticImport, "./dep");
 

@@ -19,11 +19,12 @@ use tokio::{
 use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, DependencyKind,
     Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleHandle,
-    ModuleIdentity, ModuleType, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
+    ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     cache::{BuildCache, ModuleBuildRecord},
     cache_facade::ModuleBuildCache,
     module::BuiltModuleContent,
-    parser::{ParsedModule, parse_module_dependencies},
+    normal_module_factory::{ModuleParserContext, ModuleSourceKind, ModuleTypeRegistry},
+    parser::ParsedModule,
     snapshot::{FileSystemInfo, SnapshotCache},
 };
 
@@ -48,6 +49,7 @@ struct MakeServices {
     loader_runner: Option<Arc<dyn LoaderRunner>>,
     metrics: Arc<MakeMetrics>,
     semaphore: Arc<Semaphore>,
+    module_types: ModuleTypeRegistry,
 }
 
 #[derive(Debug)]
@@ -189,6 +191,7 @@ pub(crate) async fn run(
     resolver: UnpackResolver,
     build_cache: BuildCache,
     file_system_info: FileSystemInfo,
+    module_types: ModuleTypeRegistry,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
     let snapshot_cache = SnapshotCache::default();
@@ -199,6 +202,7 @@ pub(crate) async fn run(
             file_system_info.clone(),
             options.snapshot.resolve,
             snapshot_cache.clone(),
+            module_types.clone(),
         )
         .with_module_rules(options.module_rules.clone())
         .with_side_effects(options.side_effects != crate::SideEffectsOption::Disabled),
@@ -209,6 +213,7 @@ pub(crate) async fn run(
         loader_runner: options.loader_runner.clone(),
         metrics: Arc::new(MakeMetrics::new()),
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
+        module_types,
     };
 
     let mut main_queue = VecDeque::new();
@@ -489,9 +494,12 @@ impl BuildTask {
                 return Ok(Vec::new());
             }
         };
+        let registration = services
+            .module_types
+            .registration(self.identity.module_type)?;
         let raw_source = match String::from_utf8(raw_bytes.clone()) {
             Ok(source) => source,
-            Err(error) if self.identity.module_type.is_asset() => {
+            Err(error) if registration.source_kind == ModuleSourceKind::Binary => {
                 String::from_utf8_lossy(error.as_bytes()).into_owned()
             }
             Err(error) => {
@@ -506,7 +514,7 @@ impl BuildTask {
                 return Ok(Vec::new());
             }
         };
-        let mut source = if let Some(loader) = self.loader.as_ref() {
+        let source = if let Some(loader) = self.loader.as_ref() {
             let Some(loader_runner) = services.loader_runner.as_ref() else {
                 let error = Error::Loader {
                     loader: loader.loader.clone(),
@@ -541,24 +549,17 @@ impl BuildTask {
         } else {
             raw_source.clone()
         };
-        if self.identity.module_type == ModuleType::Json && source.starts_with('\u{feff}') {
-            source.remove(0);
-        }
-        let parsed = match match self.identity.module_type {
-            ModuleType::JavaScriptAuto => parse_module_dependencies(&self.resource, &source),
-            ModuleType::Json => crate::json::json_parser::parse(&self.resource, &source),
-            ModuleType::Asset
-            | ModuleType::AssetResource
-            | ModuleType::AssetInline
-            | ModuleType::AssetSource => Ok(crate::asset::asset_parser::parse(
-                self.identity.module_type,
-                if self.loader.is_some() {
-                    source.len()
-                } else {
-                    raw_bytes.len()
-                },
-            )),
-        } {
+        let source_bytes = if self.loader.is_some() {
+            source.as_bytes()
+        } else {
+            raw_bytes.as_slice()
+        };
+        let parsed = match services.module_types.parse(ModuleParserContext {
+            module_type: self.identity.module_type,
+            resource: &self.resource,
+            source: &source,
+            source_bytes,
+        }) {
             Ok(parsed) => parsed,
             Err(error) if error.is_compilation_error() => {
                 state
@@ -572,13 +573,8 @@ impl BuildTask {
         let process_dependencies =
             process_dependencies_task(self.module_handle, &issuer_context, &parsed);
 
-        let binary_source = self.identity.module_type.is_asset().then(|| {
-            if self.loader.is_some() {
-                source.as_bytes().to_vec()
-            } else {
-                raw_bytes.clone()
-            }
-        });
+        let binary_source =
+            (registration.source_kind == ModuleSourceKind::Binary).then(|| source_bytes.to_vec());
         let built_content = Arc::new(match binary_source {
             Some(binary_source) => BuiltModuleContent::new_binary(parsed, source, binary_source),
             None => BuiltModuleContent::new(parsed, source),
@@ -874,6 +870,7 @@ mod tests {
             resolver,
             build_cache.clone(),
             FileSystemInfo::new(),
+            crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
             Arc::clone(&state),
         )
         .await?;

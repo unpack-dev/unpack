@@ -8,9 +8,12 @@ use std::{
 
 use crate::{
     CacheOptions, Compilation, CompilationHooks, InfrastructureLoggingOptions, LoaderRunner,
-    ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, cache::BuildCache,
+    ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver,
+    asset::asset_modules_plugin::AssetModulesPlugin, cache::BuildCache,
     compilation::CompilationHookSet, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
     flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
+    javascript::javascript_modules_plugin::JavascriptModulesPlugin,
+    json::json_modules_plugin::JsonModulesPlugin,
     optimize::side_effects_flag_plugin::SideEffectsFlagPlugin,
 };
 use tracing::Instrument;
@@ -664,6 +667,8 @@ impl Compiler {
         let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
         let cache_lifecycle = CacheLifecycle::new(build_cache.clone(), &options.cache);
         let mut hooks = CompilerHookSet::default();
+        configure_default_module_types(&mut hooks);
+        apply_builtin_module_plugins(&mut hooks);
         if options.provided_exports {
             FlagDependencyExportsPlugin.apply(&mut hooks);
         }
@@ -766,6 +771,40 @@ impl Compiler {
     async fn wait_for_idle_cache_publication(&self) {
         self.cache_lifecycle.wait_for_idle_publication().await;
     }
+}
+
+fn apply_builtin_module_plugins(hooks: &mut CompilerHookSet) {
+    JavascriptModulesPlugin.apply(hooks);
+    JsonModulesPlugin.apply(hooks);
+    AssetModulesPlugin.apply(hooks);
+}
+
+fn configure_default_module_types(hooks: &mut CompilerHookSet) {
+    hooks
+        .compilation
+        .tap("CompilerDefaultModuleTypes", |hooks| {
+            hooks
+                .normal_module_factory_hooks
+                .set_default_module_type(crate::ModuleType::JavaScriptAuto);
+            hooks.normal_module_factory_hooks.register_default_rule(
+                crate::ModuleType::Json,
+                |resource| {
+                    resource
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+                },
+            );
+        });
+}
+
+#[cfg(test)]
+pub(crate) fn test_compilation_hooks() -> CompilationHookSet {
+    let mut compiler_hooks = CompilerHookSet::default();
+    configure_default_module_types(&mut compiler_hooks);
+    apply_builtin_module_plugins(&mut compiler_hooks);
+    let mut compilation_hooks = CompilationHookSet::default();
+    compiler_hooks.compilation.call(&mut compilation_hooks);
+    compilation_hooks
 }
 
 fn default_resolve_options() -> ResolveOptions {

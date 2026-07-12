@@ -1416,11 +1416,14 @@ test("watch close settles pending filesystem cache work and keeps compiler reusa
   }
 });
 
-test("watch invalidate triggers rebuild", async () => {
+test("serial rebuild Make preserves watch invalidation behavior", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 'before';"
   });
-  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js"
+  });
   const entry = join(fixture, "src/index.js");
 
   try {
@@ -1539,6 +1542,42 @@ test("watch rebuilds when a watched dependency changes", async () => {
 
     assert.equal((await second).err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
+    await closeWatching(watching);
+    await closeCompiler(compiler);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("unsafe watch cache invalidation rebuilds changed files", async () => {
+  const fixture = await createFixture({
+    "src/index.js":
+      "import { changed } from './changed'; import { stable } from './stable'; export const result = `${changed}:${stable}`;",
+    "src/changed.js": "export const changed = 'before';",
+    "src/stable.js": "export const stable = 'stable';"
+  });
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    experiments: { unsafeWatchCacheInvalidation: true }
+  });
+  const dependency = join(fixture, "src/changed.js");
+
+  try {
+    const results = collectWatchResults();
+    const first = results.next();
+    const watching = compiler.watch({}, results.handler);
+    assert.equal((await first).err, null);
+
+    const second = results.next();
+    await writeFile(dependency, "export const changed = 'after';", "utf8");
+    const changedTime = new Date(Date.now() + 2000);
+    await utimes(dependency, changedTime, changedTime);
+
+    assert.equal((await second).err, null);
+    const bundle = await readFile(join(fixture, "dist/main.js"), "utf8");
+    assert.match(bundle, /after/);
+    assert.match(bundle, /stable/);
     await closeWatching(watching);
     await closeCompiler(compiler);
   } finally {

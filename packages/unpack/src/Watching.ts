@@ -4,6 +4,7 @@ import { statSync, watch as watchFileSystem } from "node:fs";
 import { resolve } from "node:path";
 
 import { CloseCallback } from "./Compiler.js";
+import { NativeWatchChangeSet } from "./binding.js";
 import { Stats, WatchDependencySets } from "./Stats.js";
 import { assertFunction, assertKnownKeys, assertNonEmptyString, assertNonNegativeInteger, assertPlainObject, assertPositiveInteger, defer } from "./util.js";
 
@@ -57,17 +58,30 @@ export class WatchingImpl implements Watching {
   #closed = false;
   #running = false;
   #invalidated = false;
+  #hasCompletedCompilation = false;
+  #requiresFullInvalidation = false;
   #handler: WatchHandler | undefined;
   #rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #watchers: WatchSubscription[] = [];
-  readonly #runCompilation: (handler: WatchHandler) => Promise<void> | void;
+  readonly #modifiedFiles = new Set<string>();
+  readonly #removedFiles = new Set<string>();
+  readonly #changedContexts = new Set<string>();
+  readonly #runCompilation: (
+    handler: WatchHandler,
+    isRebuild: boolean,
+    watchChangeSet?: NativeWatchChangeSet
+  ) => Promise<void> | void;
   readonly #flushCache: () => Promise<Error | null>;
   readonly #onClose: () => void;
   readonly #watchOptions: NormalizedWatchOptions;
   readonly #closeCallbacks: CloseCallback[] = [];
 
   constructor(
-    runCompilation: (handler: WatchHandler) => Promise<void> | void,
+    runCompilation: (
+      handler: WatchHandler,
+      isRebuild: boolean,
+      watchChangeSet?: NativeWatchChangeSet
+    ) => Promise<void> | void,
     flushCache: () => Promise<Error | null>,
     onClose: () => void,
     watchOptions: NormalizedWatchOptions
@@ -89,6 +103,13 @@ export class WatchingImpl implements Watching {
     }
 
     this.#clearRebuildTimer();
+    this.#requiresFullInvalidation = true;
+    this.#clearPendingChanges();
+
+    this.#requestInvalidation();
+  }
+
+  #requestInvalidation(): void {
 
     if (this.#running) {
       this.#invalidated = true;
@@ -126,13 +147,18 @@ export class WatchingImpl implements Watching {
     this.#closeWatchers();
     this.#running = true;
     let latestStats: Stats | undefined;
+    const watchChangeSet = this.#takeWatchChangeSet();
     await this.#runCompilation((err, stats) => {
       if (!err && stats) {
         latestStats = stats;
       }
       this.#handler?.(err, stats);
-    });
+    }, this.#hasCompletedCompilation, watchChangeSet);
     this.#running = false;
+
+    if (latestStats) {
+      this.#hasCompletedCompilation = true;
+    }
 
     if (!this.#closed && latestStats) {
       const latestJson = latestStats.toJson();
@@ -215,8 +241,13 @@ export class WatchingImpl implements Watching {
               if (previous && pollSnapshotsEqual(previous, next)) {
                 return;
               }
+              this.#queueRebuild(
+                changedPath,
+                next.exists ? "modified" : "removed"
+              );
+              return;
             }
-            this.#queueRebuild();
+            this.#queueRebuild(changedPath, "context");
           })
         );
       } catch {
@@ -241,10 +272,18 @@ export class WatchingImpl implements Watching {
         snapshots.set(target.path, next);
         if (!previous || !pollSnapshotsEqual(previous, next)) {
           changed = true;
+          this.#recordChange(
+            target.path,
+            target.kind === "context"
+              ? "context"
+              : next.exists
+                ? "modified"
+                : "removed"
+          );
         }
       }
       if (changed) {
-        this.#queueRebuild();
+        this.#queueRecordedRebuild();
       }
     }, this.#watchOptions.pollInterval);
     interval.unref?.();
@@ -253,7 +292,31 @@ export class WatchingImpl implements Watching {
     };
   }
 
-  #queueRebuild(): void {
+  #queueRebuild(
+    path: string,
+    kind: "modified" | "removed" | "context"
+  ): void {
+    this.#recordChange(path, kind);
+    this.#queueRecordedRebuild();
+  }
+
+  #recordChange(
+    path: string,
+    kind: "modified" | "removed" | "context"
+  ): void {
+    this.#modifiedFiles.delete(path);
+    this.#removedFiles.delete(path);
+    this.#changedContexts.delete(path);
+    const changes =
+      kind === "modified"
+        ? this.#modifiedFiles
+        : kind === "removed"
+          ? this.#removedFiles
+          : this.#changedContexts;
+    changes.add(path);
+  }
+
+  #queueRecordedRebuild(): void {
     if (this.#closed) {
       return;
     }
@@ -261,8 +324,36 @@ export class WatchingImpl implements Watching {
     this.#clearRebuildTimer();
     this.#rebuildTimer = setTimeout(() => {
       this.#rebuildTimer = undefined;
-      this.invalidate();
+      this.#requestInvalidation();
     }, this.#watchOptions.aggregateTimeout);
+  }
+
+  #takeWatchChangeSet(): NativeWatchChangeSet | undefined {
+    if (!this.#hasCompletedCompilation || this.#requiresFullInvalidation) {
+      this.#requiresFullInvalidation = false;
+      this.#clearPendingChanges();
+      return undefined;
+    }
+    if (
+      this.#modifiedFiles.size === 0 &&
+      this.#removedFiles.size === 0 &&
+      this.#changedContexts.size === 0
+    ) {
+      return undefined;
+    }
+    const changeSet = {
+      modifiedFiles: [...this.#modifiedFiles],
+      removedFiles: [...this.#removedFiles],
+      changedContexts: [...this.#changedContexts]
+    };
+    this.#clearPendingChanges();
+    return changeSet;
+  }
+
+  #clearPendingChanges(): void {
+    this.#modifiedFiles.clear();
+    this.#removedFiles.clear();
+    this.#changedContexts.clear();
   }
 
   #clearRebuildTimer(): void {

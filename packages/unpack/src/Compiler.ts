@@ -1,6 +1,6 @@
 // Organized to match webpack's lib/Compiler.js responsibility.
 
-import { NativeCompilation, NativeCompiler, NativeFlushResult, NativeRunResult, native } from "./binding.js";
+import { NativeCompilation, NativeCompiler, NativeFlushResult, NativeRunResult, NativeWatchChangeSet, native } from "./binding.js";
 import { Compilation, CompilationImpl, ProcessAssetsHookImpl } from "./Compilation.js";
 import { InfrastructureLogEvent, InfrastructureLogEventLevel, InfrastructureLoggingLevel, NormalizedOptions } from "./config/normalization.js";
 import { LoaderRuntime } from "./LoaderRuntime.js";
@@ -379,7 +379,8 @@ export class CompilerImpl implements Compiler {
     }
 
     const watching = new WatchingImpl(
-      (watchHandler) => this.#runWatchCompilation(watchHandler),
+      (watchHandler, isRebuild, watchChangeSet) =>
+        this.#runWatchCompilation(watchHandler, isRebuild, watchChangeSet),
       () => this.#flushCacheNow(),
       () => {
         if (this.#watching === watching) {
@@ -483,11 +484,15 @@ export class CompilerImpl implements Compiler {
     return closeError;
   }
 
-  async #runWatchCompilation(handler: WatchHandler): Promise<void> {
+  async #runWatchCompilation(
+    handler: WatchHandler,
+    isRebuild: boolean,
+    watchChangeSet?: NativeWatchChangeSet
+  ): Promise<void> {
     let run: Promise<NativeRunResult>;
     try {
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation started");
-      run = this.#runNativeCompilation();
+      run = this.#runNativeCompilation(isRebuild, watchChangeSet);
     } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
       this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
@@ -532,11 +537,14 @@ export class CompilerImpl implements Compiler {
     }
   }
 
-  #runNativeCompilation(): Promise<NativeRunResult> {
+  #runNativeCompilation(
+    isRebuild = false,
+    watchChangeSet?: NativeWatchChangeSet
+  ): Promise<NativeRunResult> {
     this.#nativeHookError = undefined;
     this.#activeCompilation = undefined;
     this.#loaderRuntime?.beginCompilation();
-    return this.#nativeCompiler.run();
+    return this.#nativeCompiler.run({ isRebuild, watchChangeSet });
   }
 
   #takeActiveCompilation(

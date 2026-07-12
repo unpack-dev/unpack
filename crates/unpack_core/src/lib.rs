@@ -43,6 +43,7 @@ mod resolver;
 mod runtime;
 mod serialization;
 mod snapshot;
+mod unsafe_watch_cache;
 
 pub use async_dependencies_block::AsyncDependenciesBlock;
 pub use cache::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
@@ -68,6 +69,7 @@ pub use exports_info::ExportsInfo;
 pub use hooks::{CompilationHooks, HookFuture};
 pub use loader::{LoaderFuture, LoaderRequest, LoaderRunner, MatchedLoader, ModuleRule};
 pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions};
+pub use make::MakeOptions;
 pub use module::{Module, ModuleHandle, ModuleIdentity, ModuleType};
 pub use module_graph::{AsyncDependenciesBlockIndex, DependencyIndex, ModuleGraph};
 pub use module_graph_connection::{
@@ -76,3 +78,4 @@ pub use module_graph_connection::{
 pub use normal_module_factory::{FactorizedModule, NormalModuleFactory};
 pub use resolver::{ResolveOptions, ResolvedResource, UnpackResolver};
 pub use snapshot::{SnapshotOptions, SnapshotPathPattern, SnapshotStrategy};
+pub use unsafe_watch_cache::WatchChangeSet;

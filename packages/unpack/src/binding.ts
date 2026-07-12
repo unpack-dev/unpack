@@ -103,10 +103,22 @@ export interface NativeFlushResult {
 }
 
 export interface NativeCompiler {
-  run(): Promise<NativeRunResult>;
+  run(options?: NativeRunOptions): Promise<NativeRunResult>;
   settleCache(): Promise<NativeFlushResult>;
   shutdown(): Promise<NativeFlushResult>;
   close(): void;
+}
+
+export interface NativeRunOptions {
+  idleReason?: string;
+  isRebuild?: boolean;
+  watchChangeSet?: NativeWatchChangeSet;
+}
+
+export interface NativeWatchChangeSet {
+  modifiedFiles: string[];
+  removedFiles: string[];
+  changedContexts: string[];
 }
 
 export interface NativeBinding {

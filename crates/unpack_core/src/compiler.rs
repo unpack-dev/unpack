@@ -56,11 +56,13 @@ pub struct CompilerOptions {
     pub module_rules: Vec<ModuleRule>,
     pub loader_runner: Option<Arc<dyn LoaderRunner>>,
     pub compilation_hooks: Option<Arc<dyn CompilationHooks>>,
-    pub parallelism: usize,
+    pub parallelism: Option<usize>,
     pub sourcemap: bool,
     pub provided_exports: bool,
     pub used_exports: bool,
     pub side_effects: SideEffectsOption,
+    pub serial_rebuild_make: bool,
+    pub unsafe_watch_cache_invalidation: bool,
 }
 
 impl CompilerOptions {
@@ -75,11 +77,13 @@ impl CompilerOptions {
             module_rules: Vec::new(),
             loader_runner: None,
             compilation_hooks: None,
-            parallelism: 100,
+            parallelism: None,
             sourcemap: true,
             provided_exports: true,
             used_exports: true,
             side_effects: SideEffectsOption::Flag,
+            serial_rebuild_make: true,
+            unsafe_watch_cache_invalidation: false,
         }
     }
 }
@@ -90,6 +94,7 @@ pub struct Compiler {
     cache: Cache,
     cache_lifecycle: Arc<CacheLifecycle>,
     module_computation_cache: Option<ModuleComputationCache>,
+    unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
     hooks: CompilerHookSet,
 }
 
@@ -669,6 +674,9 @@ impl Compiler {
             .cache
             .cache_unaffected
             .then(ModuleComputationCache::default);
+        let unsafe_watch_cache = options
+            .unsafe_watch_cache_invalidation
+            .then(crate::unsafe_watch_cache::UnsafeWatchCache::default);
         let mut hooks = CompilerHookSet::default();
         configure_default_module_types(&mut hooks);
         apply_builtin_module_plugins(&mut hooks);
@@ -688,6 +696,7 @@ impl Compiler {
             cache,
             cache_lifecycle,
             module_computation_cache,
+            unsafe_watch_cache,
             hooks,
         }
     }
@@ -704,13 +713,14 @@ impl Compiler {
             UnpackResolver::new(self.options.resolve.clone()),
             self.cache.clone(),
             self.module_computation_cache.clone(),
+            self.unsafe_watch_cache.clone(),
             compilation_hooks,
         )
     }
 
     pub async fn run(&self) -> Result<Compilation> {
         Ok(self
-            .run_until_finalize(CacheIdleReason::Ordinary)
+            .run_until_finalize(CacheIdleReason::Ordinary, false, None)
             .await?
             .finish())
     }
@@ -718,7 +728,12 @@ impl Compiler {
     pub async fn run_until_finalize(
         &self,
         idle_reason: CacheIdleReason,
+        is_rebuild: bool,
+        watch_change_set: Option<crate::WatchChangeSet>,
     ) -> Result<PendingCompilation> {
+        if let Some(cache) = &self.unsafe_watch_cache {
+            cache.begin_compilation(watch_change_set.is_some());
+        }
         self.cache
             .prepare_for_compilation(
                 &self.options.context,
@@ -731,7 +746,15 @@ impl Compiler {
             if let Some(hooks) = &self.options.compilation_hooks {
                 hooks.compilation(&compilation).await?;
             }
-            compilation.make().await?;
+            compilation
+                .make(crate::MakeOptions {
+                    spawn_background_tasks: should_spawn_make_tasks(
+                        is_rebuild,
+                        self.options.serial_rebuild_make,
+                    ),
+                    watch_change_set,
+                })
+                .await?;
             if let Some(hooks) = &self.options.compilation_hooks {
                 hooks.finish_modules(&mut compilation).await?;
             }
@@ -778,6 +801,10 @@ impl Compiler {
     async fn wait_for_idle_cache_publication(&self) {
         self.cache_lifecycle.wait_for_idle_publication().await;
     }
+}
+
+fn should_spawn_make_tasks(is_rebuild: bool, serial_rebuild_make: bool) -> bool {
+    !is_rebuild || !serial_rebuild_make
 }
 
 fn apply_builtin_module_plugins(hooks: &mut CompilerHookSet) {
@@ -835,6 +862,7 @@ fn normalize_context(context: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::{
         collections::BTreeMap,
         fs,
@@ -852,6 +880,21 @@ mod tests {
         cache::{CacheItemFamily, CacheItemWork},
         serialization::Serializer,
     };
+
+    #[test]
+    fn serial_make_scheduling_is_configurable_and_rebuild_only() {
+        assert!(should_spawn_make_tasks(false, false));
+        assert!(should_spawn_make_tasks(false, true));
+        assert!(should_spawn_make_tasks(true, false));
+        assert!(!should_spawn_make_tasks(true, true));
+    }
+
+    #[test]
+    fn make_defaults_to_unbounded_parallelism_and_serial_rebuild_scheduling() {
+        let options = CompilerOptions::new(".", Vec::new());
+        assert_eq!(options.parallelism, None);
+        assert!(options.serial_rebuild_make);
+    }
 
     #[tokio::test]
     async fn repeated_runs_reuse_memory_module_build_records_without_sharing_compilations()
@@ -984,6 +1027,56 @@ mod tests {
             second.chunk_graph().chunks().as_ptr()
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsafe_watch_change_set_bypasses_unaffected_record_cache_lookups()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let changed_path = temp.path().join("changed.js");
+        write(
+            temp.path().join("index.js"),
+            r#"
+                import { changed } from "./changed";
+                import { stable } from "./stable";
+                export const result = `${changed}:${stable}`;
+            "#,
+        )?;
+        write(&changed_path, "export const changed = 'before';")?;
+        write(
+            temp.path().join("stable.js"),
+            "export const stable = 'stable';",
+        )?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.unsafe_watch_cache_invalidation = true;
+        let compiler = Compiler::new(options);
+        compiler.run().await?;
+        let before = compiler.cache.stats();
+
+        write(&changed_path, "export const changed = 'after';")?;
+        let compilation = compiler
+            .run_until_finalize(
+                CacheIdleReason::Ordinary,
+                true,
+                Some(crate::WatchChangeSet {
+                    modified_files: HashSet::from([std::fs::canonicalize(changed_path)?]),
+                    ..Default::default()
+                }),
+            )
+            .await?
+            .finish();
+        let after = compiler.cache.stats();
+
+        assert!(
+            asset_sources(&compilation)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("after")
+        );
+        assert_eq!(after.resolve_hits - before.resolve_hits, 0);
+        assert_eq!(after.module_hits - before.module_hits, 0);
         Ok(())
     }
 
@@ -1321,7 +1414,7 @@ mod tests {
 
         let compiler = Compiler::new(options);
         let pending = compiler
-            .run_until_finalize(CacheIdleReason::Ordinary)
+            .run_until_finalize(CacheIdleReason::Ordinary, false, None)
             .await?;
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         assert!(!PackFile::index_path(&cache_location).exists());
@@ -1472,7 +1565,7 @@ mod tests {
 
         let compiler = Compiler::new(options.clone());
         let pending = compiler
-            .run_until_finalize(CacheIdleReason::Ordinary)
+            .run_until_finalize(CacheIdleReason::Ordinary, false, None)
             .await?;
         write(&config, "export default 'after';")?;
         pending.finish();

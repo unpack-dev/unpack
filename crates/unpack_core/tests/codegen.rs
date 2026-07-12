@@ -18,7 +18,7 @@ async fn seal_orchestrates_post_make_phases() -> Result<(), Box<dyn std::error::
     ));
     let mut compilation = compiler.create_compilation();
 
-    compilation.make().await?;
+    compilation.make(Default::default()).await?;
     assert!(compilation.assets().is_empty());
 
     compilation.seal();
@@ -46,7 +46,10 @@ async fn code_generation_rejects_an_unsealed_compilation() {
     ));
     let mut compilation = compiler.create_compilation();
 
-    compilation.make().await.expect("make should complete");
+    compilation
+        .make(Default::default())
+        .await
+        .expect("make should complete");
     compilation.build_chunk_graph();
     compilation.code_generation();
 }

@@ -75,6 +75,10 @@ pub struct NativeCompilerOptions {
     pub side_effects: String,
     #[napi(js_name = "moduleRules")]
     pub module_rules: Vec<NativeModuleRule>,
+    #[napi(js_name = "serialRebuildMake")]
+    pub serial_rebuild_make: bool,
+    #[napi(js_name = "unsafeWatchCacheInvalidation")]
+    pub unsafe_watch_cache_invalidation: bool,
 }
 
 #[napi(object)]
@@ -807,18 +811,72 @@ pub struct NativeCompiler {
     output_path: PathBuf,
 }
 
+#[napi(object)]
+pub struct NativeWatchChangeSet {
+    #[napi(js_name = "modifiedFiles")]
+    pub modified_files: Vec<String>,
+    #[napi(js_name = "removedFiles")]
+    pub removed_files: Vec<String>,
+    #[napi(js_name = "changedContexts")]
+    pub changed_contexts: Vec<String>,
+}
+
+#[napi(object)]
+pub struct NativeRunOptions {
+    #[napi(js_name = "idleReason")]
+    pub idle_reason: Option<String>,
+    #[napi(js_name = "isRebuild")]
+    pub is_rebuild: Option<bool>,
+    #[napi(js_name = "watchChangeSet")]
+    pub watch_change_set: Option<NativeWatchChangeSet>,
+}
+
 #[napi]
 impl NativeCompiler {
     #[napi]
-    pub async fn run(&self, idle_reason: Option<String>) -> NativeRunResult {
+    pub async fn run(&self, options: Option<NativeRunOptions>) -> NativeRunResult {
         let compiler = self.compiler.clone();
         let output_path = self.output_path.clone();
-        let idle_reason = match idle_reason.as_deref() {
+        let idle_reason = match options
+            .as_ref()
+            .and_then(|options| options.idle_reason.as_deref())
+        {
             Some("largeChange") => CacheIdleReason::LargeChange,
             _ => CacheIdleReason::Ordinary,
         };
+        let is_rebuild = options
+            .as_ref()
+            .and_then(|options| options.is_rebuild)
+            .unwrap_or(false);
+        let watch_change_set =
+            options
+                .and_then(|options| options.watch_change_set)
+                .map(|changes| unpack_core::WatchChangeSet {
+                    modified_files: changes
+                        .modified_files
+                        .into_iter()
+                        .map(PathBuf::from)
+                        .collect(),
+                    removed_files: changes
+                        .removed_files
+                        .into_iter()
+                        .map(PathBuf::from)
+                        .collect(),
+                    changed_contexts: changes
+                        .changed_contexts
+                        .into_iter()
+                        .map(PathBuf::from)
+                        .collect(),
+                });
 
-        run_compiler_inner(compiler, output_path, idle_reason).await
+        run_compiler_inner(
+            compiler,
+            output_path,
+            idle_reason,
+            is_rebuild,
+            watch_change_set,
+        )
+        .await
     }
 
     #[napi(js_name = "settleCache")]
@@ -905,6 +963,8 @@ impl NativeCompiler {
         compiler_options.sourcemap = options.sourcemap;
         compiler_options.provided_exports = options.provided_exports;
         compiler_options.used_exports = options.used_exports;
+        compiler_options.serial_rebuild_make = options.serial_rebuild_make;
+        compiler_options.unsafe_watch_cache_invalidation = options.unsafe_watch_cache_invalidation;
         compiler_options.side_effects = match options.side_effects.as_str() {
             "disabled" => unpack_core::SideEffectsOption::Disabled,
             "flag" => unpack_core::SideEffectsOption::Flag,
@@ -1161,12 +1221,17 @@ async fn run_compiler_inner(
     compiler: Option<Arc<Compiler>>,
     output_path: PathBuf,
     idle_reason: CacheIdleReason,
+    is_rebuild: bool,
+    watch_change_set: Option<unpack_core::WatchChangeSet>,
 ) -> NativeRunResult {
     let Some(compiler) = compiler else {
         return infrastructure_error("CompilerClosedError", "compiler is closed");
     };
 
-    let pending = match compiler.run_until_finalize(idle_reason).await {
+    let pending = match compiler
+        .run_until_finalize(idle_reason, is_rebuild, watch_change_set)
+        .await
+    {
         Ok(pending) => pending,
         Err(error) => {
             return infrastructure_error("InfrastructureError", error.to_string());

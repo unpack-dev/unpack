@@ -144,6 +144,10 @@ _Avoid_: Entry chunk, main chunk
 The compilation stage that starts from entry modules, discovers their dependencies, and constructs the module graph before bundling.
 _Avoid_: Build phase, parse phase
 
+**Serial Rebuild Make**:
+The default Make scheduling mode for rebuilds, in which Factorize and Build futures are polled directly by the Make queue instead of being wrapped in Tokio tasks. It changes scheduling only; the Make task model remains intact, and an explicitly configured finite parallelism limit still applies.
+_Avoid_: Single-threaded rebuild, disabled concurrency
+
 **Code Generation Phase**:
 The compilation stage that turns chunks and their modules into webpack-shaped output files.
 _Avoid_: Emit phase, print phase
@@ -259,6 +263,14 @@ _Avoid_: Compiler options, cache options
 **Watch Dependency Set**:
 The compilation-reported filesystem inputs that a watch session uses to subscribe to future changes.
 _Avoid_: Module dependency, import dependency
+
+**Watch Change Set**:
+The modified files, removed files, newly present missing dependencies, and changed contexts accumulated for one rebuild within a Watch Session.
+_Avoid_: Watch event, modified files list, Snapshot
+
+**Unsafe Watch Cache Invalidation**:
+An explicitly configured rebuild policy that trusts a Watch Change Set to reuse compiler-owned Memory Cache state without ordinary Snapshot validation, accepting stale reuse when change reporting is incomplete.
+_Avoid_: Incremental cache, safe invalidation, Persistent Cache validation
 
 **Cache Options**:
 The JavaScript API options that enable, disable, and configure build cache layers.

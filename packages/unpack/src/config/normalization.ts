@@ -27,6 +27,8 @@ export interface UnpackOptions {
 
 export interface ExperimentsOptions {
   cacheUnaffected?: boolean;
+  serialRebuildMake?: boolean;
+  unsafeWatchCacheInvalidation?: boolean;
 }
 
 export interface OptimizationOptions {
@@ -136,6 +138,8 @@ export interface NormalizedOptions {
   providedExports: boolean;
   usedExports: boolean;
   sideEffects: "disabled" | "flag" | "analyze";
+  serialRebuildMake: boolean;
+  unsafeWatchCacheInvalidation: boolean;
 }
 
 export interface NormalizedModuleRule {
@@ -228,7 +232,8 @@ export function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     ? process.cwd()
     : assertString(options.context, "options.context");
   const mode = options.mode === undefined ? "production" : assertMode(options.mode);
-  const cacheUnaffectedExperiment = normalizeExperimentsOptions(options.experiments);
+  const experiments = normalizeExperimentsOptions(options.experiments);
+  const cacheUnaffectedExperiment = experiments.cacheUnaffected;
   const name = options.name === undefined
     ? undefined
     : assertString(options.name, "options.name");
@@ -260,29 +265,63 @@ export function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       normalizedContext,
       mode,
       name,
-      cacheUnaffectedExperiment
+      cacheUnaffectedExperiment,
+      experiments.unsafeWatchCacheInvalidation
     ),
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
     moduleRules,
     providedExports: optimization.providedExports,
     usedExports: optimization.usedExports,
-    sideEffects: optimization.sideEffects
+    sideEffects: optimization.sideEffects,
+    serialRebuildMake: experiments.serialRebuildMake,
+    unsafeWatchCacheInvalidation: experiments.unsafeWatchCacheInvalidation
   };
 }
 
-export function normalizeExperimentsOptions(experiments: ExperimentsOptions | undefined): boolean {
+export function normalizeExperimentsOptions(
+  experiments: ExperimentsOptions | undefined
+): {
+  cacheUnaffected: boolean;
+  serialRebuildMake: boolean;
+  unsafeWatchCacheInvalidation: boolean;
+} {
   if (experiments === undefined) {
-    return false;
+    return {
+      cacheUnaffected: false,
+      serialRebuildMake: true,
+      unsafeWatchCacheInvalidation: false
+    };
   }
   assertPlainObject(experiments, "options.experiments");
-  assertKnownKeys(experiments, ["cacheUnaffected"], "options.experiments");
-  return experiments.cacheUnaffected === undefined
-    ? false
-    : assertBoolean(
-        experiments.cacheUnaffected,
-        "options.experiments.cacheUnaffected"
-      );
+  assertKnownKeys(
+    experiments,
+    ["cacheUnaffected", "serialRebuildMake", "unsafeWatchCacheInvalidation"],
+    "options.experiments"
+  );
+  return {
+    cacheUnaffected:
+      experiments.cacheUnaffected === undefined
+        ? false
+        : assertBoolean(
+            experiments.cacheUnaffected,
+            "options.experiments.cacheUnaffected"
+          ),
+    serialRebuildMake:
+      experiments.serialRebuildMake === undefined
+        ? true
+        : assertBoolean(
+            experiments.serialRebuildMake,
+            "options.experiments.serialRebuildMake"
+          ),
+    unsafeWatchCacheInvalidation:
+      experiments.unsafeWatchCacheInvalidation === undefined
+        ? false
+        : assertBoolean(
+            experiments.unsafeWatchCacheInvalidation,
+            "options.experiments.unsafeWatchCacheInvalidation"
+          )
+  };
 }
 
 export function normalizeOptimizationOptions(
@@ -397,11 +436,15 @@ export function normalizeCacheOptions(
   context: string,
   mode: Mode,
   compilerName: string | undefined,
-  cacheUnaffectedExperiment: boolean
+  cacheUnaffectedExperiment: boolean,
+  unsafeWatchCacheInvalidation: boolean
 ): NormalizedCacheOptions {
   if (cache === undefined) {
     return {
-      type: mode === "development" ? "memory" : "disabled",
+      type:
+        mode === "development" || unsafeWatchCacheInvalidation
+          ? "memory"
+          : "disabled",
       buildDependencies: [],
       automaticBuildDependencies: [],
       ...(mode === "development" && cacheUnaffectedExperiment
@@ -410,6 +453,12 @@ export function normalizeCacheOptions(
       profile: false,
       readonly: false
     };
+  }
+
+  if (cache === false && unsafeWatchCacheInvalidation) {
+    throw new TypeError(
+      "options.experiments.unsafeWatchCacheInvalidation requires an enabled cache"
+    );
   }
 
   if (cache === true) {

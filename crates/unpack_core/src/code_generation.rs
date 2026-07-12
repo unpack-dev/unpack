@@ -30,22 +30,6 @@ pub struct Asset {
 }
 
 impl Asset {
-    pub fn from_source(filename: String, source: String) -> Self {
-        Self {
-            filename,
-            source,
-            binary_source: None,
-        }
-    }
-
-    pub fn from_bytes(filename: String, source: Vec<u8>) -> Self {
-        Self {
-            filename,
-            source: String::new(),
-            binary_source: Some(source),
-        }
-    }
-
     pub fn source_bytes(&self) -> &[u8] {
         self.binary_source
             .as_deref()

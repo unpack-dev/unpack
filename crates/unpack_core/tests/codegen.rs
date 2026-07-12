@@ -897,7 +897,7 @@ async fn shared_async_cross_imports_do_not_materialize_a_group_cycle()
 async fn nested_shared_parent_shrink_rescans_newly_required_modules()
 -> Result<(), Box<dyn std::error::Error>> {
     let context = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/unpack/test/e2e-cases/nested-shared-requeue")
+        .join("../../packages/unpack/test/defaultCases/nested-shared-requeue")
         .canonicalize()?;
     let compilation = Compiler::new(CompilerOptions::new(
         &context,

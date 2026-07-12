@@ -1,6 +1,8 @@
 // Ported from Rspack's plugins/internal-processAssets config case.
 import assert from "node:assert/strict";
-import { ConcatSource, RawSource } from "webpack-sources";
+import webpackSources from "webpack-sources";
+
+const { ConcatSource, RawSource } = webpackSources;
 
 export default {
   plugins: [

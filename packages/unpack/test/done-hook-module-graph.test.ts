@@ -126,6 +126,81 @@ test("finishModules taps run after make and before done", async () => {
   }
 });
 
+test("finishModules exposes a live webpack-shaped ModuleGraph", async () => {
+  const fixture = await createGraphFixture();
+  const unpackCompiler = createCompiler(fixture);
+  const webpackCompiler = webpack({
+    context: fixture,
+    mode: "none",
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist-webpack") },
+    devtool: false,
+    optimization: {
+      concatenateModules: false,
+      providedExports: false,
+      usedExports: false
+    }
+  });
+  let unpackInspected = false;
+  let webpackInspected = false;
+
+  unpackCompiler.hooks.compilation.tap("observe compilation", (compilation) => {
+    const moduleGraph = compilation.moduleGraph;
+    assert.equal(compilation.modules.size, 0);
+    compilation.hooks.finishModules.tap("inspect live module graph", (modules) => {
+      assert.equal(compilation.moduleGraph, moduleGraph);
+      assert.equal(modules.size, 4);
+      const entry = findModule(modules, "/src/index.js");
+      const left = findModule(modules, "/src/left.js");
+      const leftConnection = [...moduleGraph.getOutgoingConnections(entry)]
+        .find((connection) => connection.module === left);
+      assert.ok(leftConnection);
+      assert.equal(moduleGraph.getConnection(leftConnection.dependency), leftConnection);
+      assert.equal(moduleGraph.getModule(leftConnection.dependency), left);
+      unpackInspected = true;
+    });
+  });
+  webpackCompiler.hooks.compilation.tap("observe compilation", (compilation) => {
+    const moduleGraph = compilation.moduleGraph;
+    assert.equal(compilation.modules.size, 0);
+    compilation.hooks.finishModules.tap("inspect live module graph", (modules) => {
+      assert.equal(compilation.moduleGraph, moduleGraph);
+      const finishedModules = [...modules];
+      assert.equal(finishedModules.length, 4);
+      const entry = finishedModules.find((module) =>
+        (module as { resource?: string }).resource?.endsWith(join("src", "index.js"))
+      );
+      const left = finishedModules.find((module) =>
+        (module as { resource?: string }).resource?.endsWith(join("src", "left.js"))
+      );
+      assert.ok(entry);
+      assert.ok(left);
+      const leftConnection = [...moduleGraph.getOutgoingConnections(entry)]
+        .find((connection) => connection.module === left);
+      assert.ok(leftConnection);
+      assert.ok(leftConnection.dependency);
+      assert.equal(moduleGraph.getConnection(leftConnection.dependency), leftConnection);
+      assert.equal(moduleGraph.getModule(leftConnection.dependency), left);
+      webpackInspected = true;
+    });
+  });
+
+  try {
+    await runCompiler(unpackCompiler);
+    await new Promise<void>((resolve, reject) => {
+      webpackCompiler.run((error) => (error ? reject(error) : resolve()));
+    });
+    assert.equal(unpackInspected, true);
+    assert.equal(webpackInspected, true);
+  } finally {
+    await closeCompiler(unpackCompiler);
+    await new Promise<void>((resolve, reject) => {
+      webpackCompiler.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("finishModules failures abort sealing and preserve the hook error", async () => {
   const fixture = await createGraphFixture();
   const compiler = createCompiler(fixture);

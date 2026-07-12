@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     CacheOptions, Compilation, CompilationHooks, InfrastructureLoggingOptions, LoaderRunner,
-    ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+    ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, cache::BuildCache,
     compilation::CompilationHookSet, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
     flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
     optimize::side_effects_flag_plugin::SideEffectsFlagPlugin,
@@ -797,8 +797,8 @@ mod tests {
     use super::*;
     use crate::{
         BuildDependency,
-        build_cache::{CacheItemFamily, CacheItemWork},
-        pack_file::{CodecRegistry, ModuleBuildRecordCodec, PackFile, ResolveRecordCodec},
+        cache::pack_file::{CodecRegistry, ModuleBuildRecordCodec, PackFile, ResolveRecordCodec},
+        cache::{CacheItemFamily, CacheItemWork},
     };
 
     #[tokio::test]

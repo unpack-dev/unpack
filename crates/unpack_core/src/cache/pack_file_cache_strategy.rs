@@ -1,4 +1,4 @@
-//! PackFile-backed Persistent Cache Layer, including restore, publication, and writer diagnostics.
+//! Webpack-aligned Pack File Cache Strategy, including restore, publication, and writer diagnostics.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -13,8 +13,7 @@ use std::{
 
 use crate::{
     SnapshotStrategy,
-    code_generation_record::CodeGenerationRecord,
-    pack_file::{
+    cache::pack_file::{
         AccessStamp, AssetRenderRecordCodec, AssetRenderRecordDto, CodeGenerationRecordCodec,
         CodeGenerationRecordDto, CodecRegistry, ModuleBuildRecordCodec, ModuleBuildRecordDto,
         PackFile, PackFileAddress, PackFileCompression, PackFileETag, PackFileGuardDto,
@@ -22,21 +21,22 @@ use crate::{
         PackFileRetention, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
         ResolveRecordDto,
     },
+    code_generation_record::CodeGenerationRecord,
     rendered_source::RenderedSource,
     snapshot::{FileSystemInfo, Snapshot},
 };
 
 #[cfg(test)]
-use super::RestoreBarrier;
+use super::build_cache::RestoreBarrier;
 use super::{
-    CacheDiagnostics,
-    cache::{CacheEntry, CacheItemFamily, CacheLayer, CacheLayerLookup},
-    facade::{
-        ASSET_RENDER_CACHE_NAMESPACE, CODE_GENERATION_CACHE_NAMESPACE, CacheAddress, CacheETag,
-        CacheNamespace, MODULE_BUILD_CACHE_NAMESPACE, RESOLVE_CACHE_NAMESPACE,
-    },
+    CacheEntry, CacheItemFamily, CacheLayer, CacheLayerLookup,
+    build_cache::CacheDiagnostics,
+    cache_items::{ModuleBuildRecord, ResolveRecord},
     options::CacheOptions,
-    records::{ModuleBuildRecord, ResolveRecord},
+};
+use crate::cache_facade::{
+    ASSET_RENDER_CACHE_NAMESPACE, CODE_GENERATION_CACHE_NAMESPACE, CacheAddress, CacheETag,
+    CacheNamespace, MODULE_BUILD_CACHE_NAMESPACE, RESOLVE_CACHE_NAMESPACE,
 };
 
 enum PreparedPersistentRecord {
@@ -46,7 +46,7 @@ enum PreparedPersistentRecord {
     AssetRender(PackFileRecordRestore<AssetRenderRecordDto>),
 }
 
-pub(super) struct PersistentCachePreparation<'a> {
+pub(crate) struct PersistentCachePreparation<'a> {
     pub(super) guard: &'a PackFileGuardDto,
     pub(super) build_inputs: &'a BTreeSet<PathBuf>,
     pub(super) resolved_build_inputs: &'a BTreeSet<PathBuf>,
@@ -57,7 +57,7 @@ pub(super) struct PersistentCachePreparation<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PersistentRestore {
+pub(crate) struct PersistentRestore {
     pack_file: Arc<Mutex<PackFile>>,
     reader_generation: u64,
     address: PackFileAddress,
@@ -70,7 +70,7 @@ pub(super) struct PersistentRestore {
 }
 
 impl PersistentRestore {
-    pub(super) fn restore(&self) -> Option<CacheEntry> {
+    pub(crate) fn restore(&self) -> Option<CacheEntry> {
         let started = Instant::now();
         let prepared = {
             let mut pack_file = self

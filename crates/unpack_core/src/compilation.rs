@@ -5,8 +5,8 @@ use tokio::sync::Mutex;
 use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleHandle, Result, UnpackResolver,
-    build_cache::BuildCache,
     build_chunk_graph::build_chunk_graph,
+    cache::BuildCache,
     code_generation::{self, CodeGenerationResults, RenderManifest},
     id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
     make::{self, MakeState},

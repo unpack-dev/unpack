@@ -1,3 +1,5 @@
+//! Private Pack File storage used by the Pack File Cache Strategy.
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -1865,7 +1867,7 @@ use crate::{
     HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency,
     ModuleDependency, ModuleIdentity, ModuleType, NullDependency, SourceRange,
-    build_cache::{ModuleBuildRecord, ResolveRecord},
+    cache::{ModuleBuildRecord, ResolveRecord},
     cache_hash::stable_hash,
     code_generation_record::{
         CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationSource,

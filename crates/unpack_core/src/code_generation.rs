@@ -13,7 +13,8 @@ use crate::{
     HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Module,
     ModuleGraph, ModuleHandle, SourceRange,
-    build_cache::{BuildCache, CacheETag, CacheIdentifier, CacheKey},
+    cache::BuildCache,
+    cache_facade::{CacheETag, CacheIdentifier, CacheKey},
     cache_hash::StableHasher,
     code_generation_record::{
         CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
@@ -1186,9 +1187,8 @@ mod tests {
     use crate::{
         CacheOptions, Compiler, CompilerOptions, ConstDependency, Dependency, Entry, Error,
         ModuleGraph, ModuleHandle, ModuleIdentity, SnapshotOptions, SourceRange,
-        build_cache::{
-            BuildCache, CacheIdentifier, CacheItemFamily, CacheItemWork, CacheKey, CacheNamespace,
-        },
+        cache::{BuildCache, CacheItemFamily, CacheItemWork},
+        cache_facade::{CacheIdentifier, CacheKey, CacheNamespace},
         id_assignment::{RenderId, assign_chunk_render_ids, assign_module_render_ids},
         runtime::RuntimeModule,
     };

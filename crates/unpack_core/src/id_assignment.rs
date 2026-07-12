@@ -302,7 +302,7 @@ mod tests {
     use super::*;
     use crate::{
         CacheOptions, CompilerOptions, Entry, ModuleGraph, ModuleIdentity, SnapshotOptions,
-        build_cache::BuildCache,
+        cache::BuildCache,
         code_generation::{create_render_manifest, generate_code, render_assets},
     };
 

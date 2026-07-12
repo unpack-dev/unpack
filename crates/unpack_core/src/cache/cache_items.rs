@@ -1,4 +1,4 @@
-//! Typed Resolve Record and Module Build Record Cache Items and their stable cache keys.
+//! Rust-native Cache Items and their stable cache keys.
 
 use std::{
     collections::BTreeSet,
@@ -13,7 +13,7 @@ use crate::{
     snapshot::{FileSystemInfo, Snapshot, SnapshotCache},
 };
 
-use super::facade::{CacheIdentifier, CacheKey};
+use crate::cache_facade::{CacheIdentifier, CacheKey};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ResolveRequest {

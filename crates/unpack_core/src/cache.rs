@@ -79,6 +79,10 @@ impl CacheDiagnostics {
         }
     }
 
+    pub(super) fn profile_enabled(&self) -> bool {
+        self.profile
+    }
+
     pub(super) fn warn(&self, message: impl Into<String>) {
         self.events
             .lock()

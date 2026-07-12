@@ -214,16 +214,16 @@ pub(crate) fn generate_code_cached(
 ) -> CodeGenerationOutcome {
     let cache = cache.code_generations();
     generate_code_with(module_graph, chunk_graph, |input| {
-        let key = input.module.identity().clone();
+        let key = input.module.identity();
         let etag = code_generation_etag(&input);
-        if let Some(record) = cache.get(&key, Some(&etag)) {
+        if let Some(record) = cache.get(key, Some(&etag)) {
             if record.is_compatible_with(input.module.source()) {
                 return Ok(record.as_ref().clone());
             }
         }
 
         let record = generate_module_code(input)?;
-        cache.store(key, Some(etag), record.clone());
+        cache.store(key.clone(), Some(etag), record.clone());
         Ok(record)
     })
 }

@@ -6,10 +6,11 @@ use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleHandle, Result, UnpackResolver,
     build_cache::BuildCache,
-    build_chunk_graph::build_chunk_graph,
+    build_chunk_graph::build_chunk_graph_with_cache,
     code_generation::{self, CodeGenerationResults, RenderManifest},
     id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
     make::{self, MakeState},
+    module_computation_cache::ModuleComputationCache,
     snapshot::FileSystemInfo,
 };
 use tracing::Instrument;
@@ -22,6 +23,7 @@ pub struct Compilation {
     options: CompilerOptions,
     resolver: UnpackResolver,
     build_cache: BuildCache,
+    module_computation_cache: Option<ModuleComputationCache>,
     module_graph: ModuleGraph,
     chunk_graph: ChunkGraph,
     render_ids_assigned: bool,
@@ -41,6 +43,7 @@ impl Compilation {
         options: CompilerOptions,
         resolver: UnpackResolver,
         build_cache: BuildCache,
+        module_computation_cache: Option<ModuleComputationCache>,
         hooks: CompilationHookSet,
     ) -> Self {
         let file_system_info = FileSystemInfo::from_snapshot_options(&options.snapshot);
@@ -48,6 +51,7 @@ impl Compilation {
             options,
             resolver,
             build_cache,
+            module_computation_cache,
             module_graph: ModuleGraph::default(),
             chunk_graph: ChunkGraph::default(),
             render_ids_assigned: false,
@@ -73,6 +77,10 @@ impl Compilation {
 
     pub(crate) fn module_graph_mut(&mut self) -> &mut ModuleGraph {
         &mut self.module_graph
+    }
+
+    pub(crate) fn module_computation_cache(&self) -> Option<&ModuleComputationCache> {
+        self.module_computation_cache.as_ref()
     }
 
     pub fn into_graphs(self) -> (ModuleGraph, ChunkGraph) {
@@ -143,6 +151,12 @@ impl Compilation {
                     .collect(),
             };
 
+            if result.is_ok()
+                && let Some(cache) = &self.module_computation_cache
+            {
+                cache.prepare(&self.module_graph);
+            }
+
             if result.is_ok() {
                 self.hooks.clone().finish_modules.call(self).await;
             }
@@ -169,7 +183,12 @@ impl Compilation {
             "unpack.Compilation",
             "chunk graph build started",
         );
-        self.chunk_graph = build_chunk_graph(&self.options, &self.module_graph, &self.entries);
+        self.chunk_graph = build_chunk_graph_with_cache(
+            &self.options,
+            &self.module_graph,
+            &self.entries,
+            self.module_computation_cache.as_ref(),
+        );
         self.render_ids_assigned = false;
         self.log_infrastructure(
             InfrastructureLogLevel::Verbose,

@@ -17,6 +17,11 @@ export interface UnpackOptions {
   infrastructureLogging?: InfrastructureLoggingOptions;
   module?: ModuleOptions;
   optimization?: OptimizationOptions;
+  experiments?: ExperimentsOptions;
+}
+
+export interface ExperimentsOptions {
+  cacheUnaffected?: boolean;
 }
 
 export interface OptimizationOptions {
@@ -44,6 +49,7 @@ export type CacheOptions =
 export interface MemoryCacheOptions {
   type: "memory";
   maxGenerations?: number;
+  cacheUnaffected?: boolean;
 }
 
 export interface FilesystemCacheOptions {
@@ -54,6 +60,7 @@ export interface FilesystemCacheOptions {
   version?: string;
   buildDependencies?: Record<string, string[]>;
   maxMemoryGenerations?: number;
+  memoryCacheUnaffected?: boolean;
   maxAge?: number;
   compression?: false | "gzip" | "brotli";
   allowCollectingMemory?: boolean;
@@ -349,6 +356,8 @@ interface NormalizedCacheOptions {
   version?: string;
   buildDependencies: NormalizedBuildDependency[];
   maxMemoryGenerations?: number;
+  cacheUnaffected?: boolean;
+  memoryCacheUnaffected?: boolean;
   automaticBuildDependencies: string[];
   maxAge?: number;
   compression?: "gzip" | "brotli";
@@ -2224,7 +2233,8 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       "snapshot",
       "infrastructureLogging",
       "module",
-      "optimization"
+      "optimization",
+      "experiments"
     ],
     "options"
   );
@@ -2234,6 +2244,7 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       ? process.cwd()
       : assertString(options.context, "options.context");
   const mode = options.mode === undefined ? "production" : assertMode(options.mode);
+  const cacheUnaffectedExperiment = normalizeExperimentsOptions(options.experiments);
   const name =
     options.name === undefined ? undefined : assertString(options.name, "options.name");
   const normalizedContext = resolve(process.cwd(), context);
@@ -2264,13 +2275,33 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     entries: normalizeEntry(options.entry),
     outputPath,
     sourcemap,
-    cache: normalizeCacheOptions(options.cache, normalizedContext, mode, name),
+    cache: normalizeCacheOptions(
+      options.cache,
+      normalizedContext,
+      mode,
+      name,
+      cacheUnaffectedExperiment
+    ),
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
     moduleRules,
     providedExports: optimization.providedExports,
     usedExports: optimization.usedExports
   };
+}
+
+function normalizeExperimentsOptions(experiments: ExperimentsOptions | undefined): boolean {
+  if (experiments === undefined) {
+    return false;
+  }
+  assertPlainObject(experiments, "options.experiments");
+  assertKnownKeys(experiments, ["cacheUnaffected"], "options.experiments");
+  return experiments.cacheUnaffected === undefined
+    ? false
+    : assertBoolean(
+        experiments.cacheUnaffected,
+        "options.experiments.cacheUnaffected"
+      );
 }
 
 function normalizeOptimizationOptions(
@@ -2351,13 +2382,17 @@ function normalizeCacheOptions(
   cache: CacheOptions | undefined,
   context: string,
   mode: Mode,
-  compilerName: string | undefined
+  compilerName: string | undefined,
+  cacheUnaffectedExperiment: boolean
 ): NormalizedCacheOptions {
   if (cache === undefined) {
     return {
       type: mode === "development" ? "memory" : "disabled",
       buildDependencies: [],
       automaticBuildDependencies: [],
+      ...(mode === "development" && cacheUnaffectedExperiment
+        ? { cacheUnaffected: true }
+        : {}),
       profile: false,
       readonly: false
     };
@@ -2368,6 +2403,9 @@ function normalizeCacheOptions(
       type: "memory",
       buildDependencies: [],
       automaticBuildDependencies: [],
+      ...(mode === "development" && cacheUnaffectedExperiment
+        ? { cacheUnaffected: true }
+        : {}),
       profile: false,
       readonly: false
     };
@@ -2394,8 +2432,17 @@ function normalizeCacheOptions(
   const cacheRecord = cache as unknown as Record<string, unknown>;
 
   if (type === "memory") {
-    assertCacheKeysForType(cacheRecord, ["type", "maxGenerations"], "memory");
+    assertCacheKeysForType(
+      cacheRecord,
+      ["type", "maxGenerations", "cacheUnaffected"],
+      "memory"
+    );
     const memoryCache = cache as MemoryCacheOptions;
+    if (memoryCache.cacheUnaffected === true && !cacheUnaffectedExperiment) {
+      throw new TypeError(
+        "'cache.cacheUnaffected: true' is only allowed when 'experiments.cacheUnaffected' is enabled"
+      );
+    }
     const maxMemoryGenerations =
       memoryCache.maxGenerations === undefined
         ? undefined
@@ -2409,6 +2456,16 @@ function normalizeCacheOptions(
       buildDependencies: [],
       automaticBuildDependencies: [],
       ...(maxMemoryGenerations === undefined ? {} : { maxMemoryGenerations }),
+      ...(memoryCache.cacheUnaffected === undefined
+        ? mode === "development" && cacheUnaffectedExperiment
+          ? { cacheUnaffected: true }
+          : {}
+        : {
+            cacheUnaffected: assertBoolean(
+              memoryCache.cacheUnaffected,
+              "options.cache.cacheUnaffected"
+            )
+          }),
       profile: false,
       readonly: false
     };
@@ -2419,6 +2476,14 @@ function normalizeCacheOptions(
   }
 
   const filesystemCache = cache as FilesystemCacheOptions;
+  if (
+    filesystemCache.memoryCacheUnaffected === true &&
+    !cacheUnaffectedExperiment
+  ) {
+    throw new TypeError(
+      "'cache.memoryCacheUnaffected: true' is only allowed when 'experiments.cacheUnaffected' is enabled"
+    );
+  }
   assertCacheKeysForType(
     cacheRecord,
     [
@@ -2429,6 +2494,7 @@ function normalizeCacheOptions(
       "version",
       "buildDependencies",
       "maxMemoryGenerations",
+      "memoryCacheUnaffected",
       "maxAge",
       "compression",
       "allowCollectingMemory",
@@ -2516,6 +2582,16 @@ function normalizeCacheOptions(
     ),
     automaticBuildDependencies: [...unpackToolchainBuildDependencies],
     ...(maxMemoryGenerations === undefined ? {} : { maxMemoryGenerations }),
+    ...(filesystemCache.memoryCacheUnaffected === undefined
+      ? mode === "development" && cacheUnaffectedExperiment
+        ? { memoryCacheUnaffected: true }
+        : {}
+      : {
+          memoryCacheUnaffected: assertBoolean(
+            filesystemCache.memoryCacheUnaffected,
+            "options.cache.memoryCacheUnaffected"
+          )
+        }),
     ...(filesystemCache.maxAge === undefined ? {} : { maxAge: assertNonNegativeNumber(filesystemCache.maxAge, "options.cache.maxAge") }),
     ...(filesystemCache.compression === undefined || filesystemCache.compression === false
       ? {}
@@ -2596,10 +2672,6 @@ function assertCacheKeysForType(
   const key = Object.keys(cache).find((candidate) => !allowed.has(candidate));
   if (key === undefined) {
     return;
-  }
-
-  if (key === "cacheUnaffected" || key === "memoryCacheUnaffected") {
-    throw new TypeError(`options.cache contains unsupported option '${key}'`);
   }
 
   const filesystemKeys = new Set([

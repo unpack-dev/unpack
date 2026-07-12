@@ -25,10 +25,10 @@ jobs:
           bins: cargo-codspeed
 
       - name: Build benchmark target
-        run: cargo codspeed build -m walltime -p unpack_core --bench make_phase
+        run: cargo codspeed build -m simulation -p unpack_core --bench make_phase
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@v4
         with:
-          mode: walltime
-          run: cargo codspeed run -m walltime -p unpack_core --bench make_phase
+          mode: simulation
+          run: cargo codspeed run -m simulation -p unpack_core --bench make_phase

@@ -73,7 +73,7 @@ pub(crate) struct PersistentRestore {
 
 impl PersistentRestore {
     pub(super) fn restore(&self) -> Option<CacheEntry> {
-        let started = Instant::now();
+        let started = self.diagnostics.profile_enabled().then(Instant::now);
         let prepared = {
             let mut pack_file = self
                 .pack_file
@@ -131,10 +131,12 @@ impl PersistentRestore {
                 )
             }
         };
-        self.diagnostics.profile(format!(
-            "restore items=1; deserialization items=1 duration_us={}",
-            started.elapsed().as_micros()
-        ));
+        if let Some(started) = started {
+            self.diagnostics.profile(format!(
+                "restore items=1; deserialization items=1 duration_us={}",
+                started.elapsed().as_micros()
+            ));
+        }
         Some(restored)
     }
 

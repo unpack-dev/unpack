@@ -146,6 +146,7 @@ pub struct NormalModuleFactory {
     file_system_info: FileSystemInfo,
     resolve_snapshot_strategy: SnapshotStrategy,
     runtime_factorize_cache: RuntimeFactorizeCache,
+    package_side_effects_cache: PackageSideEffectsCache,
     snapshot_cache: SnapshotCache,
     module_types: ModuleTypeRegistry,
     module_rules: Vec<ModuleRule>,
@@ -155,6 +156,14 @@ pub struct NormalModuleFactory {
 // Per-compilation singleflight cache; separate from Cache so cache:false
 // still coalesces duplicate factory work within one make run.
 type RuntimeFactorizeCache = Arc<DashMap<ResolveRequest, Arc<OnceCell<Result<FactorizedModule>>>>>;
+type PackageSideEffectsCache = Arc<DashMap<PathBuf, Option<Arc<PackageSideEffects>>>>;
+
+#[derive(Debug)]
+struct PackageSideEffects {
+    package_json: PathBuf,
+    root: PathBuf,
+    value: serde_json::Value,
+}
 
 impl NormalModuleFactory {
     pub(crate) fn new(
@@ -171,6 +180,7 @@ impl NormalModuleFactory {
             file_system_info,
             resolve_snapshot_strategy,
             runtime_factorize_cache: Arc::new(DashMap::new()),
+            package_side_effects_cache: Arc::new(DashMap::new()),
             snapshot_cache,
             module_types,
             module_rules: Vec::new(),
@@ -198,14 +208,22 @@ impl NormalModuleFactory {
             .expect("module dependency should have a request");
         let resolve_request = ResolveRequest::new(context, request);
         if let Some(record) = self.cache.get(&resolve_request, None) {
-            if record
-                .is_valid_with_cache(
+            let valid = if self.resolve_snapshot_strategy.hash {
+                record
+                    .is_valid_with_cache(
+                        &self.file_system_info,
+                        self.resolve_snapshot_strategy,
+                        &self.snapshot_cache,
+                    )
+                    .await
+            } else {
+                record.is_valid_sync_with_cache(
                     &self.file_system_info,
                     self.resolve_snapshot_strategy,
                     &self.snapshot_cache,
                 )
-                .await
-            {
+            };
+            if valid {
                 return self.apply_module_rules(
                     self.apply_factory_metadata(FactorizedModule::from_resolve_record(&record))?,
                 );
@@ -337,7 +355,7 @@ impl NormalModuleFactory {
             return Ok(factorized);
         }
         let Some((package_json, relative_path, side_effects)) =
-            package_side_effects(&factorized.resource)?
+            package_side_effects(&factorized.resource, &self.package_side_effects_cache)?
         else {
             return Ok(factorized);
         };
@@ -377,9 +395,21 @@ impl FactorizedModule {
     }
 }
 
-fn package_side_effects(resource: &Path) -> Result<Option<(PathBuf, String, serde_json::Value)>> {
+fn package_side_effects(
+    resource: &Path,
+    cache: &PackageSideEffectsCache,
+) -> Result<Option<(PathBuf, String, serde_json::Value)>> {
     let mut directory = resource.parent();
-    while let Some(current) = directory {
+    let mut uncached_directories = Vec::new();
+    let metadata = loop {
+        let Some(current) = directory else {
+            break None;
+        };
+        if let Some(cached) = cache.get(current) {
+            break cached.clone();
+        }
+        uncached_directories.push(current.to_path_buf());
+
         let package_json = current.join("package.json");
         if package_json.is_file() {
             let source = std::fs::read_to_string(&package_json)
@@ -391,23 +421,34 @@ fn package_side_effects(resource: &Path) -> Result<Option<(PathBuf, String, serd
                     message: format!("invalid package.json: {error}"),
                 }
             })?;
-            let Some(side_effects) = data.get("sideEffects").cloned() else {
-                return Ok(None);
-            };
-            let relative_path = resource
-                .strip_prefix(current)
-                .unwrap_or(resource)
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/");
-            return Ok(Some((
-                package_json,
-                format!("./{relative_path}"),
-                side_effects,
-            )));
+            break data.get("sideEffects").cloned().map(|value| {
+                Arc::new(PackageSideEffects {
+                    package_json,
+                    root: current.to_path_buf(),
+                    value,
+                })
+            });
         }
         directory = current.parent();
+    };
+
+    for directory in uncached_directories {
+        cache.insert(directory, metadata.clone());
     }
-    Ok(None)
+
+    let Some(metadata) = metadata else {
+        return Ok(None);
+    };
+    let relative_path = resource
+        .strip_prefix(&metadata.root)
+        .unwrap_or(resource)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    Ok(Some((
+        metadata.package_json.clone(),
+        format!("./{relative_path}"),
+        metadata.value.clone(),
+    )))
 }
 
 #[cfg(test)]
@@ -421,6 +462,42 @@ mod tests {
         CacheOptions, Dependency, HarmonyImportSideEffectDependency, UnpackResolver, cache::Cache,
         resolver::ResolveOptions,
     };
+
+    #[test]
+    fn package_side_effects_cache_reuses_a_shared_package_boundary()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let source_dir = temp.path().join("src");
+        fs::create_dir(&source_dir)?;
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"sideEffects":["./src/*.js"]}"#,
+        )?;
+        let first = source_dir.join("first.js");
+        let second = source_dir.join("second.js");
+        let cache = PackageSideEffectsCache::default();
+        let side_effects = serde_json::json!(["./src/*.js"]);
+
+        assert_eq!(
+            package_side_effects(&first, &cache)?,
+            Some((
+                temp.path().join("package.json"),
+                "./src/first.js".to_string(),
+                side_effects.clone(),
+            ))
+        );
+        assert_eq!(
+            package_side_effects(&second, &cache)?,
+            Some((
+                temp.path().join("package.json"),
+                "./src/second.js".to_string(),
+                side_effects,
+            ))
+        );
+        assert_eq!(cache.len(), 2);
+
+        Ok(())
+    }
 
     #[test]
     fn registry_rejects_unregistered_module_types() {

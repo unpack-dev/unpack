@@ -517,7 +517,7 @@ export function createRspackBenchmarkConfig({
       runtimeChunk: false,
       removeEmptyChunks: true,
       realContentHash: false,
-      sideEffects: false,
+      sideEffects: true,
       providedExports: true,
       concatenateModules: false,
       innerGraph: false,

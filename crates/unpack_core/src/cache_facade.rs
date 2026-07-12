@@ -61,6 +61,24 @@ impl CacheIdentifier {
         Self(bytes)
     }
 
+    pub(crate) fn from_borrowed_parts<'a, I>(parts: I) -> Self
+    where
+        I: IntoIterator<Item = &'a [u8]>,
+        I::IntoIter: Clone,
+    {
+        let parts = parts.into_iter();
+        let capacity = parts
+            .clone()
+            .map(|part| size_of::<u64>() + part.len())
+            .sum();
+        let mut bytes = Vec::with_capacity(capacity);
+        for part in parts {
+            bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(part);
+        }
+        Self(bytes)
+    }
+
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }

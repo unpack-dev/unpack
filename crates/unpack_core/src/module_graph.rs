@@ -48,9 +48,12 @@ impl ModuleGraph {
     pub(crate) fn add_module(&mut self, identity: ModuleIdentity) -> ModuleHandle {
         let handle = ModuleHandle::new(self.modules.len());
         self.modules.push(Module::new(handle, identity));
-        debug_assert_eq!(self.outgoing.push(Vec::new()), handle);
-        debug_assert_eq!(self.incoming.push(Vec::new()), handle);
-        debug_assert_eq!(self.outgoing_by_location.push(HashMap::new()), handle);
+        let outgoing_handle = self.outgoing.push(Vec::new());
+        let incoming_handle = self.incoming.push(Vec::new());
+        let location_handle = self.outgoing_by_location.push(HashMap::new());
+        debug_assert_eq!(outgoing_handle, handle);
+        debug_assert_eq!(incoming_handle, handle);
+        debug_assert_eq!(location_handle, handle);
         handle
     }
 
@@ -167,4 +170,19 @@ impl ModuleGraph {
 struct DependencyLocation {
     block: Option<AsyncDependenciesBlockIndex>,
     dependency_index: DependencyIndex,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModuleGraph;
+    use crate::ModuleIdentity;
+
+    #[test]
+    fn adding_a_module_initializes_its_connection_indices() {
+        let mut module_graph = ModuleGraph::default();
+        let module = module_graph.add_module(ModuleIdentity::new("/project/src/index.js"));
+
+        assert_eq!(module_graph.outgoing_connections(module).count(), 0);
+        assert_eq!(module_graph.incoming_connections(module).count(), 0);
+    }
 }

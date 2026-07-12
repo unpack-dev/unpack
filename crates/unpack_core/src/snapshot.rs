@@ -796,7 +796,13 @@ impl SnapshotEntry {
         match self {
             Self::File(file) => {
                 file_system_info.ordinary_snapshot_applies(&file.path)
-                    && file.snapshot.is_valid_sync(&file.path, strategy)
+                    && cache.map_or_else(
+                        || file.snapshot.is_valid_sync(&file.path, strategy),
+                        |cache| {
+                            file.snapshot
+                                .is_valid_sync_with_cache(&file.path, strategy, cache)
+                        },
+                    )
             }
             Self::Context(context) => {
                 file_system_info.ordinary_snapshot_applies(&context.path)
@@ -1074,6 +1080,41 @@ impl FileSnapshot {
         Some(snapshot)
     }
 
+    fn create_from_path_sync(path: &Path, strategy: SnapshotStrategy) -> Result<Self> {
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    exists: false,
+                    modified: None,
+                    source_hash: None,
+                });
+            }
+            Err(error) => return Err(Error::read(path, error)),
+        };
+        let modified = if strategy.timestamp {
+            Some(
+                metadata
+                    .modified()
+                    .map_err(|error| Error::read(path, error))?,
+            )
+        } else {
+            None
+        };
+        let source_hash = if strategy.hash {
+            let source = fs::read(path).map_err(|error| Error::read(path, error))?;
+            Some(hash_bytes(&source))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            exists: true,
+            modified,
+            source_hash,
+        })
+    }
+
     pub(crate) fn create_from_file_sync(path: &Path, strategy: SnapshotStrategy) -> Result<Self> {
         let source = fs::read(path).map_err(|error| Error::read(path, error))?;
         let modified = if strategy.timestamp {
@@ -1123,6 +1164,32 @@ impl FileSnapshot {
         }
 
         true
+    }
+
+    fn is_valid_sync_with_cache(
+        &self,
+        path: &Path,
+        strategy: SnapshotStrategy,
+        cache: &SnapshotCache,
+    ) -> bool {
+        let key = FileSnapshotCacheKey {
+            path: path.to_path_buf(),
+            strategy,
+        };
+        let current = if let Some(snapshot) = cache
+            .file_snapshots
+            .get(&key)
+            .map(|snapshot| snapshot.clone())
+        {
+            snapshot
+        } else {
+            let Ok(snapshot) = Self::create_from_path_sync(path, strategy) else {
+                return false;
+            };
+            cache.file_snapshots.insert(key, snapshot.clone());
+            snapshot
+        };
+        current == *self
     }
 }
 
@@ -1557,6 +1624,27 @@ mod tests {
                 .is_snapshot_valid(&snapshot, SnapshotStrategy::hash())
                 .await
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn synchronous_file_validation_populates_the_snapshot_cache()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("module.js");
+        write(&path, "export const value = 1;")?;
+        let file_system_info = FileSystemInfo::new();
+        let snapshot =
+            file_system_info.create_snapshot_sync(vec![path], SnapshotStrategy::timestamp())?;
+        let cache = SnapshotCache::default();
+
+        assert!(file_system_info.is_snapshot_valid_sync_with_cache(
+            &snapshot,
+            SnapshotStrategy::timestamp(),
+            &cache,
+        ));
+        assert_eq!(cache.file_snapshots.len(), 1);
 
         Ok(())
     }

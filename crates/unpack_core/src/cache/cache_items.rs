@@ -34,32 +34,39 @@ impl ResolveRequest {
 
 impl CacheKey for ResolveRequest {
     fn cache_identifier(&self) -> CacheIdentifier {
-        CacheIdentifier::from_parts([
-            self.context.as_os_str().as_encoded_bytes().to_vec(),
-            self.request.as_bytes().to_vec(),
+        CacheIdentifier::from_borrowed_parts([
+            self.context.as_os_str().as_encoded_bytes(),
+            self.request.as_bytes(),
         ])
     }
 }
 
 impl CacheKey for ModuleIdentity {
     fn cache_identifier(&self) -> CacheIdentifier {
-        let mut parts = vec![
-            match self.module_type {
-                crate::ModuleType::JavaScriptAuto => b"javascript/auto".to_vec(),
-                crate::ModuleType::Json => b"json".to_vec(),
-                crate::ModuleType::Asset => b"asset".to_vec(),
-                crate::ModuleType::AssetResource => b"asset/resource".to_vec(),
-                crate::ModuleType::AssetInline => b"asset/inline".to_vec(),
-                crate::ModuleType::AssetSource => b"asset/source".to_vec(),
-            },
-            self.resource.as_os_str().as_encoded_bytes().to_vec(),
-            optional_identifier_part(self.query.as_deref()),
-            optional_identifier_part(self.fragment.as_deref()),
-            optional_identifier_part(self.layer.as_deref()),
-            (self.loaders.len() as u64).to_le_bytes().to_vec(),
-        ];
-        parts.extend(self.loaders.iter().map(|loader| loader.as_bytes().to_vec()));
-        CacheIdentifier::from_parts(parts)
+        let module_type: &[u8] = match self.module_type {
+            crate::ModuleType::JavaScriptAuto => b"javascript/auto",
+            crate::ModuleType::Json => b"json",
+            crate::ModuleType::Asset => b"asset",
+            crate::ModuleType::AssetResource => b"asset/resource",
+            crate::ModuleType::AssetInline => b"asset/inline",
+            crate::ModuleType::AssetSource => b"asset/source",
+        };
+        let query = optional_identifier_part(self.query.as_deref());
+        let fragment = optional_identifier_part(self.fragment.as_deref());
+        let layer = optional_identifier_part(self.layer.as_deref());
+        let loader_count = (self.loaders.len() as u64).to_le_bytes();
+        CacheIdentifier::from_borrowed_parts(
+            [
+                module_type,
+                self.resource.as_os_str().as_encoded_bytes(),
+                &query,
+                &fragment,
+                &layer,
+                &loader_count,
+            ]
+            .into_iter()
+            .chain(self.loaders.iter().map(|loader| loader.as_bytes())),
+        )
     }
 }
 
@@ -72,6 +79,55 @@ fn optional_identifier_part(value: Option<&str>) -> Vec<u8> {
             bytes
         }
         None => vec![0],
+    }
+}
+
+#[cfg(test)]
+mod cache_key_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_module_identity_parts_preserve_the_persistent_cache_key() {
+        let mut identity = ModuleIdentity::new("/project/src/index.js");
+        identity.query = Some("?raw".to_string());
+        identity.fragment = Some("#value".to_string());
+        identity.layer = Some("client".to_string());
+        identity.loaders = vec!["/loader.js?options".to_string()];
+        for (module_type, type_key) in [
+            (
+                crate::ModuleType::JavaScriptAuto,
+                b"javascript/auto".as_slice(),
+            ),
+            (crate::ModuleType::Json, b"json".as_slice()),
+            (crate::ModuleType::Asset, b"asset".as_slice()),
+            (
+                crate::ModuleType::AssetResource,
+                b"asset/resource".as_slice(),
+            ),
+            (crate::ModuleType::AssetInline, b"asset/inline".as_slice()),
+            (crate::ModuleType::AssetSource, b"asset/source".as_slice()),
+        ] {
+            identity.module_type = module_type;
+            let mut legacy_parts = vec![
+                type_key.to_vec(),
+                identity.resource.as_os_str().as_encoded_bytes().to_vec(),
+                optional_identifier_part(identity.query.as_deref()),
+                optional_identifier_part(identity.fragment.as_deref()),
+                optional_identifier_part(identity.layer.as_deref()),
+                (identity.loaders.len() as u64).to_le_bytes().to_vec(),
+            ];
+            legacy_parts.extend(
+                identity
+                    .loaders
+                    .iter()
+                    .map(|loader| loader.as_bytes().to_vec()),
+            );
+
+            assert_eq!(
+                identity.cache_identifier(),
+                CacheIdentifier::from_parts(legacy_parts)
+            );
+        }
     }
 }
 
@@ -205,6 +261,15 @@ impl ResolveRecord {
         file_system_info
             .is_snapshot_valid_with_cache(&self.snapshot, strategy, snapshot_cache)
             .await
+    }
+
+    pub(crate) fn is_valid_sync_with_cache(
+        &self,
+        file_system_info: &FileSystemInfo,
+        strategy: SnapshotStrategy,
+        snapshot_cache: &SnapshotCache,
+    ) -> bool {
+        file_system_info.is_snapshot_valid_sync_with_cache(&self.snapshot, strategy, snapshot_cache)
     }
 }
 

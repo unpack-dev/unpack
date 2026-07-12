@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Cache.js
+
 use std::{collections::BTreeSet, fs, io, path::Path, sync::Arc, time::Duration};
 
 use filetime::{FileTime, set_file_mtime};

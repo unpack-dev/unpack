@@ -1,5 +1,5 @@
 import type { ConfigCaseOptions } from "../../../config-case.js";
 
 export default {
-  entry: "./configured.js"
+  entry: "./custom.js"
 } satisfies ConfigCaseOptions;

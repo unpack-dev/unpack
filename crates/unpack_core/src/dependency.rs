@@ -1,6 +1,7 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Dependency.js
 
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 
 use crate::dependencies::{
     ConstDependency, ConstDependencyTemplate, EntryDependency, EntryDependencyTemplate,
@@ -13,6 +14,7 @@ use crate::dependencies::{
     ImportDependencyTemplate, ModuleDependency, NullDependency, NullDependencyTemplate,
 };
 use crate::dependency_template::{DependencyTemplateContext, apply_dependency_template};
+use crate::{ExportsInfo, cache_hash::StableHasher};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SourceRange {
@@ -182,6 +184,32 @@ impl Dependency {
             Self::Import(dependency) => {
                 apply_dependency_template(&ImportDependencyTemplate, dependency, source, context)
             }
+        }
+    }
+
+    pub(crate) fn update_code_generation_hash(
+        &self,
+        exports_info: &ExportsInfo,
+        hasher: &mut StableHasher,
+    ) {
+        match self {
+            Self::HarmonyExportSpecifier(dependency) => {
+                hasher.write_u8(0);
+                exports_info.get_used_name(&dependency.name).hash(hasher);
+            }
+            Self::HarmonyExportExpression(_) => {
+                hasher.write_u8(1);
+                exports_info.get_used_name("default").hash(hasher);
+            }
+            Self::HarmonyExportImportedSpecifier(dependency) => {
+                hasher.write_u8(2);
+                dependency
+                    .name
+                    .as_deref()
+                    .and_then(|name| exports_info.get_used_name(name))
+                    .hash(hasher);
+            }
+            _ => {}
         }
     }
 }

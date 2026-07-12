@@ -134,28 +134,7 @@ fn hash_used_export_names(module: &Module, hasher: &mut StableHasher) {
                 .flat_map(|block| block.dependencies()),
         )
     {
-        match dependency {
-            Dependency::HarmonyExportSpecifier(dependency) => {
-                hasher.write_u8(0);
-                module
-                    .exports_info()
-                    .get_used_name(&dependency.name)
-                    .hash(hasher);
-            }
-            Dependency::HarmonyExportExpression(_) => {
-                hasher.write_u8(1);
-                module.exports_info().get_used_name("default").hash(hasher);
-            }
-            Dependency::HarmonyExportImportedSpecifier(dependency) => {
-                hasher.write_u8(2);
-                dependency
-                    .name
-                    .as_deref()
-                    .and_then(|name| module.exports_info().get_used_name(name))
-                    .hash(hasher);
-            }
-            _ => {}
-        }
+        dependency.update_code_generation_hash(module.exports_info(), hasher);
     }
 }
 

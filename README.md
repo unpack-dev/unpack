@@ -1,3 +1,5 @@
 # Unpack
 
-Experimental Rust-based JavaScript bundler exploring performance and webpack alignment.
+Experimental Rust-based JavaScript bundler.
+
+Disclaimer: All code is written by AI.

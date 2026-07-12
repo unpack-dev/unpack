@@ -2,6 +2,7 @@
 //! It wires typed Cache Facades to Cache Layers and owns preparation and publication lifecycle.
 
 #[cfg(test)]
+#[path = "build_cache_tests.rs"]
 mod tests;
 
 use std::{

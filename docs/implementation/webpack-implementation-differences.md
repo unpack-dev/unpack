@@ -42,7 +42,8 @@ separate modules below the `cache` category. The private `BuildCache`
 composition helper coordinates Compiler lifecycle, while Cache Items, options,
 and Pack File storage remain Rust-only helpers colocated with the webpack
 responsibility that owns them. There is no separate `build_cache` source
-hierarchy.
+hierarchy: the private composition helper and its tests are sibling files in
+the `cache` category rather than a nested `build_cache` directory.
 
 Webpack wires these responsibilities through plugins and Tapable hooks. Unpack
 keeps its existing typed layers, explicit lifecycle methods, and closed Cache

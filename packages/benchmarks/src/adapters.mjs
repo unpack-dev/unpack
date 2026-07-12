@@ -25,6 +25,38 @@ export const adapters = {
     name: "unpack",
     supportsWebpackLoaders: true,
     versionSource: () => `@unpack-js/core@${packageVersion("@unpack-js/core")}`,
+    async watchBuild({ fixture, outputDir, mutateAfterInitialBuild, options }) {
+      configureUnpackTracing({
+        fixture,
+        phase: "watch",
+        persistentCache: false,
+        cacheReadonly: false,
+        options
+      });
+      const { default: unpack } = await import("@unpack-js/core");
+      const rules = webpackLoaderRules(fixture);
+      const compiler = unpack({
+        mode: "development",
+        context: fixture.context,
+        entry: fixture.entry,
+        output: { path: outputDir },
+        sourcemap: false,
+        ...(rules.length === 0 ? {} : { module: { rules } }),
+        cache: true
+      });
+      const rebuildMs = await runCompilerWatchBuild({
+        compiler,
+        mutateAfterInitialBuild,
+        label: "Unpack",
+        validate: ({ err, stats }) => {
+          if (err) throw err;
+          if (stats?.hasErrors()) {
+            throw new Error(stats.toJson().errors.map((error) => error.message).join("\n"));
+          }
+        }
+      });
+      return { entryFile: join(outputDir, "main.js"), rebuildMs };
+    },
     async build({
       fixture,
       outputDir,
@@ -78,6 +110,24 @@ export const adapters = {
     name: "webpack",
     supportsWebpackLoaders: true,
     versionSource: () => `webpack@${packageVersion("webpack")}`,
+    async watchBuild({ fixture, outputDir, mutateAfterInitialBuild }) {
+      const webpackModule = await import("webpack");
+      const webpack = webpackModule.default ?? webpackModule;
+      const compiler = webpack({
+        ...webpackLikeConfig({ fixture, outputDir, mode: "development" }),
+        cache: true
+      });
+      const rebuildMs = await runCompilerWatchBuild({
+        compiler,
+        mutateAfterInitialBuild,
+        label: "webpack",
+        validate: ({ err, stats }) => {
+          if (err) throw err;
+          assertWebpackStats(stats, "webpack");
+        }
+      });
+      return { entryFile: join(outputDir, "main.js"), rebuildMs };
+    },
     async build({
       fixture,
       outputDir,
@@ -123,6 +173,30 @@ export const adapters = {
     name: "rspack",
     supportsWebpackLoaders: true,
     versionSource: () => `@rspack/core@${packageVersion("@rspack/core")}`,
+    async watchBuild({ fixture, outputDir, mutateAfterInitialBuild }) {
+      const rspackModule = await import("@rspack/core");
+      const rspack = rspackModule.rspack ?? rspackModule.default;
+      const compiler = rspack({
+        ...createRspackBenchmarkConfig({
+          fixture,
+          outputDir,
+          cacheDir: join(outputDir, ".unused-cache"),
+          persistentCache: false
+        }),
+        mode: "development",
+        cache: true
+      });
+      const rebuildMs = await runCompilerWatchBuild({
+        compiler,
+        mutateAfterInitialBuild,
+        label: "Rspack",
+        validate: ({ err, stats }) => {
+          if (err) throw err;
+          assertWebpackStats(stats, "Rspack");
+        }
+      });
+      return { entryFile: join(outputDir, "main.js"), rebuildMs };
+    },
     async build({
       fixture,
       outputDir,
@@ -598,9 +672,9 @@ export async function applyTurbopackBuildCacheFlushPatch(repo) {
   await writeFile(buildSourcePath, source.replace(target, replacement), "utf8");
 }
 
-function webpackLikeConfig({ fixture, outputDir }) {
+function webpackLikeConfig({ fixture, outputDir, mode = "none" }) {
   const config = {
-    mode: "none",
+    mode,
     target: "node",
     context: fixture.context,
     entry: {
@@ -817,6 +891,62 @@ function closeWebpackCompiler(compiler) {
       resolve();
     });
   });
+}
+
+function closeWatching(watching) {
+  return new Promise((resolve, reject) => {
+    watching.close((err) => (err ? reject(err) : resolve()));
+  });
+}
+
+async function runCompilerWatchBuild({
+  compiler,
+  mutateAfterInitialBuild,
+  label,
+  validate
+}) {
+  const rebuild = createWatchRebuild({ mutateAfterInitialBuild, label, validate });
+  const watching = compiler.watch({ aggregateTimeout: 0 }, rebuild.handler);
+  try {
+    return await rebuild.promise;
+  } finally {
+    await closeWatching(watching);
+    await closeWebpackCompiler(compiler);
+  }
+}
+
+function createWatchRebuild({ mutateAfterInitialBuild, label, validate }) {
+  let handler;
+  const promise = new Promise((resolve, reject) => {
+    let state = "initial";
+    let rebuildStarted;
+    let initialHash;
+    handler = async (err, stats) => {
+      try {
+        validate({ err, stats });
+        if (state === "initial") {
+          state = "mutating";
+          initialHash = stats?.hash;
+          // Let the compiler finish installing its watch subscriptions before mutation.
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          rebuildStarted = performance.now();
+          await mutateAfterInitialBuild();
+          state = "waiting";
+          return;
+        }
+        if (state === "waiting") {
+          if (initialHash && stats?.hash === initialHash) {
+            return;
+          }
+          state = "done";
+          resolve(Number((performance.now() - rebuildStarted).toFixed(3)));
+        }
+      } catch (error) {
+        reject(new Error(`${label} watch build failed: ${error.message}`, { cause: error }));
+      }
+    };
+  });
+  return { handler, promise };
 }
 
 function assertWebpackStats(stats, label) {

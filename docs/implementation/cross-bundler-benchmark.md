@@ -89,10 +89,11 @@ Important fields:
 
 - `cold_build_ms`: build time after clearing benchmark-owned output and persistent cache state.
 - `warm_build_ms`: build time after a cold build in the same job, preserving benchmark-owned persistent cache state, rewriting the fixture entry to comment out one generated module import/export, and verifying the updated bundle checksum.
+- `watch_build_ms`: development-mode rebuild time in one compiler watch lifecycle. The initial compilation is excluded; timing starts immediately before applying the same fixture mutation used by the warm build and ends when the changed compilation completes. Adapters without a watch implementation report this phase as unsupported.
 - `no_cache_build_ms`: build time for an additional clean build with persistent cache disabled. Bundlers without a persistent-cache option run this as a separate clean one-shot build.
 - `output_bytes`: bytes emitted under the benchmark output path, excluding runner metadata.
 - `version_source`: the npm package version or fixed source commit used for the bundler.
-- `status`: `success`, `unsupported`, `setup_failed`, `build_failed`, `runtime_failed`, or a warm/no-cache build variant.
+- `status`: `success`, `unsupported`, `setup_failed`, `build_failed`, `runtime_failed`, or a watch/warm/no-cache build variant.
 
 On pull requests, the Markdown summary also compares each numeric measurement
 with the matching fixture and bundler from the latest successful `main` push.

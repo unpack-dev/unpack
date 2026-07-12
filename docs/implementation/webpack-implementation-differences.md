@@ -110,6 +110,13 @@ asynchronous callbacks. Matching modules remain
 `JavaScriptAuto`; the loader path participates in module identity, file
 dependencies, watch dependencies, and Module Build Record validation.
 
+The public TypeScript package keeps a small `LoaderRuntime` transport helper in
+`LoaderRuntime.ts`. Loader functions must execute on the JavaScript thread while
+the Normal Module Factory and compilation remain Rust-owned, so this helper
+loads and invokes configured CommonJS loaders for the internal N-API bridge.
+It is an internal host-transport boundary rather than a separate webpack public
+surface or a replacement for the Normal Module Factory responsibility.
+
 Webpack's `NormalModuleFactory` owns a large part of public configurability: hooks, scheme-specific resolution, rule matching, loader resolution, parser/generator selection, layers, import attributes, dependency categories, file/missing/context dependency tracking, and ignored modules.
 
 Necessity:

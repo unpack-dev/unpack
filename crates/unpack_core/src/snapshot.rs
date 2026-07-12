@@ -361,6 +361,12 @@ pub(crate) enum PersistentManagedItemState {
 }
 
 impl Snapshot {
+    pub(crate) fn is_affected_by(&self, changes: &crate::WatchChangeSet) -> bool {
+        self.entries.iter().any(|entry| {
+            changes.affects_path(entry.path(), matches!(entry, SnapshotEntry::Context(_)))
+        })
+    }
+
     pub(crate) fn persistent_entries(&self) -> Vec<PersistentSnapshotEntry> {
         self.entries
             .iter()

@@ -26,6 +26,7 @@ pub struct Compilation {
     resolver: UnpackResolver,
     cache: Cache,
     module_computation_cache: Option<ModuleComputationCache>,
+    unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
     module_graph: ModuleGraph,
     chunk_graph: ChunkGraph,
     render_ids_assigned: bool,
@@ -46,6 +47,7 @@ impl Compilation {
         resolver: UnpackResolver,
         cache: Cache,
         module_computation_cache: Option<ModuleComputationCache>,
+        unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
         hooks: CompilationHookSet,
     ) -> Self {
         let file_system_info = FileSystemInfo::from_snapshot_options(&options.snapshot);
@@ -54,6 +56,7 @@ impl Compilation {
             resolver,
             cache,
             module_computation_cache,
+            unsafe_watch_cache,
             module_graph: ModuleGraph::default(),
             chunk_graph: ChunkGraph::default(),
             render_ids_assigned: false,
@@ -165,6 +168,7 @@ impl Compilation {
                 self.hooks.javascript_parser.clone(),
                 Arc::clone(&state),
                 make_options,
+                self.unsafe_watch_cache.clone(),
             )
             .await;
 

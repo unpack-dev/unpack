@@ -43,6 +43,7 @@ mod resolver;
 mod runtime;
 mod serialization;
 mod snapshot;
+mod unsafe_watch_cache;
 
 pub use async_dependencies_block::AsyncDependenciesBlock;
 pub use cache::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
@@ -77,3 +78,4 @@ pub use module_graph_connection::{
 pub use normal_module_factory::{FactorizedModule, NormalModuleFactory};
 pub use resolver::{ResolveOptions, ResolvedResource, UnpackResolver};
 pub use snapshot::{SnapshotOptions, SnapshotPathPattern, SnapshotStrategy};
+pub use unsafe_watch_cache::WatchChangeSet;

@@ -124,9 +124,34 @@ test("cache objects require a type, enforce the unaffected experiment gate, and 
     () =>
       unpack({
         entry: "./src/index.js",
+        cache: false,
+        experiments: { unsafeWatchCacheInvalidation: true }
+      }),
+    /unsafeWatchCacheInvalidation requires an enabled cache/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
         experiments: { cacheUnaffected: "yes" as unknown as boolean }
       }),
     /options\.experiments\.cacheUnaffected must be a boolean/
+  );
+  assert.doesNotThrow(() =>
+    unpack({
+      entry: "./src/index.js",
+      experiments: { unsafeWatchCacheInvalidation: true }
+    })
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        experiments: {
+          unsafeWatchCacheInvalidation: "yes" as unknown as boolean
+        }
+      }),
+    /options\.experiments\.unsafeWatchCacheInvalidation must be a boolean/
   );
 });
 

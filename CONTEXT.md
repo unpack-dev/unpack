@@ -260,6 +260,14 @@ _Avoid_: Compiler options, cache options
 The compilation-reported filesystem inputs that a watch session uses to subscribe to future changes.
 _Avoid_: Module dependency, import dependency
 
+**Watch Change Set**:
+The modified files, removed files, newly present missing dependencies, and changed contexts accumulated for one rebuild within a Watch Session.
+_Avoid_: Watch event, modified files list, Snapshot
+
+**Unsafe Watch Cache Invalidation**:
+An explicitly configured rebuild policy that trusts a Watch Change Set to reuse compiler-owned Memory Cache state without ordinary Snapshot validation, accepting stale reuse when change reporting is incomplete.
+_Avoid_: Incremental cache, safe invalidation, Persistent Cache validation
+
 **Cache Options**:
 The JavaScript API options that enable, disable, and configure build cache layers.
 _Avoid_: Watch options, output options

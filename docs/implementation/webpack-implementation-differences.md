@@ -91,6 +91,17 @@ keeps its existing typed layers, explicit lifecycle methods, and closed Cache
 Item families under ADR 0131; the different Rust representation is deliberate,
 while the directory and file boundaries remain webpack-locatable.
 
+Snapshot validation remains the default source of Build Cache truth. ADR 0142
+also permits the explicit `experiments.unsafeWatchCacheInvalidation`
+deviation for same-Compiler Watch Session rebuilds: a model-backed Watch Change
+Set may fast-invalidate affected inputs and reuse other Memory Cache state
+without ordinary Cache lookup or Snapshot validation. The Watch Session
+accumulates modified, removed, newly present missing, and context changes and
+transports them through the internal N-API boundary to Compiler and Make.
+Ordinary runs, Persistent Cache restore, later Compiler processes, manual
+invalidations, and rebuilds without a usable Watch Change Set retain Snapshot
+validation.
+
 This layout change covers the cache-category alignment tracked by issue #217.
 The first serialization-layout slice moves generic Serializer identity,
 registration, type erasure, bounded encoding, and typed decoding into

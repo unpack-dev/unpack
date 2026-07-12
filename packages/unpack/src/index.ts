@@ -44,6 +44,7 @@ export type WebpackPlugin =
 
 export interface ExperimentsOptions {
   cacheUnaffected?: boolean;
+  unsafeWatchCacheInvalidation?: boolean;
 }
 
 export interface OptimizationOptions {
@@ -424,6 +425,7 @@ interface NormalizedOptions {
   providedExports: boolean;
   usedExports: boolean;
   sideEffects: "disabled" | "flag" | "analyze";
+  unsafeWatchCacheInvalidation: boolean;
 }
 
 interface NormalizedModuleRule {
@@ -627,10 +629,22 @@ interface NativeFlushResult {
 }
 
 interface NativeCompiler {
-  run(idleReason?: string, isRebuild?: boolean): Promise<NativeRunResult>;
+  run(options?: NativeRunOptions): Promise<NativeRunResult>;
   settleCache(): Promise<NativeFlushResult>;
   shutdown(): Promise<NativeFlushResult>;
   close(): void;
+}
+
+interface NativeRunOptions {
+  idleReason?: string;
+  isRebuild?: boolean;
+  watchChangeSet?: NativeWatchChangeSet;
+}
+
+interface NativeWatchChangeSet {
+  modifiedFiles: string[];
+  removedFiles: string[];
+  changedContexts: string[];
 }
 
 interface NativeBinding {
@@ -1255,7 +1269,8 @@ class CompilerImpl implements Compiler {
     }
 
     const watching = new WatchingImpl(
-      (watchHandler, isRebuild) => this.#runWatchCompilation(watchHandler, isRebuild),
+      (watchHandler, isRebuild, watchChangeSet) =>
+        this.#runWatchCompilation(watchHandler, isRebuild, watchChangeSet),
       () => this.#flushCacheNow(),
       () => {
         if (this.#watching === watching) {
@@ -1359,11 +1374,15 @@ class CompilerImpl implements Compiler {
     return closeError;
   }
 
-  async #runWatchCompilation(handler: WatchHandler, isRebuild: boolean): Promise<void> {
+  async #runWatchCompilation(
+    handler: WatchHandler,
+    isRebuild: boolean,
+    watchChangeSet?: NativeWatchChangeSet
+  ): Promise<void> {
     let run: Promise<NativeRunResult>;
     try {
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation started");
-      run = this.#runNativeCompilation(isRebuild);
+      run = this.#runNativeCompilation(isRebuild, watchChangeSet);
     } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
       this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
@@ -1408,11 +1427,14 @@ class CompilerImpl implements Compiler {
     }
   }
 
-  #runNativeCompilation(isRebuild = false): Promise<NativeRunResult> {
+  #runNativeCompilation(
+    isRebuild = false,
+    watchChangeSet?: NativeWatchChangeSet
+  ): Promise<NativeRunResult> {
     this.#nativeHookError = undefined;
     this.#activeCompilation = undefined;
     this.#loaderRuntime?.beginCompilation();
-    return this.#nativeCompiler.run(undefined, isRebuild);
+    return this.#nativeCompiler.run({ isRebuild, watchChangeSet });
   }
 
   #takeActiveCompilation(
@@ -1505,12 +1527,17 @@ class WatchingImpl implements Watching {
   #running = false;
   #invalidated = false;
   #hasCompletedCompilation = false;
+  #requiresFullInvalidation = false;
   #handler: WatchHandler | undefined;
   #rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #watchers: WatchSubscription[] = [];
+  readonly #modifiedFiles = new Set<string>();
+  readonly #removedFiles = new Set<string>();
+  readonly #changedContexts = new Set<string>();
   readonly #runCompilation: (
     handler: WatchHandler,
-    isRebuild: boolean
+    isRebuild: boolean,
+    watchChangeSet?: NativeWatchChangeSet
   ) => Promise<void> | void;
   readonly #flushCache: () => Promise<Error | null>;
   readonly #onClose: () => void;
@@ -1518,7 +1545,11 @@ class WatchingImpl implements Watching {
   readonly #closeCallbacks: CloseCallback[] = [];
 
   constructor(
-    runCompilation: (handler: WatchHandler, isRebuild: boolean) => Promise<void> | void,
+    runCompilation: (
+      handler: WatchHandler,
+      isRebuild: boolean,
+      watchChangeSet?: NativeWatchChangeSet
+    ) => Promise<void> | void,
     flushCache: () => Promise<Error | null>,
     onClose: () => void,
     watchOptions: NormalizedWatchOptions
@@ -1540,6 +1571,13 @@ class WatchingImpl implements Watching {
     }
 
     this.#clearRebuildTimer();
+    this.#requiresFullInvalidation = true;
+    this.#clearPendingChanges();
+
+    this.#requestInvalidation();
+  }
+
+  #requestInvalidation(): void {
 
     if (this.#running) {
       this.#invalidated = true;
@@ -1577,12 +1615,13 @@ class WatchingImpl implements Watching {
     this.#closeWatchers();
     this.#running = true;
     let latestStats: Stats | undefined;
+    const watchChangeSet = this.#takeWatchChangeSet();
     await this.#runCompilation((err, stats) => {
       if (!err && stats) {
         latestStats = stats;
       }
       this.#handler?.(err, stats);
-    }, this.#hasCompletedCompilation);
+    }, this.#hasCompletedCompilation, watchChangeSet);
     this.#running = false;
 
     if (latestStats) {
@@ -1670,8 +1709,13 @@ class WatchingImpl implements Watching {
               if (previous && pollSnapshotsEqual(previous, next)) {
                 return;
               }
+              this.#queueRebuild(
+                changedPath,
+                next.exists ? "modified" : "removed"
+              );
+              return;
             }
-            this.#queueRebuild();
+            this.#queueRebuild(changedPath, "context");
           })
         );
       } catch {
@@ -1696,10 +1740,18 @@ class WatchingImpl implements Watching {
         snapshots.set(target.path, next);
         if (!previous || !pollSnapshotsEqual(previous, next)) {
           changed = true;
+          this.#recordChange(
+            target.path,
+            target.kind === "context"
+              ? "context"
+              : next.exists
+                ? "modified"
+                : "removed"
+          );
         }
       }
       if (changed) {
-        this.#queueRebuild();
+        this.#queueRecordedRebuild();
       }
     }, this.#watchOptions.pollInterval);
     interval.unref?.();
@@ -1708,7 +1760,31 @@ class WatchingImpl implements Watching {
     };
   }
 
-  #queueRebuild(): void {
+  #queueRebuild(
+    path: string,
+    kind: "modified" | "removed" | "context"
+  ): void {
+    this.#recordChange(path, kind);
+    this.#queueRecordedRebuild();
+  }
+
+  #recordChange(
+    path: string,
+    kind: "modified" | "removed" | "context"
+  ): void {
+    this.#modifiedFiles.delete(path);
+    this.#removedFiles.delete(path);
+    this.#changedContexts.delete(path);
+    const changes =
+      kind === "modified"
+        ? this.#modifiedFiles
+        : kind === "removed"
+          ? this.#removedFiles
+          : this.#changedContexts;
+    changes.add(path);
+  }
+
+  #queueRecordedRebuild(): void {
     if (this.#closed) {
       return;
     }
@@ -1716,8 +1792,36 @@ class WatchingImpl implements Watching {
     this.#clearRebuildTimer();
     this.#rebuildTimer = setTimeout(() => {
       this.#rebuildTimer = undefined;
-      this.invalidate();
+      this.#requestInvalidation();
     }, this.#watchOptions.aggregateTimeout);
+  }
+
+  #takeWatchChangeSet(): NativeWatchChangeSet | undefined {
+    if (!this.#hasCompletedCompilation || this.#requiresFullInvalidation) {
+      this.#requiresFullInvalidation = false;
+      this.#clearPendingChanges();
+      return undefined;
+    }
+    if (
+      this.#modifiedFiles.size === 0 &&
+      this.#removedFiles.size === 0 &&
+      this.#changedContexts.size === 0
+    ) {
+      return undefined;
+    }
+    const changeSet = {
+      modifiedFiles: [...this.#modifiedFiles],
+      removedFiles: [...this.#removedFiles],
+      changedContexts: [...this.#changedContexts]
+    };
+    this.#clearPendingChanges();
+    return changeSet;
+  }
+
+  #clearPendingChanges(): void {
+    this.#modifiedFiles.clear();
+    this.#removedFiles.clear();
+    this.#changedContexts.clear();
   }
 
   #clearRebuildTimer(): void {
@@ -2715,7 +2819,8 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       ? process.cwd()
       : assertString(options.context, "options.context");
   const mode = options.mode === undefined ? "production" : assertMode(options.mode);
-  const cacheUnaffectedExperiment = normalizeExperimentsOptions(options.experiments);
+  const experiments = normalizeExperimentsOptions(options.experiments);
+  const cacheUnaffectedExperiment = experiments.cacheUnaffected;
   const name =
     options.name === undefined ? undefined : assertString(options.name, "options.name");
   const normalizedContext = resolve(process.cwd(), context);
@@ -2751,14 +2856,16 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       normalizedContext,
       mode,
       name,
-      cacheUnaffectedExperiment
+      cacheUnaffectedExperiment,
+      experiments.unsafeWatchCacheInvalidation
     ),
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
     moduleRules,
     providedExports: optimization.providedExports,
     usedExports: optimization.usedExports,
-    sideEffects: optimization.sideEffects
+    sideEffects: optimization.sideEffects,
+    unsafeWatchCacheInvalidation: experiments.unsafeWatchCacheInvalidation
   };
 }
 
@@ -2812,18 +2919,34 @@ function applyPlugins(
   }
 }
 
-function normalizeExperimentsOptions(experiments: ExperimentsOptions | undefined): boolean {
+function normalizeExperimentsOptions(
+  experiments: ExperimentsOptions | undefined
+): { cacheUnaffected: boolean; unsafeWatchCacheInvalidation: boolean } {
   if (experiments === undefined) {
-    return false;
+    return { cacheUnaffected: false, unsafeWatchCacheInvalidation: false };
   }
   assertPlainObject(experiments, "options.experiments");
-  assertKnownKeys(experiments, ["cacheUnaffected"], "options.experiments");
-  return experiments.cacheUnaffected === undefined
-    ? false
-    : assertBoolean(
-        experiments.cacheUnaffected,
-        "options.experiments.cacheUnaffected"
-      );
+  assertKnownKeys(
+    experiments,
+    ["cacheUnaffected", "unsafeWatchCacheInvalidation"],
+    "options.experiments"
+  );
+  return {
+    cacheUnaffected:
+      experiments.cacheUnaffected === undefined
+        ? false
+        : assertBoolean(
+            experiments.cacheUnaffected,
+            "options.experiments.cacheUnaffected"
+          ),
+    unsafeWatchCacheInvalidation:
+      experiments.unsafeWatchCacheInvalidation === undefined
+        ? false
+        : assertBoolean(
+            experiments.unsafeWatchCacheInvalidation,
+            "options.experiments.unsafeWatchCacheInvalidation"
+          )
+  };
 }
 
 function normalizeOptimizationOptions(
@@ -2938,11 +3061,15 @@ function normalizeCacheOptions(
   context: string,
   mode: Mode,
   compilerName: string | undefined,
-  cacheUnaffectedExperiment: boolean
+  cacheUnaffectedExperiment: boolean,
+  unsafeWatchCacheInvalidation: boolean
 ): NormalizedCacheOptions {
   if (cache === undefined) {
     return {
-      type: mode === "development" ? "memory" : "disabled",
+      type:
+        mode === "development" || unsafeWatchCacheInvalidation
+          ? "memory"
+          : "disabled",
       buildDependencies: [],
       automaticBuildDependencies: [],
       ...(mode === "development" && cacheUnaffectedExperiment
@@ -2951,6 +3078,12 @@ function normalizeCacheOptions(
       profile: false,
       readonly: false
     };
+  }
+
+  if (cache === false && unsafeWatchCacheInvalidation) {
+    throw new TypeError(
+      "options.experiments.unsafeWatchCacheInvalidation requires an enabled cache"
+    );
   }
 
   if (cache === true) {

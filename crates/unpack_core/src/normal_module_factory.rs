@@ -151,6 +151,8 @@ pub struct NormalModuleFactory {
     module_types: ModuleTypeRegistry,
     module_rules: Vec<ModuleRule>,
     side_effects: bool,
+    unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
+    watch_change_set: Option<crate::WatchChangeSet>,
 }
 
 // Per-compilation singleflight cache; separate from Cache so cache:false
@@ -185,6 +187,8 @@ impl NormalModuleFactory {
             module_types,
             module_rules: Vec::new(),
             side_effects: false,
+            unsafe_watch_cache: None,
+            watch_change_set: None,
         }
     }
 
@@ -198,6 +202,16 @@ impl NormalModuleFactory {
         self
     }
 
+    pub(crate) fn with_unsafe_watch_cache(
+        mut self,
+        cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
+        change_set: Option<crate::WatchChangeSet>,
+    ) -> Self {
+        self.unsafe_watch_cache = cache;
+        self.watch_change_set = change_set;
+        self
+    }
+
     pub async fn factorize(
         &self,
         context: &Path,
@@ -207,7 +221,23 @@ impl NormalModuleFactory {
             .request()
             .expect("module dependency should have a request");
         let resolve_request = ResolveRequest::new(context, request);
-        if let Some(record) = self.cache.get(&resolve_request, None) {
+        let mut skip_ordinary_cache = false;
+        if let (Some(cache), Some(changes)) = (&self.unsafe_watch_cache, &self.watch_change_set) {
+            match cache.get_resolve(&resolve_request, changes) {
+                crate::unsafe_watch_cache::UnsafeWatchCacheLookup::Reusable(record) => {
+                    return self.apply_module_rules(
+                        self.apply_factory_metadata(FactorizedModule::from_resolve_record(
+                            &record,
+                        ))?,
+                    );
+                }
+                crate::unsafe_watch_cache::UnsafeWatchCacheLookup::Invalidated => {
+                    skip_ordinary_cache = true;
+                }
+                crate::unsafe_watch_cache::UnsafeWatchCacheLookup::Miss => {}
+            }
+        }
+        if !skip_ordinary_cache && let Some(record) = self.cache.get(&resolve_request, None) {
             let valid = if self.resolve_snapshot_strategy.hash {
                 record
                     .is_valid_with_cache(
@@ -224,6 +254,9 @@ impl NormalModuleFactory {
                 )
             };
             if valid {
+                if let Some(cache) = &self.unsafe_watch_cache {
+                    cache.remember_resolve(resolve_request, Arc::clone(&record));
+                }
                 return self.apply_module_rules(
                     self.apply_factory_metadata(FactorizedModule::from_resolve_record(&record))?,
                 );
@@ -300,6 +333,9 @@ impl NormalModuleFactory {
         )
         .await?;
         let factorized = FactorizedModule::from_resolve_record(&record);
+        if let Some(cache) = &self.unsafe_watch_cache {
+            cache.remember_resolve(resolve_request.clone(), Arc::new(record.clone()));
+        }
         self.cache.store(resolve_request, None, record);
 
         Ok(factorized)

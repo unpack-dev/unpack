@@ -49,6 +49,8 @@ struct MakeServices {
     metrics: Arc<MakeMetrics>,
     semaphore: Arc<Semaphore>,
     module_types: ModuleTypeRegistry,
+    unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
+    watch_change_set: Option<crate::WatchChangeSet>,
 }
 
 #[derive(Debug)]
@@ -185,15 +187,17 @@ struct FactorizeGroupKey {
 
 type BackgroundMakeTask = BoxFuture<'static, Result<Vec<MakeTask>>>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct MakeOptions {
     pub spawn_background_tasks: bool,
+    pub watch_change_set: Option<crate::WatchChangeSet>,
 }
 
 impl Default for MakeOptions {
     fn default() -> Self {
         Self {
             spawn_background_tasks: true,
+            watch_change_set: None,
         }
     }
 }
@@ -207,6 +211,7 @@ pub(crate) async fn run(
     parser_hooks: JavascriptParserHookSet,
     state: Arc<Mutex<MakeState>>,
     make_options: MakeOptions,
+    unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
 ) -> Result<()> {
     let snapshot_cache = SnapshotCache::default();
     let services = MakeServices {
@@ -219,7 +224,11 @@ pub(crate) async fn run(
             module_types.clone(),
         )
         .with_module_rules(options.module_rules.clone())
-        .with_side_effects(options.side_effects != crate::SideEffectsOption::Disabled),
+        .with_side_effects(options.side_effects != crate::SideEffectsOption::Disabled)
+        .with_unsafe_watch_cache(
+            unsafe_watch_cache.clone(),
+            make_options.watch_change_set.clone(),
+        ),
         module_build_cache: cache.module_builds(),
         module_build_etag: CacheETag::new(parser_hooks.cache_fingerprint()),
         parser_hooks,
@@ -230,6 +239,8 @@ pub(crate) async fn run(
         metrics: Arc::new(MakeMetrics::new()),
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
         module_types,
+        unsafe_watch_cache,
+        watch_change_set: make_options.watch_change_set.clone(),
     };
 
     let mut main_queue = VecDeque::new();
@@ -251,7 +262,7 @@ pub(crate) async fn run(
             Arc::clone(&state),
             &mut main_queue,
             &mut background_queue,
-            make_options,
+            make_options.spawn_background_tasks,
         );
     }
 
@@ -266,7 +277,7 @@ pub(crate) async fn run(
                             Arc::clone(&state),
                             &mut main_queue,
                             &mut background_queue,
-                            make_options,
+                            make_options.spawn_background_tasks,
                         );
                     }
                 }
@@ -296,7 +307,7 @@ pub(crate) async fn run(
                 Arc::clone(&state),
                 &mut main_queue,
                 &mut background_queue,
-                make_options,
+                make_options.spawn_background_tasks,
             );
         }
     }
@@ -308,10 +319,15 @@ fn schedule_make_task(
     state: Arc<Mutex<MakeState>>,
     main_queue: &mut VecDeque<MakeTask>,
     background_queue: &mut FuturesUnordered<BackgroundMakeTask>,
-    make_options: MakeOptions,
+    spawn_background_tasks: bool,
 ) {
     if task.is_background() {
-        background_queue.push(background_make_task(task, services, state, make_options));
+        background_queue.push(background_make_task(
+            task,
+            services,
+            state,
+            spawn_background_tasks,
+        ));
     } else {
         main_queue.push_back(task);
     }
@@ -321,10 +337,10 @@ fn background_make_task(
     task: MakeTask,
     services: MakeServices,
     state: Arc<Mutex<MakeState>>,
-    make_options: MakeOptions,
+    spawn_background_tasks: bool,
 ) -> BackgroundMakeTask {
     let task = async move { task.run(services, state).await };
-    if make_options.spawn_background_tasks {
+    if spawn_background_tasks {
         async move {
             tokio::spawn(task).await.map_err(|error| Error::MakeTask {
                 message: error.to_string(),
@@ -484,9 +500,39 @@ impl BuildTask {
             .ok_or(Error::MissingModuleDirectory(self.module_handle))?
             .to_path_buf();
 
-        if let Some(record) = services
-            .module_build_cache
-            .get(&self.identity, Some(&services.module_build_etag))
+        let unsafe_lookup = services
+            .unsafe_watch_cache
+            .as_ref()
+            .zip(services.watch_change_set.as_ref())
+            .map(|(cache, changes)| {
+                cache.get_module_build(&self.identity, &services.module_build_etag, changes)
+            });
+        let mut skip_ordinary_cache = false;
+        if let Some(lookup) = unsafe_lookup {
+            match lookup {
+                crate::unsafe_watch_cache::UnsafeWatchCacheLookup::Reusable(record) => {
+                    let process_dependencies = process_dependencies_task(
+                        self.module_handle,
+                        &issuer_context,
+                        record.parsed(),
+                    );
+                    state
+                        .lock()
+                        .await
+                        .finish_build(self.module_handle, Arc::clone(record.built_content()))?;
+                    return Ok(process_dependencies.into_iter().collect());
+                }
+                crate::unsafe_watch_cache::UnsafeWatchCacheLookup::Invalidated => {
+                    skip_ordinary_cache = true;
+                }
+                crate::unsafe_watch_cache::UnsafeWatchCacheLookup::Miss => {}
+            }
+        }
+
+        if !skip_ordinary_cache
+            && let Some(record) = services
+                .module_build_cache
+                .get(&self.identity, Some(&services.module_build_etag))
         {
             let valid = if services.module_snapshot_strategy.hash {
                 record
@@ -504,6 +550,13 @@ impl BuildTask {
                 )
             };
             if valid {
+                if let Some(cache) = &services.unsafe_watch_cache {
+                    cache.remember_module_build(
+                        self.identity.clone(),
+                        services.module_build_etag.clone(),
+                        Arc::clone(&record),
+                    );
+                }
                 let process_dependencies =
                     process_dependencies_task(self.module_handle, &issuer_context, record.parsed());
                 state
@@ -648,6 +701,13 @@ impl BuildTask {
             .lock()
             .await
             .finish_build(self.module_handle, built_content)?;
+        if let Some(cache) = &services.unsafe_watch_cache {
+            cache.remember_module_build(
+                self.identity.clone(),
+                services.module_build_etag.clone(),
+                Arc::new(record.clone()),
+            );
+        }
         services.module_build_cache.store(
             self.identity,
             Some(services.module_build_etag.clone()),
@@ -908,6 +968,7 @@ mod tests {
             JavascriptParserHookSet::default(),
             Arc::clone(&state),
             MakeOptions::default(),
+            None,
         )
         .await?;
 

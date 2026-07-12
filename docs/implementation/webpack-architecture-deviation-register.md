@@ -87,6 +87,27 @@ documented deviations or staged webpack scope.
   `BuildCache`, whole-Compilation cache, or whole-project fingerprint during the
   refactor.
 
+### DEV-004: Watch Change Sets may unsafely replace Snapshot validation
+
+- **Status**: Confirmed deviation.
+- **Performance-driven**: Yes. Make profiling shows that one changed file still
+  replays full-graph Cache lookup, path processing, record reconstruction, and
+  graph insertion work.
+- **Webpack shape**: webpack carries modified and removed files through its
+  Watch lifecycle while File System Info and Snapshots remain part of cache
+  validity; Unpack's safe default follows that responsibility.
+- **Approved shape**: the explicit
+  `experiments.unsafeWatchCacheInvalidation: true` option may trust a model-backed
+  Watch Change Set for same-Compiler Memory Cache reuse, bypassing ordinary
+  Cache lookup and Snapshot validation for inputs outside that set.
+- **Confirmation**: ADR 0142 records the explicit project agreement, unsafe
+  correctness trade-off, supported Watch Change Set categories, and fallback
+  boundaries required by ADR 0141.
+- **Disable or refactor when**: the watch adapter cannot provide a usable change
+  set, a rebuild is manually invalidated, reuse crosses a Compiler or process
+  boundary, or Persistent Cache is restored. Those paths must retain Snapshot
+  validation; the unsafe experiment must never silently become the default.
+
 ## Resolved violations and alignment gaps
 
 ### RES-001: Whole-Compilation warm cache shortcut

@@ -21,6 +21,7 @@ async fn make_can_poll_background_tasks_without_spawning() -> Result<(), Box<dyn
     compilation
         .make(MakeOptions {
             spawn_background_tasks: false,
+            watch_change_set: None,
         })
         .await?;
 

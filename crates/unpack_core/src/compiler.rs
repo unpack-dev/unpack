@@ -736,6 +736,9 @@ impl Compiler {
                 hooks.finish_modules(&mut compilation).await?;
             }
             compilation.seal();
+            if let Some(hooks) = &self.options.compilation_hooks {
+                hooks.process_assets(&mut compilation).await?;
+            }
             Ok(compilation)
         }
         .instrument(tracing::trace_span!("Compiler::run"))

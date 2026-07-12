@@ -110,6 +110,18 @@ impl Compilation {
         &self.assets
     }
 
+    pub fn emit_asset(&mut self, asset: Asset) {
+        if let Some(existing) = self
+            .assets
+            .iter_mut()
+            .find(|existing| existing.filename == asset.filename)
+        {
+            *existing = asset;
+        } else {
+            self.assets.push(asset);
+        }
+    }
+
     pub fn entries(&self) -> &[ModuleHandle] {
         &self.entries
     }

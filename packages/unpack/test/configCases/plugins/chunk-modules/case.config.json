@@ -1,1 +1,0 @@
-{"skip":{"upstream":"https://github.com/web-infra-dev/rspack/tree/main/tests/rspack-test/configCases/plugins/chunk-modules","issue":"https://github.com/unpack-dev/unpack/issues/245","reason":"Compilation.chunks and complete Chunk Graph access are not exposed"}}

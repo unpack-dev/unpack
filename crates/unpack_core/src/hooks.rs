@@ -10,4 +10,5 @@ pub type HookFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 pub trait CompilationHooks: Debug + Send + Sync {
     fn compilation<'a>(&'a self, compilation: &'a Compilation) -> HookFuture<'a>;
     fn finish_modules<'a>(&'a self, compilation: &'a mut Compilation) -> HookFuture<'a>;
+    fn process_assets<'a>(&'a self, compilation: &'a mut Compilation) -> HookFuture<'a>;
 }

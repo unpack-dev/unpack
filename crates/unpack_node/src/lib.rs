@@ -233,6 +233,25 @@ pub struct NativeChunk {
 }
 
 #[napi(object)]
+pub struct NativeChunkGroup {
+    pub handle: u32,
+    pub name: Option<String>,
+    #[napi(js_name = "chunkHandles")]
+    pub chunk_handles: Vec<u32>,
+    #[napi(js_name = "runtimeChunkHandle")]
+    pub runtime_chunk_handle: Option<u32>,
+    pub files: Vec<String>,
+    #[napi(js_name = "isEntrypoint")]
+    pub is_entrypoint: bool,
+}
+
+#[napi(object)]
+pub struct NativeEmittedAsset {
+    pub filename: String,
+    pub source: Vec<u8>,
+}
+
+#[napi(object)]
 pub struct NativeWatchDependencies {
     pub files: Vec<String>,
     pub contexts: Vec<String>,
@@ -390,6 +409,59 @@ impl NativeCompilation {
             .collect())
     }
 
+    #[napi(js_name = "chunkGroups")]
+    pub fn chunk_groups(&self) -> Result<Vec<NativeChunkGroup>> {
+        self.module_graph()?;
+        Ok(self
+            .chunk_graph
+            .chunk_groups()
+            .iter()
+            .map(|group| {
+                let chunks = group.chunks();
+                NativeChunkGroup {
+                    handle: group.handle().index().try_into().unwrap_or(u32::MAX),
+                    name: match group.kind() {
+                        unpack_core::ChunkGroupKind::Entrypoint { name } => Some(name.clone()),
+                        unpack_core::ChunkGroupKind::Async => None,
+                    },
+                    is_entrypoint: matches!(
+                        group.kind(),
+                        unpack_core::ChunkGroupKind::Entrypoint { .. }
+                    ),
+                    chunk_handles: chunks
+                        .iter()
+                        .map(|chunk| chunk.index().try_into().unwrap_or(u32::MAX))
+                        .collect(),
+                    runtime_chunk_handle: chunks
+                        .first()
+                        .map(|chunk| chunk.index().try_into().unwrap_or(u32::MAX)),
+                    files: chunks
+                        .iter()
+                        .filter_map(|handle| self.chunk_graph.chunk(*handle))
+                        .map(|chunk| chunk.filename())
+                        .collect(),
+                }
+            })
+            .collect())
+    }
+
+    #[napi(js_name = "chunkEntryModules")]
+    pub fn chunk_entry_modules(&self, chunk_handle: u32) -> Result<Vec<u32>> {
+        self.module_graph()?;
+        Ok(self
+            .chunk_graph
+            .chunk(unpack_core::ChunkHandle::new(chunk_handle as usize))
+            .map(|chunk| {
+                chunk
+                    .root_modules()
+                    .iter()
+                    .copied()
+                    .map(native_module_handle)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     #[napi(js_name = "chunkModules")]
     pub fn chunk_modules(&self, chunk_handle: u32) -> Result<Vec<u32>> {
         self.module_graph()?;
@@ -454,6 +526,9 @@ pub fn create_compiler(
     >,
     compilation_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
     finish_modules_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
+    process_assets_callback: Option<
+        Function<'_, NativeCompilation, Promise<Vec<NativeEmittedAsset>>>,
+    >,
 ) -> Result<NativeCompiler> {
     init_internal_tracing_from_env();
     NativeCompiler::new(
@@ -461,6 +536,7 @@ pub fn create_compiler(
         loader_callback,
         compilation_callback,
         finish_modules_callback,
+        process_assets_callback,
     )
 }
 
@@ -512,10 +588,19 @@ impl LoaderRunner for NativeLoaderRunner {
 
 type NativeFinishModulesCallback =
     ThreadsafeFunction<NativeCompilation, Promise<()>, NativeCompilation, Status, false, true>;
+type NativeProcessAssetsCallback = ThreadsafeFunction<
+    NativeCompilation,
+    Promise<Vec<NativeEmittedAsset>>,
+    NativeCompilation,
+    Status,
+    false,
+    true,
+>;
 
 struct NativeCompilationHooks {
     compilation: Arc<NativeFinishModulesCallback>,
     finish_modules: Arc<NativeFinishModulesCallback>,
+    process_assets: Arc<NativeProcessAssetsCallback>,
 }
 
 impl std::fmt::Debug for NativeCompilationHooks {
@@ -534,6 +619,32 @@ impl CompilationHooks for NativeCompilationHooks {
         compilation: &'a mut unpack_core::Compilation,
     ) -> HookFuture<'a> {
         call_finish_modules_hook(Arc::clone(&self.finish_modules), compilation)
+    }
+
+    fn process_assets<'a>(
+        &'a self,
+        compilation: &'a mut unpack_core::Compilation,
+    ) -> HookFuture<'a> {
+        let callback = Arc::clone(&self.process_assets);
+        let native_compilation = NativeCompilation {
+            module_graph: NativeModuleGraph::Owned(compilation.module_graph().clone()),
+            chunk_graph: compilation.chunk_graph().clone(),
+        };
+        Box::pin(async move {
+            let promise = callback
+                .call_async_catch(native_compilation)
+                .await
+                .map_err(|error| CoreError::Hook {
+                    message: error.to_string(),
+                })?;
+            let assets = promise.await.map_err(|error| CoreError::Hook {
+                message: error.to_string(),
+            })?;
+            for asset in assets {
+                compilation.emit_asset(Asset::from_bytes(asset.filename, asset.source));
+            }
+            Ok(())
+        })
     }
 }
 
@@ -676,6 +787,9 @@ impl NativeCompiler {
         >,
         compilation_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
         finish_modules_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
+        process_assets_callback: Option<
+            Function<'_, NativeCompilation, Promise<Vec<NativeEmittedAsset>>>,
+        >,
     ) -> Result<Self> {
         let context = PathBuf::from(&options.context);
         let output_path = PathBuf::from(&options.output_path);
@@ -736,22 +850,31 @@ impl NativeCompiler {
             .transpose()?;
         compiler_options.compilation_hooks = compilation_callback
             .zip(finish_modules_callback)
-            .map(|(compilation_callback, finish_modules_callback)| {
-                let compilation: NativeFinishModulesCallback = compilation_callback
-                    .build_threadsafe_function()
-                    .callee_handled::<false>()
-                    .weak::<true>()
-                    .build()?;
-                let finish_modules: NativeFinishModulesCallback = finish_modules_callback
-                    .build_threadsafe_function()
-                    .callee_handled::<false>()
-                    .weak::<true>()
-                    .build()?;
-                Ok::<Arc<dyn CompilationHooks>, napi::Error>(Arc::new(NativeCompilationHooks {
-                    compilation: Arc::new(compilation),
-                    finish_modules: Arc::new(finish_modules),
-                }))
-            })
+            .zip(process_assets_callback)
+            .map(
+                |((compilation_callback, finish_modules_callback), process_assets_callback)| {
+                    let compilation: NativeFinishModulesCallback = compilation_callback
+                        .build_threadsafe_function()
+                        .callee_handled::<false>()
+                        .weak::<true>()
+                        .build()?;
+                    let finish_modules: NativeFinishModulesCallback = finish_modules_callback
+                        .build_threadsafe_function()
+                        .callee_handled::<false>()
+                        .weak::<true>()
+                        .build()?;
+                    let process_assets: NativeProcessAssetsCallback = process_assets_callback
+                        .build_threadsafe_function()
+                        .callee_handled::<false>()
+                        .weak::<true>()
+                        .build()?;
+                    Ok::<Arc<dyn CompilationHooks>, napi::Error>(Arc::new(NativeCompilationHooks {
+                        compilation: Arc::new(compilation),
+                        finish_modules: Arc::new(finish_modules),
+                        process_assets: Arc::new(process_assets),
+                    }))
+                },
+            )
             .transpose()?;
         let compiler = Compiler::new(compiler_options);
 

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 #[cfg(test)]
 use super::CacheItemFamily;
-use super::{CacheEntry, CacheLayer, CacheLayerLookup};
+use super::cache_layers::{CacheEntry, CacheLayer, CacheLayerLookup};
 use crate::cache_facade::{CacheAddress, CacheETag};
 
 #[derive(Debug, Default)]

@@ -68,11 +68,14 @@ test("Linux process termination during PackFile publication never exposes a part
   }
 });
 
-test("cache objects require a type and reject fields outside the selected cache type synchronously", () => {
-  const createCompiler = (cache: unknown) => () =>
+test("cache objects require a type, enforce the unaffected experiment gate, and reject fields outside the selected cache type synchronously", () => {
+  const createCompiler = (cache: unknown, enableCacheUnaffected = false) => () =>
     unpack({
       entry: "./src/index.js",
-      cache: cache as CacheOptions
+      cache: cache as CacheOptions,
+      ...(enableCacheUnaffected
+        ? { experiments: { cacheUnaffected: true } }
+        : {})
     });
 
   assert.throws(createCompiler({}), /options\.cache\.type is required/);
@@ -82,7 +85,14 @@ test("cache objects require a type and reject fields outside the selected cache 
   );
   assert.throws(
     createCompiler({ type: "memory", cacheUnaffected: true }),
-    /options\.cache contains unsupported option 'cacheUnaffected'/
+    /'cache\.cacheUnaffected: true' is only allowed when 'experiments\.cacheUnaffected' is enabled/
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "memory", cacheUnaffected: true }, true)
+  );
+  assert.throws(
+    createCompiler({ type: "memory", cacheUnaffected: "yes" }),
+    /options\.cache\.cacheUnaffected must be a boolean/
   );
   assert.throws(
     createCompiler({
@@ -93,9 +103,31 @@ test("cache objects require a type and reject fields outside the selected cache 
   );
   assert.throws(
     createCompiler({ type: "filesystem", memoryCacheUnaffected: true }),
-    /options\.cache contains unsupported option 'memoryCacheUnaffected'/
+    /'cache\.memoryCacheUnaffected: true' is only allowed when 'experiments\.cacheUnaffected' is enabled/
+  );
+  assert.doesNotThrow(
+    createCompiler({ type: "filesystem", memoryCacheUnaffected: true }, true)
+  );
+  assert.throws(
+    createCompiler({ type: "filesystem", memoryCacheUnaffected: "yes" }),
+    /options\.cache\.memoryCacheUnaffected must be a boolean/
   );
   assert.doesNotThrow(createCompiler({ type: "memory" }));
+  assert.doesNotThrow(() =>
+    unpack({
+      entry: "./src/index.js",
+      mode: "development",
+      experiments: { cacheUnaffected: true }
+    })
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        experiments: { cacheUnaffected: "yes" as unknown as boolean }
+      }),
+    /options\.experiments\.cacheUnaffected must be a boolean/
+  );
 });
 
 test("memory generation limits follow webpack's zero, finite, and unbounded contract", () => {
@@ -1020,7 +1052,7 @@ test("filesystem cache falls back to cwd and explicit cache name overrides top-l
   }
 });
 
-test("Context Module and cache-unaffected surfaces remain synchronously unsupported", () => {
+test("Context Module remains unsupported while cache-unaffected surfaces require their experiment", () => {
   const createCompiler = (options: Record<string, unknown>) => () =>
     unpack(
       {
@@ -1033,15 +1065,17 @@ test("Context Module and cache-unaffected surfaces remain synchronously unsuppor
     createCompiler({ snapshot: { contextModule: { timestamp: true } } }),
     /options\.snapshot contains unknown option 'contextModule'/
   );
-  assert.throws(
-    createCompiler({ cache: { type: "memory", cacheUnaffected: true } }),
-    /options\.cache contains unsupported option 'cacheUnaffected'/
-  );
-  assert.throws(
+  assert.doesNotThrow(
     createCompiler({
-      cache: { type: "filesystem", memoryCacheUnaffected: true }
+      experiments: { cacheUnaffected: true },
+      cache: { type: "memory", cacheUnaffected: true }
     }),
-    /options\.cache contains unsupported option 'memoryCacheUnaffected'/
+  );
+  assert.doesNotThrow(
+    createCompiler({
+      experiments: { cacheUnaffected: true },
+      cache: { type: "filesystem", memoryCacheUnaffected: true }
+    })
   );
 });
 

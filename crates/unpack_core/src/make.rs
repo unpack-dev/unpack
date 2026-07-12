@@ -17,10 +17,10 @@ use tokio::{
 };
 
 use crate::{
-    AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, DependencyKind,
+    AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, EntryDependency,
     Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleHandle,
     ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
-    cache::{BuildCache, ModuleBuildRecord},
+    cache::{Cache, ModuleBuildRecord},
     cache_facade::{CacheETag, ModuleBuildCache},
     module::BuiltModuleContent,
     parser::{JavascriptParserHookSet, ParsedModule, parse_module_dependencies_with_hooks},
@@ -189,7 +189,7 @@ type BackgroundMakeTask = JoinHandle<Result<Vec<MakeTask>>>;
 pub(crate) async fn run(
     options: &CompilerOptions,
     resolver: UnpackResolver,
-    build_cache: BuildCache,
+    cache: Cache,
     file_system_info: FileSystemInfo,
     parser_hooks: JavascriptParserHookSet,
     state: Arc<Mutex<MakeState>>,
@@ -198,14 +198,14 @@ pub(crate) async fn run(
     let services = MakeServices {
         normal_module_factory: NormalModuleFactory::new(
             resolver,
-            build_cache.normal_module_factory(),
+            cache.normal_module_factory(),
             file_system_info.clone(),
             options.snapshot.resolve,
             snapshot_cache.clone(),
         )
         .with_module_rules(options.module_rules.clone())
         .with_side_effects(options.side_effects != crate::SideEffectsOption::Disabled),
-        module_build_cache: build_cache.module_builds(),
+        module_build_cache: cache.module_builds(),
         module_build_etag: CacheETag::new(parser_hooks.cache_fingerprint()),
         parser_hooks,
         file_system_info,
@@ -228,7 +228,7 @@ pub(crate) async fn run(
                     entry_index: Some(entry_index),
                     origin_block: None,
                     origin_dependency_index: None,
-                    dependency: Dependency::new(DependencyKind::Entry, entry.request.clone()),
+                    dependency: Dependency::Entry(EntryDependency::new(entry.request.clone())),
                 }],
             }),
             services.clone(),
@@ -837,20 +837,20 @@ mod tests {
 
         let options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
         let resolver = UnpackResolver::new(options.resolve.clone());
-        let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
+        let cache = Cache::new(options.cache.clone(), options.snapshot.clone());
         let state = Arc::new(Mutex::new(MakeState::default()));
 
         run(
             &options,
             resolver,
-            build_cache.clone(),
+            cache.clone(),
             FileSystemInfo::new(),
             JavascriptParserHookSet::default(),
             Arc::clone(&state),
         )
         .await?;
 
-        let cache = build_cache.stats();
+        let cache = cache.stats();
         let state = state.lock().await;
         let graph = &state.module_graph;
         let dep = graph

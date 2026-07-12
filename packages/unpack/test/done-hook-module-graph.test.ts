@@ -92,6 +92,8 @@ test("finishModules taps run after make and before done", async () => {
       assert.equal(modules, capturedModules);
       assert.equal(compilation.moduleGraph, capturedModuleGraph);
       finishedModule = modules.values().next().value;
+      assert.ok(finishedModule);
+      assert.equal(compilation.chunkGraph.getModuleId(finishedModule), null);
       events.push(`finishModules:${modules.size}:start`);
       setTimeout(() => {
         events.push("finishModules:end");
@@ -105,6 +107,10 @@ test("finishModules taps run after make and before done", async () => {
     assert.equal(stats.compilation.modules, capturedModules);
     assert.equal(stats.compilation.moduleGraph, capturedModuleGraph);
     assert.equal(stats.compilation.modules.has(finishedModule!), true);
+    assert.equal(
+      typeof stats.compilation.chunkGraph.getModuleId(finishedModule!),
+      "string"
+    );
     assert.equal(stats.compilation.modules.size, finishModulesCompilation?.modules.size);
   });
 
@@ -334,8 +340,19 @@ test("done exposes webpack-shaped ChunkGraph membership queries", async () => {
       [...chunkGraph.getOrderedModuleChunksIterable(entry, compareChunks)],
       [initialChunk]
     );
-    assert.equal(typeof chunkGraph.getModuleId(entry), "string");
+    assert.equal(chunkGraph.getModuleId(entry), "./src/index.js");
+    assert.equal(chunkGraph.getModuleId(shared), "./src/shared.js");
+    assert.equal(chunkGraph.getModuleId(lazy), "./src/lazy.js");
+    assert.notEqual(entry.identifier(), chunkGraph.getModuleId(entry));
+    assert.equal((entry as Module & { id?: unknown }).id, undefined);
+    assert.equal(Object.hasOwn(entry, "nativeHandle"), false);
+    assert.equal(Object.hasOwn(entry, "nativeId"), false);
+    assert.equal(Object.hasOwn(initialChunk, "nativeHandle"), false);
+    assert.equal(Object.hasOwn(initialChunk, "nativeId"), false);
+    assert.equal(initialChunk.name, "main");
     assert.equal(initialChunk.id, "main");
+    assert.equal(asyncChunk.name, undefined);
+    assert.equal(asyncChunk.id, "src_lazy_js");
     inspected = true;
   });
   compiler.hooks.done.tapPromise("observe live chunk graph", async (stats) => {

@@ -60,7 +60,7 @@ export async function runBenchmark(options = {}) {
   }
 
   return {
-    schema_version: 2,
+    schema_version: 3,
     generated_at: new Date().toISOString(),
     results
   };
@@ -84,14 +84,16 @@ export function toSummaryMarkdown(report, baselineReport) {
   const comparisonNote = baselineReport
     ? "\n\n> Delta vs main: `+` means slower or larger; `−` means faster or smaller. Calculated as `(current - main) / main`."
     : "";
+  const watchMeasurementNote =
+    "\n\n> `watch_build_ms` measures a development-mode rebuild with memory cache enabled and persistent cache disabled. The initial watch compilation is excluded; timing covers the same fixture mutation used by the warm build through completion of the resulting rebuild.";
 
-  return `${summary}${comparisonNote}\n`;
+  return `${summary}${comparisonNote}${watchMeasurementNote}\n`;
 }
 
 function toSummaryTable(results, baselines) {
   const lines = [
-    "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | no_cache_build_ms | output_bytes | status |",
-    "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"
+    "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | watch_build_ms | no_cache_build_ms | output_bytes | status |",
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"
   ];
 
   for (const result of results) {
@@ -103,6 +105,7 @@ function toSummaryTable(results, baselines) {
         result.version_source ?? "",
         formatMeasurement(result.cold_build_ms, baseline?.cold_build_ms),
         formatMeasurement(result.warm_build_ms, baseline?.warm_build_ms),
+        formatMeasurement(result.watch_build_ms, baseline?.watch_build_ms),
         formatMeasurement(result.no_cache_build_ms, baseline?.no_cache_build_ms),
         formatMeasurement(result.output_bytes, baseline?.output_bytes, 0),
         result.status
@@ -190,7 +193,20 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     return resultFromPhases({ fixture, bundler, versionSource, cold });
   }
 
-  await applyWarmBuildMutation(fixture);
+  const watch = await timedWatchBuild({
+    adapter,
+    fixture,
+    outputDir: join(baseDir, "watch-output"),
+    options
+  });
+
+  if (watch.status !== "success" && watch.status !== "unsupported") {
+    return resultFromPhases({ fixture, bundler, versionSource, cold, watch });
+  }
+
+  if (watch.status === "unsupported") {
+    await applyWarmBuildMutation(fixture);
+  }
 
   const warm = await timedBuild({
     adapter,
@@ -204,7 +220,7 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
   });
 
   if (warm.status !== "success") {
-    return resultFromPhases({ fixture, bundler, versionSource, cold, warm });
+    return resultFromPhases({ fixture, bundler, versionSource, cold, watch, warm });
   }
 
   const noCache = await timedBuild({
@@ -218,7 +234,54 @@ async function runBundlerBenchmark({ adapter, bundler, fixture, workspaceDir, op
     options
   });
 
-  return resultFromPhases({ fixture, bundler, versionSource, cold, warm, noCache });
+  return resultFromPhases({ fixture, bundler, versionSource, cold, watch, warm, noCache });
+}
+
+async function timedWatchBuild({ adapter, fixture, outputDir, options }) {
+  if (!adapter.watchBuild) {
+    return phaseFailure("unsupported", "adapter does not support watch builds");
+  }
+  await rm(outputDir, { recursive: true, force: true });
+  await mkdir(outputDir, { recursive: true });
+
+  let buildResult;
+  try {
+    buildResult = await adapter.watchBuild({
+      fixture,
+      outputDir,
+      options,
+      mutateAfterInitialBuild: async () => applyWarmBuildMutation(fixture)
+    });
+  } catch (error) {
+    return phaseFailure(isUnsupported(error) ? "unsupported" : "build_failed", errorMessage(error));
+  }
+
+  const entryFile = buildResult?.entryFile;
+  if (!entryFile || !Number.isFinite(buildResult?.rebuildMs)) {
+    return phaseFailure("build_failed", "adapter did not return an entry file and rebuild time");
+  }
+  const verifyStarted = performance.now();
+  try {
+    await verifyBundle({ entryFile, outputDir, expectedChecksum: fixture.expectedChecksum });
+  } catch (error) {
+    return {
+      ...phaseFailure("runtime_failed", errorMessage(error)),
+      build_ms: buildResult.rebuildMs,
+      output_bytes: await outputBytes(outputDir),
+      verify_ms: elapsed(verifyStarted)
+    };
+  }
+  return {
+    status: "success",
+    build_ms: buildResult.rebuildMs,
+    output_bytes: await outputBytes(outputDir),
+    verify_ms: elapsed(verifyStarted),
+    message: null
+  };
+}
+
+function phaseFailure(status, message) {
+  return { status, build_ms: null, output_bytes: null, verify_ms: null, message };
 }
 
 async function timedBuild({
@@ -349,10 +412,12 @@ async function verifyBundle({ entryFile, outputDir, expectedChecksum }) {
   }
 }
 
-function resultFromPhases({ fixture, bundler, versionSource, cold, warm, noCache }) {
+function resultFromPhases({ fixture, bundler, versionSource, cold, watch, warm, noCache }) {
   const status =
     cold.status !== "success"
       ? cold.status
+      : watch && watch.status !== "success" && watch.status !== "unsupported"
+        ? `watch_${watch.status}`
       : warm && warm.status !== "success"
         ? `warm_${warm.status}`
         : noCache && noCache.status !== "success"
@@ -361,6 +426,8 @@ function resultFromPhases({ fixture, bundler, versionSource, cold, warm, noCache
   const message =
     cold.status !== "success"
       ? cold.message
+      : watch?.status !== "success" && watch?.status !== "unsupported"
+        ? watch.message
       : warm?.status !== "success"
         ? warm.message
         : noCache?.status !== "success"
@@ -373,18 +440,22 @@ function resultFromPhases({ fixture, bundler, versionSource, cold, warm, noCache
     version_source: versionSource,
     cold_build_ms: cold.status === "success" ? cold.build_ms : null,
     warm_build_ms: warm?.status === "success" ? warm.build_ms : null,
+    watch_build_ms: watch?.status === "success" ? watch.build_ms : null,
     no_cache_build_ms: noCache?.status === "success" ? noCache.build_ms : null,
     output_bytes: warm?.output_bytes ?? noCache?.output_bytes ?? cold.output_bytes,
     cold_status: cold.status,
     warm_status: warm?.status ?? "not_run",
+    watch_status: watch?.status ?? "not_run",
     no_cache_status: noCache?.status ?? "not_run",
     verify_status:
       cold.status === "runtime_failed" ||
+      watch?.status === "runtime_failed" ||
       warm?.status === "runtime_failed" ||
       noCache?.status === "runtime_failed"
         ? "runtime_failed"
         : cold.status === "success" &&
             (!warm || warm.status === "success") &&
+            (!watch || watch.status === "success" || watch.status === "unsupported") &&
             (!noCache || noCache.status === "success")
           ? "success"
           : "not_run",
@@ -400,10 +471,12 @@ function emptyResult({ fixture, bundler, versionSource, status, message }) {
     version_source: versionSource,
     cold_build_ms: null,
     warm_build_ms: null,
+    watch_build_ms: null,
     no_cache_build_ms: null,
     output_bytes: null,
     cold_status: "not_run",
     warm_status: "not_run",
+    watch_status: "not_run",
     no_cache_status: "not_run",
     verify_status: "not_run",
     status,

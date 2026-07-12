@@ -37,6 +37,10 @@ test("summary renders loader results before a separate non-loader table", () => 
   assert.doesNotMatch(summary.slice(loaderHeading, nonLoaderHeading), /\| large \|/);
   assert.match(summary.slice(nonLoaderHeading), /\| large \| webpack \|/);
   assert.doesNotMatch(summary.slice(nonLoaderHeading), /\| loader \|/);
+  assert.match(
+    summary,
+    /watch_build_ms.*development-mode rebuild with memory cache enabled and persistent cache disabled/
+  );
 });
 
 test("summary compares measurements with matching latest main results", () => {
@@ -56,7 +60,7 @@ test("summary compares measurements with matching latest main results", () => {
   assert.doesNotMatch(summary, /delta_vs_main/);
   assert.match(
     summary,
-    /\| 10\.0 \(\+25\.0%\) \| 5\.0 \(\+100\.0%\) \| 8\.0 \(-20\.0%\) \| 100 \(-50\.0%\) \| success \|/
+    /\| 10\.0 \(\+25\.0%\) \| 5\.0 \(\+100\.0%\) \| 3\.0 \(\+0\.0%\) \| 8\.0 \(-20\.0%\) \| 100 \(-50\.0%\) \| success \|/
   );
   assert.match(summary, /`\+` means slower or larger; `−` means faster or smaller/);
 });
@@ -67,7 +71,7 @@ test("summary omits inline deltas when main has no matching result", () => {
     { results: [summaryResult({ fixture: "loader", bundler: "unpack" })] }
   );
 
-  assert.match(summary, /\| 10\.0 \| 5\.0 \| 8\.0 \| 100 \| success \|/);
+  assert.match(summary, /\| 10\.0 \| 5\.0 \| 3\.0 \| 8\.0 \| 100 \| success \|/);
   assert.doesNotMatch(summary, /\([+-][\d.]+%\)/);
 });
 
@@ -85,17 +89,19 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
       }
     });
 
-    assert.equal(report.schema_version, 2);
+    assert.equal(report.schema_version, 3);
     assert.equal(report.results.length, 1);
     assert.equal(report.results[0].fixture, "large");
     assert.equal(report.results[0].bundler, "fake");
     assert.equal(report.results[0].status, "success");
     assert.equal(report.results[0].cold_status, "success");
     assert.equal(report.results[0].warm_status, "success");
+    assert.equal(report.results[0].watch_status, "success");
     assert.equal(report.results[0].no_cache_status, "success");
     assert.equal(report.results[0].verify_status, "success");
     assert.equal(typeof report.results[0].cold_build_ms, "number");
     assert.equal(typeof report.results[0].warm_build_ms, "number");
+    assert.equal(typeof report.results[0].watch_build_ms, "number");
     assert.equal(typeof report.results[0].no_cache_build_ms, "number");
     assert.ok(report.results[0].output_bytes > 0);
     assert.deepEqual(
@@ -106,6 +112,7 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
       })),
       [
         { phase: "cold", persistentCache: true, cacheReadonly: false },
+        { phase: "watch", persistentCache: false, cacheReadonly: false },
         { phase: "warm", persistentCache: true, cacheReadonly: true },
         { phase: "no-cache", persistentCache: false, cacheReadonly: false }
       ]
@@ -115,6 +122,7 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
       calls[0].expectedChecksum + WARM_BUILD_CHECKSUM_DELTA
     );
     assert.equal(calls[2].expectedChecksum, calls[1].expectedChecksum);
+    assert.equal(calls[3].expectedChecksum, calls[2].expectedChecksum);
     const mutatedEntry = await readFile(
       join(workspace, "fixtures", "large", "src", "index.js"),
       "utf8"
@@ -133,6 +141,7 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
       )
     );
     const summary = toSummaryMarkdown(report);
+    assert.match(summary, /watch_build_ms/);
     assert.match(summary, /no_cache_build_ms/);
     assert.match(summary, /\\| large \\| fake \\| fake@1\\.0\\.0 \\|/);
   } finally {
@@ -284,6 +293,9 @@ test("webpack-compatible adapters build the loader benchmark fixture", async () 
       assert.equal(result.status, "success");
       assert.equal(result.cold_status, "success");
       assert.equal(result.warm_status, "success");
+      assert.equal(result.watch_status, "success");
+      assert.equal(typeof result.watch_build_ms, "number");
+      assert.ok(result.watch_build_ms > 0);
       assert.equal(result.no_cache_status, "success");
       assert.equal(result.verify_status, "success");
     }
@@ -833,6 +845,7 @@ function summaryResult({ fixture, bundler }) {
     version_source: `${bundler}@1.0.0`,
     cold_build_ms: 10,
     warm_build_ms: 5,
+    watch_build_ms: 3,
     no_cache_build_ms: 8,
     output_bytes: 100,
     status: "success"
@@ -844,6 +857,19 @@ function fakeAdapter({ checksumOffset = 0, error, calls, staleWarmChecksum = fal
   return {
     name: "fake",
     versionSource: () => "fake@1.0.0",
+    async watchBuild({ fixture, outputDir, mutateAfterInitialBuild }) {
+      const entryFile = join(outputDir, "main.js");
+      await writeFile(entryFile, `exports.checksum = ${fixture.expectedChecksum};\n`, "utf8");
+      await mutateAfterInitialBuild();
+      calls?.push({
+        phase: "watch",
+        persistentCache: false,
+        cacheReadonly: false,
+        expectedChecksum: fixture.expectedChecksum
+      });
+      await writeFile(entryFile, `exports.checksum = ${fixture.expectedChecksum};\n`, "utf8");
+      return { entryFile, rebuildMs: 1 };
+    },
     async build({ fixture, outputDir, phase, persistentCache, cacheReadonly }) {
       calls?.push({
         phase,

@@ -89,10 +89,11 @@ Important fields:
 
 - `cold_build_ms`: build time after clearing benchmark-owned output and persistent cache state.
 - `warm_build_ms`: build time after a cold build in the same job, preserving benchmark-owned persistent cache state, rewriting the fixture entry to comment out one generated module import/export, and verifying the updated bundle checksum.
+- `watch_build_ms`: development-mode rebuild time in one compiler watch lifecycle with memory cache enabled and persistent cache disabled. The initial compilation is excluded; timing starts immediately before applying the same fixture mutation used by the warm build and ends when the changed compilation completes. Adapters without a watch implementation report this phase as unsupported.
 - `no_cache_build_ms`: build time for an additional clean build with persistent cache disabled. Bundlers without a persistent-cache option run this as a separate clean one-shot build.
 - `output_bytes`: bytes emitted under the benchmark output path, excluding runner metadata.
 - `version_source`: the npm package version or fixed source commit used for the bundler.
-- `status`: `success`, `unsupported`, `setup_failed`, `build_failed`, `runtime_failed`, or a warm/no-cache build variant.
+- `status`: `success`, `unsupported`, `setup_failed`, `build_failed`, `runtime_failed`, or a watch/warm/no-cache build variant.
 
 On pull requests, the Markdown summary also compares each numeric measurement
 with the matching fixture and bundler from the latest successful `main` push.
@@ -105,7 +106,7 @@ Runtime verification is separate from build timing. A Bundle that builds but doe
 
 ## CI
 
-The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. CI runs compare Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack across the `large` and `loader` fixtures by default. The workflow downloads the `turbopack-cli-main` release artifact from `hardfist/bundler-diff` and passes it to the benchmark runner with `--turbopack-binary`; manual dispatch can set `include_turbopack` to `false` when a non-Turbopack run is needed. Turbopack CI runs enable `TURBOPACK_TRACING=turbo-tasks`, copy raw trace files into `.benchmark-work/ci/turbopack-traces`, upload each trace log as a separate workflow artifact, and link those trace artifacts from the pull request timing comment. The workflow writes the benchmark table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes an Unpack and webpack phase timing summary for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, raw timing log, and Turbopack trace log artifacts.
+The `Cross-Bundler Benchmarks` workflow runs on pushes to `main`, pull requests, and manual dispatch. CI runs compare Unpack with webpack, Rspack, Rolldown, Metro, Parcel, and Turbopack across the `large` and `loader` fixtures by default. The workflow downloads the `turbopack-cli-main` release artifact from `hardfist/bundler-diff` and passes it to the benchmark runner with `--turbopack-binary`; manual dispatch can set `include_turbopack` to `false` when a non-Turbopack run is needed. The workflow writes the benchmark table to the GitHub Actions job summary, creates or updates a benchmark summary comment on pull requests, writes Unpack, webpack, and Rspack phase timings (including watch rebuilds) for the `large` fixture to a new pull request issue comment, and uploads the JSON report, Markdown summary, timing summary, and raw timing log artifacts.
 
 The workflow builds the Unpack native addon with `UNPACK_NATIVE_PROFILE=release` so benchmark results compare optimized native builds. Pull request runs download the JSON artifact from the latest successful `main` push and show inline percentage deltas in the job summary and benchmark comment.
 

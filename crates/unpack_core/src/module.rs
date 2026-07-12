@@ -43,6 +43,7 @@ pub struct Module {
 pub(crate) struct BuiltModuleContent {
     parsed: ParsedModule,
     source: String,
+    binary_source: Option<Vec<u8>>,
     source_hash: u64,
     code_generation_local_input_digest: u64,
 }
@@ -50,12 +51,27 @@ pub(crate) struct BuiltModuleContent {
 impl BuiltModuleContent {
     pub(crate) fn new(parsed: ParsedModule, source: String) -> Self {
         let source_hash = stable_hash(&source);
-        Self::from_persistent_parts(parsed, source, source_hash)
+        Self::from_persistent_parts_with_binary(parsed, source, None, source_hash)
     }
 
+    pub(crate) fn new_binary(parsed: ParsedModule, source: String, binary_source: Vec<u8>) -> Self {
+        let source_hash = stable_hash(&binary_source);
+        Self::from_persistent_parts_with_binary(parsed, source, Some(binary_source), source_hash)
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_persistent_parts(
         parsed: ParsedModule,
         source: String,
+        source_hash: u64,
+    ) -> Self {
+        Self::from_persistent_parts_with_binary(parsed, source, None, source_hash)
+    }
+
+    pub(crate) fn from_persistent_parts_with_binary(
+        parsed: ParsedModule,
+        source: String,
+        binary_source: Option<Vec<u8>>,
         source_hash: u64,
     ) -> Self {
         let mut hasher = StableHasher::default();
@@ -66,6 +82,7 @@ impl BuiltModuleContent {
         Self {
             parsed,
             source,
+            binary_source,
             source_hash,
             code_generation_local_input_digest,
         }
@@ -77,6 +94,10 @@ impl BuiltModuleContent {
 
     pub(crate) fn source(&self) -> &str {
         &self.source
+    }
+
+    pub(crate) fn binary_source(&self) -> Option<&[u8]> {
+        self.binary_source.as_deref()
     }
 
     pub(crate) fn source_hash(&self) -> u64 {
@@ -145,6 +166,12 @@ impl Module {
         self.built_content.source_hash()
     }
 
+    pub(crate) fn source_bytes(&self) -> &[u8] {
+        self.built_content
+            .binary_source()
+            .unwrap_or_else(|| self.source().as_bytes())
+    }
+
     pub(crate) fn code_generation_local_input_digest(&self) -> u64 {
         self.built_content.code_generation_local_input_digest()
     }
@@ -209,9 +236,24 @@ impl Module {
     }
 
     pub(crate) fn analyze_provided_exports(&mut self) {
-        self.exports_info = ExportsInfo::from_dependencies(
-            self.built_content.parsed.dependencies_block.dependencies(),
-        );
+        self.exports_info = match self.identity.module_type {
+            ModuleType::Json => {
+                let mut names = vec!["default".to_string()];
+                if let Ok(serde_json::Value::Object(object)) =
+                    serde_json::from_str::<serde_json::Value>(self.source())
+                {
+                    names.extend(object.into_iter().map(|(name, _)| name));
+                }
+                ExportsInfo::from_names(names)
+            }
+            ModuleType::Asset
+            | ModuleType::AssetResource
+            | ModuleType::AssetInline
+            | ModuleType::AssetSource => ExportsInfo::from_names(["default".to_string()]),
+            ModuleType::JavaScriptAuto => ExportsInfo::from_dependencies(
+                self.built_content.parsed.dependencies_block.dependencies(),
+            ),
+        };
     }
 
     pub(crate) fn fail_build(&mut self, error: Error, source: String) {
@@ -248,4 +290,18 @@ impl ModuleIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ModuleType {
     JavaScriptAuto,
+    Json,
+    Asset,
+    AssetResource,
+    AssetInline,
+    AssetSource,
+}
+
+impl ModuleType {
+    pub(crate) fn is_asset(self) -> bool {
+        matches!(
+            self,
+            Self::Asset | Self::AssetResource | Self::AssetInline | Self::AssetSource
+        )
+    }
 }

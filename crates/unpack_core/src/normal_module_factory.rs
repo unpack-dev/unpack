@@ -163,11 +163,23 @@ impl NormalModuleFactory {
     }
 
     fn apply_module_rules(&self, mut factorized: FactorizedModule) -> Result<FactorizedModule> {
+        if factorized
+            .resource
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            factorized.identity.module_type = crate::ModuleType::Json;
+        }
         let mut matching = self
             .module_rules
             .iter()
             .filter(|rule| rule.matches(&factorized.resource));
         let Some(rule) = matching.next() else {
+            if factorized.side_effect_free.is_none()
+                && factorized.identity.module_type != crate::ModuleType::JavaScriptAuto
+            {
+                factorized.side_effect_free = Some(true);
+            }
             return Ok(factorized);
         };
         if matching.next().is_some() {
@@ -177,12 +189,21 @@ impl NormalModuleFactory {
             });
         }
 
-        let loader = rule.matched_loader();
-        factorized.identity.loaders = vec![loader.identifier.clone()];
-        factorized.file_dependencies.insert(loader.loader.clone());
-        factorized.loader = Some(loader);
+        if let Some(module_type) = rule.module_type() {
+            factorized.identity.module_type = module_type;
+        }
+        if let Some(loader) = rule.matched_loader() {
+            factorized.identity.loaders = vec![loader.identifier.clone()];
+            factorized.file_dependencies.insert(loader.loader.clone());
+            factorized.loader = Some(loader);
+        }
         if let Some(has_side_effects) = rule.side_effects() {
             factorized.side_effect_free = Some(!has_side_effects);
+        }
+        if factorized.side_effect_free.is_none()
+            && factorized.identity.module_type != crate::ModuleType::JavaScriptAuto
+        {
+            factorized.side_effect_free = Some(true);
         }
         Ok(factorized)
     }

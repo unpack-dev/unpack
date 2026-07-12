@@ -14,7 +14,7 @@ use crate::{
     HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
     HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Module,
-    ModuleGraph, ModuleHandle, SourceRange,
+    ModuleGraph, ModuleHandle, ModuleType, SourceRange,
     cache::BuildCache,
     cache_facade::{CacheETag, CacheIdentifier, CacheKey},
     cache_hash::StableHasher,
@@ -31,6 +31,15 @@ use crate::{
 pub struct Asset {
     pub filename: String,
     pub source: String,
+    pub binary_source: Option<Vec<u8>>,
+}
+
+impl Asset {
+    pub fn source_bytes(&self) -> &[u8] {
+        self.binary_source
+            .as_deref()
+            .unwrap_or_else(|| self.source.as_bytes())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -409,6 +418,8 @@ pub(crate) fn create_render_manifest(
 pub(crate) fn render_assets(
     options: &CompilerOptions,
     build_cache: &BuildCache,
+    module_graph: &ModuleGraph,
+    chunk_graph: &ChunkGraph,
     manifest: &RenderManifest,
     code_generation_results: &CodeGenerationResults,
 ) -> Vec<Asset> {
@@ -435,6 +446,10 @@ pub(crate) fn render_assets(
             options.sourcemap,
         ));
     }
+    assets.extend(crate::asset_generator::render_resource_assets(
+        module_graph,
+        chunk_graph,
+    ));
     assets
 }
 
@@ -567,12 +582,17 @@ fn emit_asset(filename: String, rendered: &RenderedSource, sourcemap: bool) -> V
         map.set_file(Some(filename.clone().into()));
     }
 
-    assets.push(Asset { filename, source });
+    assets.push(Asset {
+        filename,
+        source,
+        binary_source: None,
+    });
 
     if let Some(map) = source_map {
         assets.push(Asset {
             filename: map_filename,
             source: map.to_json(),
+            binary_source: None,
         });
     }
 
@@ -688,6 +708,13 @@ fn generate_module_code(
         return Ok(CodeGenerationRecord::new(CodeGenerationSource::Raw {
             source: render_failed_module_content(error),
         }));
+    }
+
+    if module.identity().module_type == ModuleType::Json {
+        return Ok(crate::json_generator::generate(module.source()));
+    }
+    if module.identity().module_type.is_asset() {
+        return Ok(crate::asset_generator::generate(module));
     }
 
     let module_handle = module.handle();

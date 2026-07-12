@@ -80,7 +80,9 @@ pub struct NativeCompilerOptions {
 #[napi(object)]
 pub struct NativeModuleRule {
     pub test: String,
-    pub loader: String,
+    pub loader: Option<String>,
+    #[napi(js_name = "type")]
+    pub module_type: Option<String>,
     pub options: String,
     #[napi(js_name = "sideEffects")]
     pub side_effects: Option<bool>,
@@ -578,7 +580,17 @@ impl NativeCompiler {
             .module_rules
             .into_iter()
             .map(|rule| {
-                ModuleRule::new(&rule.test, rule.loader, rule.options)
+                let module_type = rule
+                    .module_type
+                    .as_deref()
+                    .map(module_type_from_native)
+                    .transpose()?;
+                let module_rule = match rule.loader {
+                    Some(loader) => ModuleRule::new(&rule.test, loader, rule.options),
+                    None => ModuleRule::without_loader(&rule.test, rule.options),
+                };
+                module_rule
+                    .map(|module_rule| module_rule.with_module_type(module_type))
                     .map(|module_rule| module_rule.with_side_effects(rule.side_effects))
                     .map_err(|error| {
                         napi::Error::from_reason(format!("options.module.rules[0].test: {error}"))
@@ -621,6 +633,20 @@ impl NativeCompiler {
             compiler: Some(Arc::new(compiler)),
             output_path,
         })
+    }
+}
+
+fn module_type_from_native(module_type: &str) -> Result<ModuleType> {
+    match module_type {
+        "javascript/auto" => Ok(ModuleType::JavaScriptAuto),
+        "json" => Ok(ModuleType::Json),
+        "asset" => Ok(ModuleType::Asset),
+        "asset/resource" => Ok(ModuleType::AssetResource),
+        "asset/inline" => Ok(ModuleType::AssetInline),
+        "asset/source" => Ok(ModuleType::AssetSource),
+        value => Err(napi::Error::from_reason(format!(
+            "unknown normalized module type {value:?}"
+        ))),
     }
 }
 
@@ -863,6 +889,11 @@ fn native_module(module: &Module) -> NativeModule {
     };
     let module_type = match identity.module_type {
         ModuleType::JavaScriptAuto => "javascript/auto",
+        ModuleType::Json => "json",
+        ModuleType::Asset => "asset",
+        ModuleType::AssetResource => "asset/resource",
+        ModuleType::AssetInline => "asset/inline",
+        ModuleType::AssetSource => "asset/source",
     };
 
     NativeModule {
@@ -936,7 +967,7 @@ fn emit_assets(output_path: &Path, assets: &[Asset]) -> std::result::Result<(), 
                 )
             })?;
         }
-        fs::write(&path, &asset.source)
+        fs::write(&path, asset.source_bytes())
             .map_err(|error| format!("failed to write asset {}: {error}", path.display()))?;
     }
 
@@ -1024,7 +1055,7 @@ fn stats_error(error: &CoreError) -> NativeStatsError {
 fn asset_stats(asset: &Asset) -> NativeAsset {
     NativeAsset {
         name: asset.filename.clone(),
-        size: asset.source.len().try_into().unwrap_or(u32::MAX),
+        size: asset.source_bytes().len().try_into().unwrap_or(u32::MAX),
     }
 }
 

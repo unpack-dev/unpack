@@ -19,7 +19,7 @@ use tokio::{
 use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, DependencyKind,
     Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleHandle,
-    ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
+    ModuleIdentity, ModuleType, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     cache::{BuildCache, ModuleBuildRecord},
     cache_facade::ModuleBuildCache,
     module::BuiltModuleContent,
@@ -478,7 +478,7 @@ impl BuildTask {
             }
         }
 
-        let raw_source = match tokio::fs::read_to_string(&self.resource).await {
+        let raw_bytes = match tokio::fs::read(&self.resource).await {
             Ok(source) => source,
             Err(error) => {
                 let error = Error::read(&self.resource, error);
@@ -489,7 +489,24 @@ impl BuildTask {
                 return Ok(Vec::new());
             }
         };
-        let source = if let Some(loader) = self.loader.as_ref() {
+        let raw_source = match String::from_utf8(raw_bytes.clone()) {
+            Ok(source) => source,
+            Err(error) if self.identity.module_type.is_asset() => {
+                String::from_utf8_lossy(error.as_bytes()).into_owned()
+            }
+            Err(error) => {
+                let error = Error::Read {
+                    path: self.resource.clone(),
+                    message: error.to_string(),
+                };
+                state
+                    .lock()
+                    .await
+                    .fail_module(self.module_handle, error, String::new())?;
+                return Ok(Vec::new());
+            }
+        };
+        let mut source = if let Some(loader) = self.loader.as_ref() {
             let Some(loader_runner) = services.loader_runner.as_ref() else {
                 let error = Error::Loader {
                     loader: loader.loader.clone(),
@@ -524,7 +541,22 @@ impl BuildTask {
         } else {
             raw_source.clone()
         };
-        let parsed = match parse_module_dependencies(&self.resource, &source) {
+        if self.identity.module_type == ModuleType::Json && source.starts_with('\u{feff}') {
+            source.remove(0);
+        }
+        let parsed = match match self.identity.module_type {
+            ModuleType::JavaScriptAuto => parse_module_dependencies(&self.resource, &source),
+            ModuleType::Json => serde_json::from_str::<serde_json::Value>(&source)
+                .map(|_| ParsedModule::default())
+                .map_err(|error| Error::Parse {
+                    path: self.resource.clone(),
+                    message: error.to_string(),
+                }),
+            ModuleType::Asset
+            | ModuleType::AssetResource
+            | ModuleType::AssetInline
+            | ModuleType::AssetSource => Ok(ParsedModule::default()),
+        } {
             Ok(parsed) => parsed,
             Err(error) if error.is_compilation_error() => {
                 state
@@ -538,8 +570,20 @@ impl BuildTask {
         let process_dependencies =
             process_dependencies_task(self.module_handle, &issuer_context, &parsed);
 
+        let binary_source = self.identity.module_type.is_asset().then(|| {
+            if self.loader.is_some() {
+                source.as_bytes().to_vec()
+            } else {
+                raw_bytes.clone()
+            }
+        });
         if !services.module_build_cache.is_enabled() {
-            let built_content = Arc::new(BuiltModuleContent::new(parsed, source));
+            let built_content = Arc::new(match binary_source {
+                Some(binary_source) => {
+                    BuiltModuleContent::new_binary(parsed, source, binary_source)
+                }
+                None => BuiltModuleContent::new(parsed, source),
+            });
             state
                 .lock()
                 .await
@@ -550,9 +594,9 @@ impl BuildTask {
         let mut snapshots = vec![
             services
                 .file_system_info
-                .create_file_snapshot(
+                .create_file_snapshot_bytes(
                     &self.resource,
-                    &raw_source,
+                    &raw_bytes,
                     services.module_snapshot_strategy,
                 )
                 .await?,
@@ -570,7 +614,10 @@ impl BuildTask {
             );
         }
         let snapshot = services.file_system_info.merge_snapshots(snapshots.iter());
-        let built_content = Arc::new(BuiltModuleContent::new(parsed, source));
+        let built_content = Arc::new(match binary_source {
+            Some(binary_source) => BuiltModuleContent::new_binary(parsed, source, binary_source),
+            None => BuiltModuleContent::new(parsed, source),
+        });
         let record = ModuleBuildRecord::new(Arc::clone(&built_content), snapshot);
 
         state

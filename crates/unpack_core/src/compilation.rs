@@ -234,6 +234,8 @@ impl Compilation {
         self.assets = code_generation::render_assets(
             &self.options,
             &self.build_cache,
+            &self.module_graph,
+            &self.chunk_graph,
             self.asset_render_manifest
                 .as_ref()
                 .expect("render manifest should exist before Asset rendering"),

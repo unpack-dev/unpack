@@ -389,7 +389,14 @@ mod tests {
                 .map(|(module, requirements)| (module, *requirements)),
         );
         let manifest = create_render_manifest(&chunk_graph, &[module], &results);
-        let assets = render_assets(&options, &build_cache, &manifest, &results);
+        let assets = render_assets(
+            &options,
+            &build_cache,
+            &module_graph,
+            &chunk_graph,
+            &manifest,
+            &results,
+        );
         let main = assets
             .iter()
             .find(|asset| asset.filename == "main.js")
@@ -436,7 +443,14 @@ mod tests {
                 .map(|(module, requirements)| (module, *requirements)),
         );
         let manifest = create_render_manifest(&chunk_graph, &entries, &results);
-        render_assets(&options, &build_cache, &manifest, &results)
+        render_assets(
+            &options,
+            &build_cache,
+            &module_graph,
+            &chunk_graph,
+            &manifest,
+            &results,
+        )
     }
 
     fn add_built_module(

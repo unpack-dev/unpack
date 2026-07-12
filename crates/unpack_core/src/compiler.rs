@@ -18,7 +18,7 @@ use tracing::Instrument;
 mod hooks;
 pub(crate) use hooks::CompilerHookSet;
 
-pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx"];
+pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".json"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SideEffectsOption {

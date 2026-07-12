@@ -12,6 +12,14 @@ pub struct ExportsInfo {
 }
 
 impl ExportsInfo {
+    pub(crate) fn from_names(names: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            provided_exports: Some(names.into_iter().collect()),
+            used_exports: None,
+            all_exports_used: false,
+        }
+    }
+
     pub(crate) fn from_dependencies(dependencies: &[Dependency]) -> Self {
         let mut exports_info = Self {
             provided_exports: Some(BTreeSet::new()),

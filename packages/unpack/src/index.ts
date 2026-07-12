@@ -33,10 +33,19 @@ export interface ModuleOptions {
 
 export interface ModuleRule {
   test: RegExp;
-  loader: string;
+  loader?: string;
+  type?: ModuleRuleType;
   options?: Record<string, unknown>;
   sideEffects?: boolean;
 }
+
+export type ModuleRuleType =
+  | "javascript/auto"
+  | "json"
+  | "asset"
+  | "asset/resource"
+  | "asset/inline"
+  | "asset/source";
 
 export type Mode = "development" | "production" | "none";
 
@@ -342,7 +351,8 @@ interface NormalizedOptions {
 
 interface NormalizedModuleRule {
   test: string;
-  loader: string;
+  loader?: string;
+  type?: ModuleRuleType;
   options: string;
   sideEffects?: boolean;
 }
@@ -872,7 +882,7 @@ class CompilerImpl implements Compiler {
   #activeCompilation: CompilationImpl | undefined;
 
   constructor(options: NormalizedOptions) {
-    this.#loaderRuntime = options.moduleRules.length > 0
+    this.#loaderRuntime = options.moduleRules.some((rule) => rule.loader !== undefined)
       ? new LoaderRuntime(options.context)
       : undefined;
     this.#nativeCompiler = native.createCompiler(
@@ -2261,7 +2271,7 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       : assertBoolean(options.sourcemap, "options.sourcemap");
   const moduleRules = normalizeModuleOptions(options.module);
   const optimization = normalizeOptimizationOptions(options.optimization, mode);
-  if (moduleRules.length > 0 && sourcemap) {
+  if (moduleRules.some((rule) => rule.loader !== undefined) && sourcemap) {
     throw new TypeError("options.sourcemap must be false when options.module.rules is configured");
   }
 
@@ -2322,17 +2332,22 @@ function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedMo
   return module.rules.map((rule, index) => {
     const name = `options.module.rules[${index}]`;
     assertPlainObject(rule, name);
-    assertKnownKeys(rule, ["test", "loader", "options", "sideEffects"], name);
+    assertKnownKeys(rule, ["test", "loader", "type", "options", "sideEffects"], name);
     if (!(rule.test instanceof RegExp)) {
       throw new TypeError(`${name}.test must be a RegExp`);
     }
     if (rule.test.flags !== "") {
       throw new TypeError(`${name}.test must not use flags`);
     }
-    const loader = assertString(rule.loader, `${name}.loader`);
-    if (!isAbsolute(loader)) {
+    const loader = rule.loader === undefined
+      ? undefined
+      : assertString(rule.loader, `${name}.loader`);
+    if (loader !== undefined && !isAbsolute(loader)) {
       throw new TypeError(`${name}.loader must be an absolute path`);
     }
+    const type = rule.type === undefined
+      ? undefined
+      : assertModuleRuleType(rule.type, `${name}.type`);
     const options = rule.options ?? {};
     assertPlainObject(options, `${name}.options`);
     let serializedOptions: string;
@@ -2344,8 +2359,22 @@ function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedMo
     const sideEffects = rule.sideEffects === undefined
       ? undefined
       : assertBoolean(rule.sideEffects, `${name}.sideEffects`);
-    return { test: rule.test.source, loader, options: serializedOptions, sideEffects };
+    return { test: rule.test.source, loader, type, options: serializedOptions, sideEffects };
   });
+}
+
+function assertModuleRuleType(value: unknown, name: string): ModuleRuleType {
+  if (
+    value !== "javascript/auto" &&
+    value !== "json" &&
+    value !== "asset" &&
+    value !== "asset/resource" &&
+    value !== "asset/inline" &&
+    value !== "asset/source"
+  ) {
+    throw new TypeError(`${name} must be a supported module type`);
+  }
+  return value;
 }
 
 function normalizeEntry(entry: UnpackOptions["entry"]): NormalizedEntry[] {

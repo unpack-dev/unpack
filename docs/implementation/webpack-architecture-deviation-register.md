@@ -117,15 +117,16 @@ documented deviations or staged webpack scope.
   it does not expose a public scheduler-selection option. Unpack normally wraps
   background Make futures in Tokio tasks while preserving webpack's Factorize,
   Add, Build, and Process Dependencies responsibilities.
-- **Approved shape**: ADR 0143 permits the explicit
-  `experiments.serialRebuildMake: true` option to poll rebuild Factorize and
-  Build futures directly in Make's `FuturesUnordered` queue. Initial
-  compilations retain Tokio task spawning, and both modes retain the semaphore
-  parallelism limit and observable compilation behavior.
+- **Approved shape**: ADR 0143 makes direct polling of rebuild Factorize and
+  Build futures in Make's `FuturesUnordered` queue the default and permits an
+  explicit `experiments.serialRebuildMake: false` to restore Tokio spawning.
+  Initial compilations retain Tokio task spawning. Make parallelism is unbounded
+  by default; an explicitly configured finite limit uses a semaphore in both
+  scheduling modes.
 - **Disable or refactor when**: direct polling changes Make phase ordering,
   error delivery, lifecycle behavior, or task responsibilities; the experiment
-  must remain opt-in unless measurements and a later decision justify changing
-  the default.
+  must remain configurable unless measurements and a later decision remove one
+  of the scheduler paths.
 
 ## Resolved violations and alignment gaps
 

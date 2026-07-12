@@ -1422,8 +1422,7 @@ test("serial rebuild Make preserves watch invalidation behavior", async () => {
   });
   const compiler = unpack({
     context: fixture,
-    entry: "./src/index.js",
-    experiments: { serialRebuildMake: true }
+    entry: "./src/index.js"
   });
   const entry = join(fixture, "src/index.js");
 

@@ -123,7 +123,7 @@ test("cache objects require a type, enforce the unaffected experiment gate, and 
   assert.doesNotThrow(() =>
     unpack({
       entry: "./src/index.js",
-      experiments: { serialRebuildMake: true }
+      experiments: { serialRebuildMake: false }
     })
   );
   assert.throws(

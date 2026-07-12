@@ -56,7 +56,7 @@ pub struct CompilerOptions {
     pub module_rules: Vec<ModuleRule>,
     pub loader_runner: Option<Arc<dyn LoaderRunner>>,
     pub compilation_hooks: Option<Arc<dyn CompilationHooks>>,
-    pub parallelism: usize,
+    pub parallelism: Option<usize>,
     pub sourcemap: bool,
     pub provided_exports: bool,
     pub used_exports: bool,
@@ -77,12 +77,12 @@ impl CompilerOptions {
             module_rules: Vec::new(),
             loader_runner: None,
             compilation_hooks: None,
-            parallelism: 100,
+            parallelism: None,
             sourcemap: true,
             provided_exports: true,
             used_exports: true,
             side_effects: SideEffectsOption::Flag,
-            serial_rebuild_make: false,
+            serial_rebuild_make: true,
             unsafe_watch_cache_invalidation: false,
         }
     }
@@ -882,11 +882,18 @@ mod tests {
     };
 
     #[test]
-    fn serial_make_scheduling_is_opt_in_and_rebuild_only() {
+    fn serial_make_scheduling_is_configurable_and_rebuild_only() {
         assert!(should_spawn_make_tasks(false, false));
         assert!(should_spawn_make_tasks(false, true));
         assert!(should_spawn_make_tasks(true, false));
         assert!(!should_spawn_make_tasks(true, true));
+    }
+
+    #[test]
+    fn make_defaults_to_unbounded_parallelism_and_serial_rebuild_scheduling() {
+        let options = CompilerOptions::new(".", Vec::new());
+        assert_eq!(options.parallelism, None);
+        assert!(options.serial_rebuild_make);
     }
 
     #[tokio::test]

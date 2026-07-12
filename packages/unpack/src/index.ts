@@ -2932,7 +2932,7 @@ function normalizeExperimentsOptions(
   if (experiments === undefined) {
     return {
       cacheUnaffected: false,
-      serialRebuildMake: false,
+      serialRebuildMake: true,
       unsafeWatchCacheInvalidation: false
     };
   }
@@ -2952,7 +2952,7 @@ function normalizeExperimentsOptions(
           ),
     serialRebuildMake:
       experiments.serialRebuildMake === undefined
-        ? false
+        ? true
         : assertBoolean(
             experiments.serialRebuildMake,
             "options.experiments.serialRebuildMake"

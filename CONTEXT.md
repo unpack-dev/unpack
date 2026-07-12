@@ -145,7 +145,7 @@ The compilation stage that starts from entry modules, discovers their dependenci
 _Avoid_: Build phase, parse phase
 
 **Serial Rebuild Make**:
-An experimental Make scheduling mode in which rebuild Factorize and Build futures are polled directly by the Make queue instead of being wrapped in Tokio tasks. It changes scheduling only; the Make task model and configured parallelism limit remain intact.
+The default Make scheduling mode for rebuilds, in which Factorize and Build futures are polled directly by the Make queue instead of being wrapped in Tokio tasks. It changes scheduling only; the Make task model remains intact, and an explicitly configured finite parallelism limit still applies.
 _Avoid_: Single-threaded rebuild, disabled concurrency
 
 **Code Generation Phase**:

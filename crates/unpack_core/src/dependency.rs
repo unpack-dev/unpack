@@ -1,13 +1,20 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Dependency.js
 
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 
 use crate::dependencies::{
-    ConstDependency, EntryDependency, HarmonyExportExpressionDependency,
-    HarmonyExportHeaderDependency, HarmonyExportImportedSpecifierDependency,
-    HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
-    HarmonyImportSpecifierDependency, ImportDependency, NullDependency,
+    ConstDependency, ConstDependencyTemplate, EntryDependency, HarmonyExportExpressionDependency,
+    HarmonyExportExpressionDependencyTemplate, HarmonyExportHeaderDependency,
+    HarmonyExportHeaderDependencyTemplate, HarmonyExportImportedSpecifierDependency,
+    HarmonyExportImportedSpecifierDependencyTemplate, HarmonyExportSpecifierDependency,
+    HarmonyExportSpecifierDependencyTemplate, HarmonyImportSideEffectDependency,
+    HarmonyImportSideEffectDependencyTemplate, HarmonyImportSpecifierDependency,
+    HarmonyImportSpecifierDependencyTemplate, ImportDependency, ImportDependencyTemplate,
+    ModuleDependency, NullDependency, NullDependencyTemplate,
 };
+use crate::dependency_template::{DependencyTemplateContext, apply_dependency_template};
+use crate::{ExportsInfo, cache_hash::StableHasher};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SourceRange {
@@ -47,32 +54,6 @@ pub enum Dependency {
 }
 
 impl Dependency {
-    pub fn new(kind: DependencyKind, request: impl Into<String>) -> Self {
-        let request = request.into();
-        match kind {
-            DependencyKind::Entry => Self::Entry(EntryDependency::new(request)),
-            DependencyKind::StaticImport => Self::HarmonyImportSideEffect(
-                HarmonyImportSideEffectDependency::new(request, 0, None),
-            ),
-            DependencyKind::StaticExport => {
-                Self::HarmonyExportImportedSpecifier(HarmonyExportImportedSpecifierDependency::new(
-                    request,
-                    0,
-                    Vec::new(),
-                    None,
-                    false,
-                    None,
-                ))
-            }
-            DependencyKind::DynamicImport => {
-                Self::Import(ImportDependency::new(request, SourceRange::insert(0), None))
-            }
-            DependencyKind::Presentational => {
-                Self::Const(ConstDependency::new("", SourceRange::insert(0)))
-            }
-        }
-    }
-
     pub fn kind(&self) -> DependencyKind {
         match self {
             Self::Entry(_) => DependencyKind::Entry,
@@ -90,44 +71,27 @@ impl Dependency {
     }
 
     pub fn request(&self) -> Option<&str> {
-        match self {
-            Self::Entry(dep) => Some(&dep.module.request),
-            Self::HarmonyImportSideEffect(dep) => Some(&dep.module.request),
-            Self::HarmonyImportSpecifier(dep) => Some(&dep.module.request),
-            Self::HarmonyExportImportedSpecifier(dep) => Some(&dep.module.request),
-            Self::Import(dep) => Some(&dep.module.request),
-            Self::HarmonyExportHeader(_)
-            | Self::HarmonyExportSpecifier(_)
-            | Self::HarmonyExportExpression(_)
-            | Self::Null(_)
-            | Self::Const(_) => None,
-        }
+        self.module_dependency()
+            .map(|dependency| dependency.request.as_str())
     }
 
     pub fn resource_identifier(&self) -> Option<String> {
-        let module = match self {
+        self.module_dependency()
+            .map(ModuleDependency::resource_identifier)
+    }
+
+    pub fn source_order(&self) -> Option<usize> {
+        self.module_dependency()
+            .and_then(|dependency| dependency.source_order)
+    }
+
+    fn module_dependency(&self) -> Option<&ModuleDependency> {
+        match self {
             Self::Entry(dep) => Some(&dep.module),
             Self::HarmonyImportSideEffect(dep) => Some(&dep.module),
             Self::HarmonyImportSpecifier(dep) => Some(&dep.module),
             Self::HarmonyExportImportedSpecifier(dep) => Some(&dep.module),
             Self::Import(dep) => Some(&dep.module),
-            Self::HarmonyExportHeader(_)
-            | Self::HarmonyExportSpecifier(_)
-            | Self::HarmonyExportExpression(_)
-            | Self::Null(_)
-            | Self::Const(_) => None,
-        }?;
-
-        Some(module.resource_identifier())
-    }
-
-    pub fn source_order(&self) -> Option<usize> {
-        match self {
-            Self::Entry(dep) => dep.module.source_order,
-            Self::HarmonyImportSideEffect(dep) => dep.module.source_order,
-            Self::HarmonyImportSpecifier(dep) => dep.module.source_order,
-            Self::HarmonyExportImportedSpecifier(dep) => dep.module.source_order,
-            Self::Import(dep) => dep.module.source_order,
             Self::HarmonyExportHeader(_)
             | Self::HarmonyExportSpecifier(_)
             | Self::HarmonyExportExpression(_)
@@ -166,30 +130,85 @@ impl Dependency {
         )
     }
 
-    pub(crate) fn source_ranges(&self) -> Vec<SourceRange> {
-        let mut ranges = Vec::new();
+    pub(crate) fn apply_template(
+        &self,
+        source: &mut rspack_sources::ReplaceSource,
+        context: &mut DependencyTemplateContext<'_>,
+    ) -> Result<(), crate::Error> {
         match self {
-            Self::Entry(_) | Self::HarmonyExportSpecifier(_) | Self::Null(_) => {}
-            Self::HarmonyImportSideEffect(dependency) => ranges.extend(dependency.module.range),
-            Self::HarmonyImportSpecifier(dependency) => {
-                ranges.extend(dependency.module.range);
-                ranges.push(dependency.usage_range);
+            Self::Entry(_) => Ok(()),
+            Self::HarmonyImportSideEffect(dependency) => apply_dependency_template(
+                &HarmonyImportSideEffectDependencyTemplate,
+                dependency,
+                source,
+                context,
+            ),
+            Self::HarmonyImportSpecifier(dependency) => apply_dependency_template(
+                &HarmonyImportSpecifierDependencyTemplate,
+                dependency,
+                source,
+                context,
+            ),
+            Self::HarmonyExportHeader(dependency) => apply_dependency_template(
+                &HarmonyExportHeaderDependencyTemplate,
+                dependency,
+                source,
+                context,
+            ),
+            Self::HarmonyExportSpecifier(dependency) => apply_dependency_template(
+                &HarmonyExportSpecifierDependencyTemplate,
+                dependency,
+                source,
+                context,
+            ),
+            Self::HarmonyExportExpression(dependency) => apply_dependency_template(
+                &HarmonyExportExpressionDependencyTemplate,
+                dependency,
+                source,
+                context,
+            ),
+            Self::HarmonyExportImportedSpecifier(dependency) => apply_dependency_template(
+                &HarmonyExportImportedSpecifierDependencyTemplate,
+                dependency,
+                source,
+                context,
+            ),
+            Self::Null(dependency) => {
+                apply_dependency_template(&NullDependencyTemplate, dependency, source, context)
             }
-            Self::HarmonyExportHeader(dependency) => {
-                ranges.push(dependency.statement_range);
-                ranges.extend(dependency.declaration_range);
+            Self::Const(dependency) => {
+                apply_dependency_template(&ConstDependencyTemplate, dependency, source, context)
             }
-            Self::HarmonyExportExpression(dependency) => {
-                ranges.push(dependency.statement_range);
-                ranges.push(dependency.range);
+            Self::Import(dependency) => {
+                apply_dependency_template(&ImportDependencyTemplate, dependency, source, context)
+            }
+        }
+    }
+
+    pub(crate) fn update_code_generation_hash(
+        &self,
+        exports_info: &ExportsInfo,
+        hasher: &mut StableHasher,
+    ) {
+        match self {
+            Self::HarmonyExportSpecifier(dependency) => {
+                hasher.write_u8(0);
+                exports_info.get_used_name(&dependency.name).hash(hasher);
+            }
+            Self::HarmonyExportExpression(_) => {
+                hasher.write_u8(1);
+                exports_info.get_used_name("default").hash(hasher);
             }
             Self::HarmonyExportImportedSpecifier(dependency) => {
-                ranges.extend(dependency.module.range);
+                hasher.write_u8(2);
+                dependency
+                    .name
+                    .as_deref()
+                    .and_then(|name| exports_info.get_used_name(name))
+                    .hash(hasher);
             }
-            Self::Const(dependency) => ranges.push(dependency.range),
-            Self::Import(dependency) => ranges.extend(dependency.module.range),
+            _ => {}
         }
-        ranges
     }
 }
 

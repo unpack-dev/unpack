@@ -2,7 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::SourceRange;
+use crate::{
+    SourceRange,
+    dependency_template::{DependencyTemplate, DependencyTemplateContext, replace},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConstDependency {
@@ -16,5 +19,22 @@ impl ConstDependency {
             expression: expression.into(),
             range,
         }
+    }
+}
+
+pub(crate) struct ConstDependencyTemplate;
+
+impl DependencyTemplate<ConstDependency> for ConstDependencyTemplate {
+    fn source_ranges(&self, dependency: &ConstDependency) -> Vec<SourceRange> {
+        vec![dependency.range]
+    }
+
+    fn apply(
+        &self,
+        dependency: &ConstDependency,
+        source: &mut rspack_sources::ReplaceSource,
+        _context: &mut DependencyTemplateContext<'_>,
+    ) {
+        replace(source, dependency.range, dependency.expression.clone());
     }
 }

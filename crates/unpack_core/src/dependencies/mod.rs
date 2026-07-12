@@ -23,3 +23,13 @@ pub use harmony_import_specifier_dependency::HarmonyImportSpecifierDependency;
 pub use import_dependency::ImportDependency;
 pub use module_dependency::ModuleDependency;
 pub use null_dependency::NullDependency;
+
+pub(crate) use const_dependency::ConstDependencyTemplate;
+pub(crate) use harmony_export_expression_dependency::HarmonyExportExpressionDependencyTemplate;
+pub(crate) use harmony_export_header_dependency::HarmonyExportHeaderDependencyTemplate;
+pub(crate) use harmony_export_imported_specifier_dependency::HarmonyExportImportedSpecifierDependencyTemplate;
+pub(crate) use harmony_export_specifier_dependency::HarmonyExportSpecifierDependencyTemplate;
+pub(crate) use harmony_import_side_effect_dependency::HarmonyImportSideEffectDependencyTemplate;
+pub(crate) use harmony_import_specifier_dependency::HarmonyImportSpecifierDependencyTemplate;
+pub(crate) use import_dependency::ImportDependencyTemplate;
+pub(crate) use null_dependency::NullDependencyTemplate;

@@ -3,7 +3,12 @@
 use serde::{Deserialize, Serialize};
 
 use super::ModuleDependency;
-use crate::SourceRange;
+use crate::{
+    SourceRange,
+    dependency_template::{
+        DependencyTemplate, DependencyTemplateContext, import_expression, replace,
+    },
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarmonyImportSpecifierDependency {
@@ -29,5 +34,43 @@ impl HarmonyImportSpecifierDependency {
             usage_range,
             shorthand: false,
         }
+    }
+}
+
+pub(crate) struct HarmonyImportSpecifierDependencyTemplate;
+
+impl DependencyTemplate<HarmonyImportSpecifierDependency>
+    for HarmonyImportSpecifierDependencyTemplate
+{
+    fn source_ranges(&self, dependency: &HarmonyImportSpecifierDependency) -> Vec<SourceRange> {
+        let mut ranges = dependency.module.range.into_iter().collect::<Vec<_>>();
+        ranges.push(dependency.usage_range);
+        ranges
+    }
+
+    fn apply(
+        &self,
+        dependency: &HarmonyImportSpecifierDependency,
+        source: &mut rspack_sources::ReplaceSource,
+        context: &mut DependencyTemplateContext<'_>,
+    ) {
+        let dependency_index = context
+            .dependency_index
+            .expect("Harmony import specifier must have a Dependency Index");
+        context
+            .module_graph
+            .module_for_dependency(context.module, None, dependency_index)
+            .expect("Harmony import specifier must have a Module Graph connection");
+        let expression = import_expression(
+            &dependency.module.request,
+            dependency.module.source_order.unwrap_or(0),
+            &dependency.ids,
+        );
+        let expression = if dependency.shorthand {
+            format!("{}: {expression}", dependency.name)
+        } else {
+            expression
+        };
+        replace(source, dependency.usage_range, expression);
     }
 }

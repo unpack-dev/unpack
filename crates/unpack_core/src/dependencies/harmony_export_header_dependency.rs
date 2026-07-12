@@ -2,7 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::SourceRange;
+use crate::{
+    SourceRange,
+    dependency_template::{DependencyTemplate, DependencyTemplateContext, replace},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarmonyExportHeaderDependency {
@@ -16,5 +19,32 @@ impl HarmonyExportHeaderDependency {
             declaration_range,
             statement_range,
         }
+    }
+}
+
+pub(crate) struct HarmonyExportHeaderDependencyTemplate;
+
+impl DependencyTemplate<HarmonyExportHeaderDependency> for HarmonyExportHeaderDependencyTemplate {
+    fn source_ranges(&self, dependency: &HarmonyExportHeaderDependency) -> Vec<SourceRange> {
+        let mut ranges = vec![dependency.statement_range];
+        ranges.extend(dependency.declaration_range);
+        ranges
+    }
+
+    fn apply(
+        &self,
+        dependency: &HarmonyExportHeaderDependency,
+        source: &mut rspack_sources::ReplaceSource,
+        _context: &mut DependencyTemplateContext<'_>,
+    ) {
+        let end = dependency
+            .declaration_range
+            .map(|range| range.start)
+            .unwrap_or(dependency.statement_range.end);
+        replace(
+            source,
+            SourceRange::new(dependency.statement_range.start, end),
+            String::new(),
+        );
     }
 }

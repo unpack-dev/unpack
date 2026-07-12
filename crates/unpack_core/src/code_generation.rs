@@ -390,7 +390,7 @@ impl JavascriptRenderManifest {
 
     fn cache_etag(&self, code_generation_results: &CodeGenerationResults) -> CacheETag {
         let mut hasher = StableHasher::default();
-        hasher.write(b"unpack/asset-render/hash/1");
+        hasher.write(b"unpack/asset-render/hash/2");
         match self {
             Self::InitialChunk {
                 modules,
@@ -422,7 +422,8 @@ fn hash_module_render_inputs(
     modules.len().hash(hasher);
     for module in modules {
         module.render_id.hash(hasher);
-        module.module.hash(hasher);
+        // Module Handles belong to the current Compilation. They may locate the
+        // current result, but must not become Build Cache validation data.
         let result = code_generation_results
             .results
             .get(&module.module)
@@ -637,8 +638,9 @@ mod tests {
 
     use super::{
         AssetRenderKey, AssetRenderKind, CodeGenerationResult, CodeGenerationResults,
-        CodeGenerationSource, JavascriptRenderManifest, ModuleRenderManifest,
-        RenderedRuntimeModule, RenderedSource, emit_asset,
+        CodeGenerationSource, JavascriptRenderManifest, ModuleRenderManifest, RenderManifest,
+        RenderManifestContent, RenderManifestEntry, RenderedRuntimeModule, RenderedSource,
+        emit_asset, render_assets,
     };
     use crate::code_generation_record::{CodeGenerationRecord, CodeGenerationReplacement};
 
@@ -664,6 +666,58 @@ mod tests {
             CacheIdentifier::from_parts([b"initial".to_vec(), b"main".to_vec()])
         );
         assert_ne!(initial.cache_identifier(), asynchronous.cache_identifier());
+    }
+
+    #[test]
+    fn asset_render_cache_reuses_equivalent_inputs_with_different_graph_handles() {
+        let temp = tempfile::tempdir().expect("create asset render cache directory");
+        let mut options = CompilerOptions::new("/project", Vec::new());
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(temp.path().join("cache"));
+        options.sourcemap = false;
+        let cache = Cache::new(options.cache.clone(), SnapshotOptions::default());
+        let render_id = RenderId::String("./src/feature.js".to_string());
+        let chunk_id = RenderId::String("src_feature_js".to_string());
+
+        let render_with_handle = |module_handle| {
+            let manifest = RenderManifest {
+                entries: vec![RenderManifestEntry {
+                    filename: "src_feature_js.js".to_string(),
+                    render: RenderManifestContent::JavaScript(
+                        JavascriptRenderManifest::AsyncChunk {
+                            modules: vec![ModuleRenderManifest {
+                                module: module_handle,
+                                render_id: render_id.clone(),
+                            }],
+                            chunk_id: chunk_id.clone(),
+                        },
+                    ),
+                }],
+            };
+            let mut results = CodeGenerationResults::default();
+            results.results.insert(
+                module_handle,
+                code_generation_result("export const value = 'stable';"),
+            );
+            render_assets(&options, &cache, &manifest, &results)
+        };
+
+        let first = render_with_handle(ModuleHandle::new(0));
+        let second = render_with_handle(ModuleHandle::new(1));
+
+        assert_eq!(first, second);
+        assert_eq!(
+            cache
+                .work_counters()
+                .for_family(CacheItemFamily::AssetRender),
+            CacheItemWork {
+                hits: 1,
+                misses: 1,
+                stores: 1,
+                restores: 0,
+                evictions: 0,
+            }
+        );
     }
 
     #[test]

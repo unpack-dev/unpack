@@ -57,6 +57,16 @@ Generated outputs are `target/`, `packages/*/dist/`, and
 - Update `CONTEXT.md` when a change introduces or resolves canonical domain
   language. Add or supersede an ADR when an architectural decision changes.
 
+## Code comments
+
+- Preserve comments that explain non-obvious invariants, phase or lifecycle
+  ordering, webpack compatibility, and intentional deviations.
+- Keep comments concise and current. Do not narrate behavior that is already
+  obvious from the code.
+- When porting or aligning webpack code, retain relevant upstream webpack
+  comments whenever they remain accurate. Update them when the adaptation
+  changes their assumptions instead of discarding useful context.
+
 ## Build and test
 
 CI uses Node.js 24, pnpm 11.7.0, and stable Rust.

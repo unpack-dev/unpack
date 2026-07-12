@@ -172,6 +172,14 @@ _Avoid_: Export snapshot, CommonJS export assignment
 The module graph metadata that records a module's known exports and how generated code should name them.
 _Avoid_: Export list, tree shaking table
 
+**Side Effects Flag Plugin**:
+The webpack-aligned optimization plugin that records whether modules may be skipped for evaluation and optimizes side-effect-free dependency connections.
+_Avoid_: Chunk graph side-effects check, Make-time package probe
+
+**Module Side Effects State**:
+Module Graph metadata describing whether evaluating a module may have observable effects, derived from declared package or rule metadata and, when enabled, source analysis.
+_Avoid_: Used export state, module reachability flag
+
 **Static ESM Dependency**:
 A dependency declared by an ECMAScript module import or re-export whose specifier is known before code execution.
 _Avoid_: Runtime import, CommonJS dependency

@@ -29,8 +29,12 @@ The Node.js-facing programmable API for configuring and running Unpack from Java
 _Avoid_: Rust API, Unpack-only API
 
 **Exposed JavaScript API Surface**:
-The currently callable JavaScript API behavior, including `unpack(options, callback?)`, compiler lifecycle methods, watching lifecycle methods, stats reporting, and supported option normalization. It is the first priority for webpack alignment before generated runtime or graph internals.
-_Avoid_: Internal Rust API, future plugin API surface
+The currently callable JavaScript API behavior, including `unpack(options, callback?)`, configured JavaScript Plugins, compiler lifecycle methods, watching lifecycle methods, stats reporting, and supported option normalization. It is the first priority for webpack alignment before generated runtime or graph internals.
+_Avoid_: Internal Rust API, unimplemented plugin surface
+
+**JavaScript Plugin**:
+A webpack-shaped object with an `apply(compiler)` method or a function-style plugin configured through `options.plugins`. It is applied once in configuration order and can use only the model-backed Compiler and Compilation Hooks and façade properties that Unpack exposes.
+_Avoid_: Rust plugin, arbitrary webpack plugin compatibility
 
 **JavaScript Lifecycle Alignment**:
 The webpack-aligned behavior of JavaScript API calls around synchronous validation, asynchronous callback timing, callback `err` values, returned `Stats`, and compiler or watching lifecycle conflicts. It is the first exposed API alignment area to stabilize.

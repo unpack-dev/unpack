@@ -20,7 +20,26 @@ export interface UnpackOptions {
   module?: ModuleOptions;
   optimization?: OptimizationOptions;
   experiments?: ExperimentsOptions;
+  plugins?: WebpackPlugin[];
 }
+
+export interface WebpackPluginInstance {
+  apply(compiler: Compiler): void;
+}
+
+export type WebpackPluginFunction = (
+  this: Compiler,
+  compiler: Compiler
+) => void;
+
+export type WebpackPlugin =
+  | WebpackPluginInstance
+  | WebpackPluginFunction
+  | false
+  | null
+  | undefined
+  | 0
+  | "";
 
 export interface ExperimentsOptions {
   cacheUnaffected?: boolean;
@@ -315,6 +334,7 @@ export interface CompilerHooks {
 
 export interface Compiler {
   readonly hooks: CompilerHooks;
+  readonly outputPath: string;
   run(callback: RunCallback): void;
   watch(watchOptions: WatchOptions, handler: WatchHandler): Watching;
   close(callback: CloseCallback): void;
@@ -874,6 +894,7 @@ class CompilerImpl implements Compiler {
     compilation: new CompilationHookImpl(),
     done: new DoneHookImpl()
   };
+  readonly outputPath: string;
   #lifecycle: CompilerLifecycle = { kind: "open" };
   #running = false;
   #watching: WatchingImpl | undefined;
@@ -891,6 +912,7 @@ class CompilerImpl implements Compiler {
   #activeCompilation: CompilationImpl | undefined;
 
   constructor(options: NormalizedOptions) {
+    this.outputPath = options.outputPath;
     this.#loaderRuntime = options.moduleRules.some((rule) => rule.loader !== undefined)
       ? new LoaderRuntime(options.context)
       : undefined;
@@ -2218,7 +2240,10 @@ export default function unpack(
 
   let compiler: Compiler;
   try {
-    compiler = new CompilerImpl(normalizeOptions(options));
+    const normalizedOptions = normalizeOptions(options);
+    const plugins = normalizePlugins(options.plugins);
+    compiler = new CompilerImpl(normalizedOptions);
+    applyPlugins(plugins, compiler);
   } catch (error) {
     if (callback === undefined) {
       throw error;
@@ -2250,7 +2275,8 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       "infrastructureLogging",
       "module",
       "optimization",
-      "experiments"
+      "experiments",
+      "plugins"
     ],
     "options"
   );
@@ -2305,6 +2331,56 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     usedExports: optimization.usedExports,
     sideEffects: optimization.sideEffects
   };
+}
+
+function normalizePlugins(plugins: unknown): Array<WebpackPluginInstance | WebpackPluginFunction> {
+  if (plugins === undefined) {
+    return [];
+  }
+  if (!Array.isArray(plugins)) {
+    throw new TypeError("options.plugins must be an array");
+  }
+
+  const normalized: Array<WebpackPluginInstance | WebpackPluginFunction> = [];
+  for (const [index, plugin] of plugins.entries()) {
+    if (
+      plugin === false ||
+      plugin === null ||
+      plugin === undefined ||
+      plugin === 0 ||
+      plugin === ""
+    ) {
+      continue;
+    }
+    if (typeof plugin === "function") {
+      normalized.push(plugin as WebpackPluginFunction);
+      continue;
+    }
+    if (
+      typeof plugin === "object" &&
+      typeof (plugin as { apply?: unknown }).apply === "function"
+    ) {
+      normalized.push(plugin as WebpackPluginInstance);
+      continue;
+    }
+    throw new TypeError(
+      `options.plugins[${index}] must be a function, a plugin with an apply method, or falsy`
+    );
+  }
+  return normalized;
+}
+
+function applyPlugins(
+  plugins: readonly (WebpackPluginInstance | WebpackPluginFunction)[],
+  compiler: Compiler
+): void {
+  for (const plugin of plugins) {
+    if (typeof plugin === "function") {
+      (plugin as WebpackPluginFunction).call(compiler, compiler);
+    } else {
+      plugin.apply(compiler);
+    }
+  }
 }
 
 function normalizeExperimentsOptions(experiments: ExperimentsOptions | undefined): boolean {

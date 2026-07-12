@@ -1,6 +1,11 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Compilation.js
 
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use tokio::sync::Mutex;
 
@@ -9,10 +14,13 @@ use crate::{
     ModuleGraph, ModuleHandle, Result, UnpackResolver,
     build_chunk_graph::build_chunk_graph_with_cache,
     cache::Cache,
+    cache_hash::StableHasher,
+    chunk_graph::ModuleHash,
     code_generation::{self, CodeGenerationResults, RenderManifest},
     id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
     make::{self, MakeState},
     module_computation_cache::ModuleComputationCache,
+    runtime::resolve_runtime_modules,
     snapshot::FileSystemInfo,
 };
 use tracing::Instrument;
@@ -191,7 +199,7 @@ impl Compilation {
             if result.is_ok()
                 && let Some(cache) = &self.module_computation_cache
             {
-                cache.prepare(&self.module_graph);
+                cache.prepare_before_chunk_graph(&self.module_graph);
             }
 
             if result.is_ok() {
@@ -244,6 +252,8 @@ impl Compilation {
         self.hooks.clone().optimize_dependencies.call(self);
         self.build_chunk_graph();
         self.assign_render_ids();
+        self.prepare_post_id_assignment_computation_cache();
+        self.create_module_hashes();
         self.code_generation();
         self.process_runtime_requirements();
         self.create_assets();
@@ -255,6 +265,39 @@ impl Compilation {
 
     fn assign_chunk_ids(&mut self) {
         assign_chunk_render_ids(&self.options, &self.module_graph, &mut self.chunk_graph);
+    }
+
+    fn prepare_post_id_assignment_computation_cache(&self) {
+        if let Some(cache) = &self.module_computation_cache {
+            cache.prepare_after_id_assignment(&self.module_graph, &self.chunk_graph);
+        }
+    }
+
+    fn create_module_hashes(&mut self) {
+        let hashes = self
+            .module_graph
+            .modules()
+            .iter()
+            .filter(|module| !self.chunk_graph.module_chunks(module.handle()).is_empty())
+            .map(|module| {
+                let module_hash = if let Some(cache) = &self.module_computation_cache {
+                    if let Some(module_hash) = cache.get_module_hash(module.identity()) {
+                        module_hash
+                    } else {
+                        let module_hash =
+                            compute_module_hash(module, &self.module_graph, &self.chunk_graph);
+                        cache.store_module_hash(module.identity(), module_hash);
+                        module_hash
+                    }
+                } else {
+                    compute_module_hash(module, &self.module_graph, &self.chunk_graph)
+                };
+                (module.handle(), module_hash)
+            })
+            .collect::<Vec<_>>();
+        for (module, module_hash) in hashes {
+            self.chunk_graph.set_module_hash(module, module_hash);
+        }
     }
 
     pub fn create_assets(&mut self) {
@@ -327,9 +370,28 @@ impl Compilation {
             .as_ref()
             .expect("code generation results should exist before Runtime Requirements processing")
             .runtime_requirements()
-            .map(|(module, requirements)| (module, *requirements))
+            .map(|(module, requirements)| {
+                let processed = if let Some(cache) = &self.module_computation_cache {
+                    let identity = self
+                        .module_graph
+                        .module(module)
+                        .expect("a Code Generation Result must reference an existing Module")
+                        .identity();
+                    if let Some(processed) = cache.get_runtime_requirements(identity) {
+                        processed
+                    } else {
+                        let processed = resolve_runtime_modules(requirements).0;
+                        cache.store_runtime_requirements(identity, processed);
+                        processed
+                    }
+                } else {
+                    resolve_runtime_modules(requirements).0
+                };
+                (module, processed)
+            })
             .collect::<Vec<_>>();
-        self.chunk_graph.process_runtime_requirements(requirements);
+        self.chunk_graph
+            .set_module_runtime_requirements(requirements);
     }
 
     fn log_infrastructure(
@@ -343,6 +405,43 @@ impl Compilation {
                 .push(InfrastructureLogEvent::new(level, name, message));
         }
     }
+}
+
+fn compute_module_hash(
+    module: &crate::Module,
+    module_graph: &ModuleGraph,
+    chunk_graph: &ChunkGraph,
+) -> ModuleHash {
+    let mut hasher = StableHasher::default();
+    hasher.write(b"unpack/module/hash/1");
+    module.identity().module_type.hash(&mut hasher);
+    module.source_hash().hash(&mut hasher);
+    module
+        .build_error()
+        .map(ToString::to_string)
+        .hash(&mut hasher);
+    module.is_harmony().hash(&mut hasher);
+    module
+        .code_generation_local_input_digest()
+        .hash(&mut hasher);
+    for dependency in module
+        .presentational_dependencies()
+        .iter()
+        .chain(module.dependencies())
+        .chain(
+            module
+                .blocks()
+                .iter()
+                .flat_map(|block| block.dependencies()),
+        )
+    {
+        dependency.update_code_generation_hash(module.exports_info(), &mut hasher);
+    }
+    let references = chunk_graph.module_references(module_graph, module.handle());
+    references.module_render_id.hash(&mut hasher);
+    references.outgoing_module_render_ids.hash(&mut hasher);
+    references.block_chunk_render_ids.hash(&mut hasher);
+    ModuleHash::new(hasher.finish())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

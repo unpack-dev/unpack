@@ -1120,9 +1120,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 0,
                 provided_exports_misses: 3,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 0,
                 static_reachable_misses: 1,
+                runtime_requirements_hits: 0,
+                runtime_requirements_misses: 3,
+                module_hash_hits: 0,
+                module_hash_misses: 3,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
 
@@ -1136,9 +1141,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 3,
                 provided_exports_misses: 3,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 1,
                 static_reachable_misses: 1,
+                runtime_requirements_hits: 3,
+                runtime_requirements_misses: 3,
+                module_hash_hits: 3,
+                module_hash_misses: 3,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
 
@@ -1159,11 +1169,227 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 4,
                 provided_exports_misses: 5,
-                invalidated_modules: 2,
+                pre_chunk_graph_invalidated_modules: 2,
                 static_reachable_hits: 1,
                 static_reachable_misses: 2,
+                runtime_requirements_hits: 4,
+                runtime_requirements_misses: 5,
+                module_hash_hits: 4,
+                module_hash_misses: 5,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_unaffected_reuses_chunk_graph_dependent_module_computations()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(
+            temp.path().join("index.js"),
+            "import { value } from './dep'; export const result = value;",
+        )?;
+        write(temp.path().join("dep.js"), "export const value = 1;")?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache.cache_unaffected = true;
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        let first_hashes = module_hashes_by_identity(&first);
+        assert_eq!(first_hashes.len(), 2);
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("cacheUnaffected should create a Module Computation Cache")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 0,
+                provided_exports_misses: 2,
+                pre_chunk_graph_invalidated_modules: 0,
+                static_reachable_hits: 0,
+                static_reachable_misses: 1,
+                runtime_requirements_hits: 0,
+                runtime_requirements_misses: 2,
+                module_hash_hits: 0,
+                module_hash_misses: 2,
+                post_id_assignment_invalidated_modules: 0,
+            }
+        );
+
+        let second = compiler.run().await?;
+        assert_eq!(module_hashes_by_identity(&second), first_hashes);
+        assert_eq!(asset_sources(&second), asset_sources(&first));
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("the Module Computation Cache should remain Compiler-owned")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 2,
+                provided_exports_misses: 2,
+                pre_chunk_graph_invalidated_modules: 0,
+                static_reachable_hits: 1,
+                static_reachable_misses: 1,
+                runtime_requirements_hits: 2,
+                runtime_requirements_misses: 2,
+                module_hash_hits: 2,
+                module_hash_misses: 2,
+                post_id_assignment_invalidated_modules: 0,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_unaffected_invalidates_post_id_assignment_memos_when_async_chunk_ids_change()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let entry_path = temp.path().join("index.js");
+        write(
+            &entry_path,
+            "import { load } from './stable'; export const result = load;",
+        )?;
+        write(
+            temp.path().join("stable.js"),
+            "export const load = () => import('./a-b');",
+        )?;
+        write(temp.path().join("a-b.js"), "export const value = 'first';")?;
+        write(temp.path().join("a_b.js"), "export const value = 'second';")?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache.cache_unaffected = true;
+        options.snapshot.module = crate::SnapshotStrategy::hash();
+        let cold_options = options.clone();
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        let first_hashes = module_hashes_by_identity(&first);
+        let stable_hash = hash_for_filename(&first_hashes, "stable.js");
+        let async_module_hash = hash_for_filename(&first_hashes, "a-b.js");
+
+        write(
+            &entry_path,
+            "import { load } from './stable'; import('./a_b'); export const result = load;",
+        )?;
+        let second = compiler.run().await?;
+        let second_hashes = module_hashes_by_identity(&second);
+
+        assert_ne!(
+            hash_for_filename(&second_hashes, "stable.js"),
+            stable_hash,
+            "the stable Module Hash must change when its async block receives a new Chunk ID"
+        );
+        assert_eq!(
+            hash_for_filename(&second_hashes, "a-b.js"),
+            async_module_hash,
+            "the async target's Module Hash remains stable when only its containing Chunk changes"
+        );
+        let stats = compiler
+            .module_computation_cache
+            .as_ref()
+            .expect("cacheUnaffected should create a Module Computation Cache")
+            .stats();
+        assert_eq!(stats.post_id_assignment_invalidated_modules, 2);
+        assert_eq!(stats.runtime_requirements_hits, 0);
+        assert_eq!(stats.runtime_requirements_misses, 7);
+        assert_eq!(stats.module_hash_hits, 0);
+        assert_eq!(stats.module_hash_misses, 7);
+        assert_eq!(second.errors(), []);
+        let cold = Compiler::new(cold_options).run().await?;
+        assert_eq!(asset_sources(&second), asset_sources(&cold));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_unaffected_invalidates_post_id_assignment_memos_when_used_exports_change()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let entry_path = temp.path().join("index.js");
+        write(
+            &entry_path,
+            "import { a } from './dep'; export const result = a;",
+        )?;
+        write(
+            temp.path().join("dep.js"),
+            "export const a = 'a'; export const b = 'b';",
+        )?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache.cache_unaffected = true;
+        options.snapshot.module = crate::SnapshotStrategy::hash();
+        let cold_options = options.clone();
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        let first_hashes = module_hashes_by_identity(&first);
+        let dep_hash = hash_for_filename(&first_hashes, "dep.js");
+
+        write(
+            &entry_path,
+            "import { b } from './dep'; export const result = b;",
+        )?;
+        let second = compiler.run().await?;
+        let second_hashes = module_hashes_by_identity(&second);
+
+        assert_ne!(
+            hash_for_filename(&second_hashes, "dep.js"),
+            dep_hash,
+            "a Module Hash must cover the Exports Info that changes generated code"
+        );
+        let stats = compiler
+            .module_computation_cache
+            .as_ref()
+            .expect("cacheUnaffected should create a Module Computation Cache")
+            .stats();
+        assert_eq!(stats.post_id_assignment_invalidated_modules, 1);
+        assert_eq!(stats.module_hash_hits, 0);
+        assert_eq!(stats.module_hash_misses, 4);
+        assert_eq!(second.errors(), []);
+        let cold = Compiler::new(cold_options).run().await?;
+        assert_eq!(asset_sources(&second), asset_sources(&cold));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_unaffected_invalidates_post_id_assignment_memos_when_chunk_membership_changes()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let entry_path = temp.path().join("index.js");
+        write(&entry_path, "import('./stable');")?;
+        write(temp.path().join("stable.js"), "console.log('stable');")?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache.cache_unaffected = true;
+        options.snapshot.module = crate::SnapshotStrategy::hash();
+        options.used_exports = false;
+        let cold_options = options.clone();
+        let compiler = Compiler::new(options);
+
+        compiler.run().await?;
+        write(&entry_path, "import './stable';")?;
+        let second = compiler.run().await?;
+
+        let stats = compiler
+            .module_computation_cache
+            .as_ref()
+            .expect("cacheUnaffected should create a Module Computation Cache")
+            .stats();
+        assert_eq!(stats.post_id_assignment_invalidated_modules, 1);
+        assert_eq!(stats.runtime_requirements_hits, 0);
+        assert_eq!(stats.runtime_requirements_misses, 4);
+        assert_eq!(stats.module_hash_hits, 0);
+        assert_eq!(stats.module_hash_misses, 4);
+        assert_eq!(second.errors(), []);
+        let cold = Compiler::new(cold_options).run().await?;
+        assert_eq!(asset_sources(&second), asset_sources(&cold));
 
         Ok(())
     }
@@ -1197,9 +1423,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 2,
                 provided_exports_misses: 2,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 1,
                 static_reachable_misses: 1,
+                runtime_requirements_hits: 2,
+                runtime_requirements_misses: 2,
+                module_hash_hits: 2,
+                module_hash_misses: 2,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
         assert_eq!(compiler.cache.stats().module_entries, 0);
@@ -1230,9 +1461,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 0,
                 provided_exports_misses: 2,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 0,
                 static_reachable_misses: 1,
+                runtime_requirements_hits: 0,
+                runtime_requirements_misses: 2,
+                module_hash_hits: 0,
+                module_hash_misses: 2,
+                post_id_assignment_invalidated_modules: 0,
             },
             "Module Computation memos must not be restored from PackFile"
         );
@@ -1910,6 +2146,35 @@ mod tests {
             .iter()
             .map(|asset| (asset.filename.clone(), asset.source.clone()))
             .collect()
+    }
+
+    fn module_hashes_by_identity(
+        compilation: &Compilation,
+    ) -> BTreeMap<String, crate::chunk_graph::ModuleHash> {
+        compilation
+            .module_graph()
+            .modules()
+            .iter()
+            .map(|module| {
+                (
+                    module.identity().resource.display().to_string(),
+                    compilation
+                        .chunk_graph()
+                        .module_hash(module.handle())
+                        .expect("every built Module should have a Module Hash"),
+                )
+            })
+            .collect()
+    }
+
+    fn hash_for_filename(
+        hashes: &BTreeMap<String, crate::chunk_graph::ModuleHash>,
+        filename: &str,
+    ) -> crate::chunk_graph::ModuleHash {
+        hashes
+            .iter()
+            .find_map(|(identity, hash)| identity.ends_with(filename).then_some(*hash))
+            .unwrap_or_else(|| panic!("expected a Module Hash for {filename}"))
     }
 
     fn directory_snapshot(root: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {

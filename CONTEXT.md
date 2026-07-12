@@ -176,6 +176,10 @@ _Avoid_: Asset, rendered bundle, compilation result
 The deterministic phase that assigns readable named Render IDs to modules and chunks, using stable identities and collision handling before code generation.
 _Avoid_: Filename generation, incidental map index
 
+**Module Hash**:
+A per-module digest of output-sensitive build, export, and Chunk Graph inputs recorded after ID Assignment for later compilation phases and in-process reuse.
+_Avoid_: Source hash, Cache ETag
+
 **Export Binding**:
 A generated runtime binding that exposes an ECMAScript module export through a getter so importers observe the current exported value.
 _Avoid_: Export snapshot, CommonJS export assignment
@@ -291,6 +295,18 @@ _Avoid_: Cache backend, cache implementation
 **Memory Cache**:
 A Build Cache layer held within one Compiler process for reuse during that Compiler's lifetime.
 _Avoid_: Persistent Cache, module graph reuse
+
+**Module Computation Cache**:
+Compiler-owned in-process memoization for graph-derived computations on unaffected Modules, separate from Build Cache layers and Persistent Cache.
+_Avoid_: Memory Cache, Module Build Record
+
+**Pre-Chunk-Graph Module Computation Entry**:
+The part of one Module Computation Cache entry validated after Module Graph construction and before `finishModules` and Chunk Graph construction, corresponding to webpack's `moduleMemCaches` computations.
+_Avoid_: Post-ID-Assignment Module Computation Entry, Module Build Record
+
+**Post-ID-Assignment Module Computation Entry**:
+The later part of one Module Computation Cache entry validated from assigned Render IDs and Chunk Graph references, corresponding to webpack's `moduleMemCaches2` computations.
+_Avoid_: Pre-Chunk-Graph Module Computation Entry, Code Generation Record
 
 **Cache Facade**:
 A scoped access point to the build cache for one compiler subsystem or cache item family.

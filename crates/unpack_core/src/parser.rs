@@ -10,13 +10,15 @@ use crate::{
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Result,
     SourceRange,
 };
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use swc_experimental_allocator::Allocator;
 use swc_experimental_allocator::atom::Wtf8Atom;
 use swc_experimental_ecma_ast::{
-    ArrowExpr, BindingIdent, BlockStmt, CallExpr, Callee, ClassDecl, ClassExpr, Decl, DefaultDecl,
-    EsVersion, ExportSpecifier, Expr, FnDecl, FnExpr, Function, Ident, Lit, Module, ModuleDecl,
-    ModuleExportName, ModuleItem, Pat, Prop, Str, Tpl, VarDeclarator, Visit, VisitWith,
+    ArrowExpr, AssignExpr, AwaitExpr, BindingIdent, BlockStmt, CallExpr, Callee, ClassDecl,
+    ClassExpr, Decl, DefaultDecl, EsVersion, ExportSpecifier, Expr, FnDecl, FnExpr, Function,
+    Ident, Lit, Module, ModuleDecl, ModuleExportName, ModuleItem, NewExpr, Pat, Prop, Stmt, Str,
+    TaggedTpl, Tpl, UpdateExpr, VarDeclarator, Visit, VisitWith, YieldExpr,
 };
 use swc_experimental_ecma_parser::{EsSyntax, Syntax, parse_file_as_module};
 
@@ -39,6 +41,166 @@ struct ImportBinding {
 
 pub(crate) fn parse_module_dependencies(path: &Path, source: &str) -> Result<ParsedModule> {
     parse_module_dependencies_sync(path, source)
+}
+
+pub(crate) fn source_is_side_effect_free(path: &Path, source: &str) -> bool {
+    let allocator = Allocator::new();
+    let Ok(module) = parse_file_as_module(
+        &allocator,
+        source,
+        syntax_for_path(path),
+        EsVersion::EsNext,
+        None,
+    ) else {
+        return false;
+    };
+
+    let pure_functions = no_side_effects_functions(source);
+    module
+        .body
+        .iter()
+        .all(|item| module_item_is_side_effect_free(item, &pure_functions))
+}
+
+fn module_item_is_side_effect_free(
+    item: &ModuleItem<'_>,
+    pure_functions: &HashSet<String>,
+) -> bool {
+    match item {
+        ModuleItem::ModuleDecl(declaration) => match &**declaration {
+            ModuleDecl::Import(_) | ModuleDecl::ExportAll(_) | ModuleDecl::ExportNamed(_) => true,
+            ModuleDecl::ExportDecl(declaration) => {
+                declaration_is_side_effect_free(&declaration.decl, pure_functions)
+            }
+            ModuleDecl::ExportDefaultDecl(declaration) => match &declaration.decl {
+                DefaultDecl::Fn(_) => true,
+                DefaultDecl::Class(class) => {
+                    let mut visitor = SideEffectsVisitor::new(pure_functions);
+                    class.visit_with(&mut visitor);
+                    !visitor.has_side_effects
+                }
+            },
+            ModuleDecl::ExportDefaultExpr(expression) => {
+                expression_is_side_effect_free(&expression.expr, pure_functions)
+            }
+        },
+        ModuleItem::Stmt(statement) => match &**statement {
+            Stmt::Empty(_) => true,
+            Stmt::Decl(declaration) => declaration_is_side_effect_free(declaration, pure_functions),
+            Stmt::Expr(expression) => {
+                expression_is_side_effect_free(&expression.expr, pure_functions)
+            }
+            _ => false,
+        },
+    }
+}
+
+fn declaration_is_side_effect_free(
+    declaration: &Decl<'_>,
+    pure_functions: &HashSet<String>,
+) -> bool {
+    if matches!(declaration, Decl::Fn(_)) {
+        return true;
+    }
+    let mut visitor = SideEffectsVisitor::new(pure_functions);
+    declaration.visit_with(&mut visitor);
+    !visitor.has_side_effects
+}
+
+fn expression_is_side_effect_free(expression: &Expr<'_>, pure_functions: &HashSet<String>) -> bool {
+    let mut visitor = SideEffectsVisitor::new(pure_functions);
+    expression.visit_with(&mut visitor);
+    !visitor.has_side_effects
+}
+
+struct SideEffectsVisitor<'names> {
+    has_side_effects: bool,
+    pure_functions: &'names HashSet<String>,
+}
+
+impl<'names> SideEffectsVisitor<'names> {
+    fn new(pure_functions: &'names HashSet<String>) -> Self {
+        Self {
+            has_side_effects: false,
+            pure_functions,
+        }
+    }
+}
+
+impl<'a> Visit<'a> for SideEffectsVisitor<'_> {
+    fn visit_arrow_expr(&mut self, _: &ArrowExpr<'a>) {}
+
+    fn visit_function(&mut self, _: &Function<'a>) {}
+
+    fn visit_fn_expr(&mut self, _: &FnExpr<'a>) {}
+
+    fn visit_call_expr(&mut self, expression: &CallExpr<'a>) {
+        let is_pure = match &expression.callee {
+            Callee::Expr(callee) => match &**callee {
+                Expr::Ident(identifier) => {
+                    self.pure_functions.contains(&ident_to_string(identifier))
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if !is_pure {
+            self.has_side_effects = true;
+            return;
+        }
+        for argument in expression.args.iter() {
+            argument.expr.visit_with(self);
+        }
+    }
+
+    fn visit_new_expr(&mut self, _: &NewExpr<'a>) {
+        self.has_side_effects = true;
+    }
+
+    fn visit_assign_expr(&mut self, _: &AssignExpr<'a>) {
+        self.has_side_effects = true;
+    }
+
+    fn visit_update_expr(&mut self, _: &UpdateExpr<'a>) {
+        self.has_side_effects = true;
+    }
+
+    fn visit_await_expr(&mut self, _: &AwaitExpr<'a>) {
+        self.has_side_effects = true;
+    }
+
+    fn visit_yield_expr(&mut self, _: &YieldExpr<'a>) {
+        self.has_side_effects = true;
+    }
+
+    fn visit_tagged_tpl(&mut self, _: &TaggedTpl<'a>) {
+        self.has_side_effects = true;
+    }
+}
+
+fn no_side_effects_functions(source: &str) -> HashSet<String> {
+    let annotation = r"/\*[#@]__NO_SIDE_EFFECTS__\*/";
+    let identifier = r"([A-Za-z_$][A-Za-z0-9_$]*)";
+    let before_declaration = Regex::new(&format!(
+        r"(?s){annotation}\s*(?:function\s+{identifier}|(?:const|let|var)\s+{identifier})"
+    ))
+    .expect("NO_SIDE_EFFECTS declaration regex must compile");
+    let inside_initializer = Regex::new(&format!(
+        r"(?s)(?:const|let|var)\s+{identifier}\s*=\s*{annotation}"
+    ))
+    .expect("NO_SIDE_EFFECTS initializer regex must compile");
+    let mut names = HashSet::new();
+    for captures in before_declaration.captures_iter(source) {
+        if let Some(name) = captures.get(1).or_else(|| captures.get(2)) {
+            names.insert(name.as_str().to_string());
+        }
+    }
+    for captures in inside_initializer.captures_iter(source) {
+        if let Some(name) = captures.get(1) {
+            names.insert(name.as_str().to_string());
+        }
+    }
+    names
 }
 
 fn parse_module_dependencies_sync(path: &Path, source: &str) -> Result<ParsedModule> {

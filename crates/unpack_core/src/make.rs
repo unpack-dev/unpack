@@ -197,7 +197,8 @@ pub(crate) async fn run(
             options.snapshot.resolve,
             snapshot_cache.clone(),
         )
-        .with_module_rules(options.module_rules.clone()),
+        .with_module_rules(options.module_rules.clone())
+        .with_side_effects(options.side_effects != crate::SideEffectsOption::Disabled),
         module_build_cache: build_cache.module_builds(),
         file_system_info,
         module_snapshot_strategy: options.snapshot.module,
@@ -379,6 +380,7 @@ impl AddTask {
                 let identity = factorized.identity;
                 let resource = factorized.resource;
                 let loader = factorized.loader;
+                let side_effect_free = factorized.side_effect_free;
                 let add_result = {
                     let mut state = state.lock().await;
                     state
@@ -390,7 +392,12 @@ impl AddTask {
                     state
                         .missing_dependencies
                         .extend(factorized.missing_dependencies.iter().cloned());
-                    state.add_or_connect(self.origin_module, self.dependencies, identity.clone())
+                    state.add_or_connect(
+                        self.origin_module,
+                        self.dependencies,
+                        identity.clone(),
+                        side_effect_free,
+                    )
                 };
 
                 if !add_result.is_new {
@@ -414,7 +421,7 @@ impl AddTask {
                 let mut state = state.lock().await;
                 state.missing_dependencies.insert(identity.resource.clone());
                 let add_result =
-                    state.add_or_connect(self.origin_module, self.dependencies, identity);
+                    state.add_or_connect(self.origin_module, self.dependencies, identity, None);
                 state.fail_module(add_result.module_handle, error, String::new())?;
                 Ok(Vec::new())
             }
@@ -728,12 +735,16 @@ impl MakeState {
         origin_module: Option<ModuleHandle>,
         dependencies: Vec<QueuedDependency>,
         identity: ModuleIdentity,
+        side_effect_free: Option<bool>,
     ) -> AddModuleResult {
         let (module_handle, is_new) =
             if let Some(module_handle) = self.modules_by_identity.get(&identity).copied() {
                 (module_handle, false)
             } else {
                 let module_handle = self.module_graph.add_module(identity.clone());
+                if let Some(module) = self.module_graph.module_mut(module_handle) {
+                    module.set_factory_side_effect_free(side_effect_free);
+                }
                 self.modules_by_identity.insert(identity, module_handle);
                 (module_handle, true)
             };

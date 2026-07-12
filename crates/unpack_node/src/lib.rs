@@ -69,6 +69,8 @@ pub struct NativeCompilerOptions {
     pub provided_exports: bool,
     #[napi(js_name = "usedExports")]
     pub used_exports: bool,
+    #[napi(js_name = "sideEffects")]
+    pub side_effects: String,
     #[napi(js_name = "moduleRules")]
     pub module_rules: Vec<NativeModuleRule>,
 }
@@ -78,6 +80,8 @@ pub struct NativeModuleRule {
     pub test: String,
     pub loader: String,
     pub options: String,
+    #[napi(js_name = "sideEffects")]
+    pub side_effects: Option<bool>,
 }
 
 #[napi(object)]
@@ -558,13 +562,25 @@ impl NativeCompiler {
         compiler_options.sourcemap = options.sourcemap;
         compiler_options.provided_exports = options.provided_exports;
         compiler_options.used_exports = options.used_exports;
+        compiler_options.side_effects = match options.side_effects.as_str() {
+            "disabled" => unpack_core::SideEffectsOption::Disabled,
+            "flag" => unpack_core::SideEffectsOption::Flag,
+            "analyze" => unpack_core::SideEffectsOption::Analyze,
+            value => {
+                return Err(napi::Error::from_reason(format!(
+                    "options.optimization.sideEffects: unknown normalized value {value:?}"
+                )));
+            }
+        };
         compiler_options.module_rules = options
             .module_rules
             .into_iter()
             .map(|rule| {
-                ModuleRule::new(&rule.test, rule.loader, rule.options).map_err(|error| {
-                    napi::Error::from_reason(format!("options.module.rules[0].test: {error}"))
-                })
+                ModuleRule::new(&rule.test, rule.loader, rule.options)
+                    .map(|module_rule| module_rule.with_side_effects(rule.side_effects))
+                    .map_err(|error| {
+                        napi::Error::from_reason(format!("options.module.rules[0].test: {error}"))
+                    })
             })
             .collect::<Result<Vec<_>>>()?;
         compiler_options.loader_runner = loader_callback

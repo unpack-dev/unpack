@@ -21,4 +21,26 @@ pub struct ModuleGraphConnection {
     pub origin_dependency_index: Option<DependencyIndex>,
     pub dependency: Dependency,
     pub module: ModuleHandle,
+    pub(crate) state: ModuleGraphConnectionState,
+}
+
+impl ModuleGraphConnection {
+    pub fn state(&self) -> ModuleGraphConnectionState {
+        self.state
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.state != ModuleGraphConnectionState::Inactive
+    }
+
+    pub(crate) fn set_state(&mut self, state: ModuleGraphConnectionState) {
+        self.state = state;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleGraphConnectionState {
+    Active,
+    Inactive,
+    Circular,
 }

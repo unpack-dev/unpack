@@ -34,6 +34,215 @@ test("emits assets through the ESM default API", async () => {
   }
 });
 
+// Ported from webpack 5.108.1's optimization side-effects cases: disabling
+// optimization.sideEffects must preserve evaluation of unused package modules.
+test("optimization.sideEffects false preserves unused side-effect-free modules", async () => {
+  const fixture = await createFixture({
+    "package.json": JSON.stringify({ sideEffects: false }),
+    "src/index.js": "import { used } from './barrel'; export const result = used;",
+    "src/barrel.js": "export { used } from './used'; export { unused } from './unused';",
+    "src/used.js": "export const used = 42;",
+    "src/unused.js": "globalThis.__unused_module_evaluated__ = true; export const unused = 0;"
+  });
+  const outputPath = join(fixture, "dist");
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      output: { path: outputPath },
+      sourcemap: false,
+      optimization: { sideEffects: false }
+    });
+
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+    assert.match(await readFile(join(outputPath, "main.js"), "utf8"), /__unused_module_evaluated__/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+// Ported from webpack 5.108.1 SideEffectsFlagPlugin's `analyseSource` split.
+test("optimization.sideEffects distinguishes source analysis from flag-only mode", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { used } from './barrel'; export const result = used;",
+    "src/barrel.js": "export { used } from './used'; export { unused } from './unused';",
+    "src/used.js": "export const used = 42;",
+    "src/unused.js": [
+      "const deferred = () => globalThis.DEFERRED_FUNCTION_BODY;",
+      "class Deferred { method() { return globalThis.DEFERRED_CLASS_METHOD; } }",
+      "export const UNUSED_SOURCE_ANALYSIS_MARKER = [deferred, Deferred];",
+      "export const unused = 0;"
+    ].join("\n")
+  });
+
+  try {
+    for (const [sideEffects, markerExpected] of [[true, false], ["flag", true]] as const) {
+      const outputPath = join(fixture, `dist-${sideEffects}`);
+      const { err, stats } = await runCompiler({
+        context: fixture,
+        mode: "none",
+        entry: "./src/index.js",
+        output: { path: outputPath },
+        sourcemap: false,
+        optimization: { usedExports: true, sideEffects }
+      });
+      assert.equal(err, null);
+      assert.equal(stats?.hasErrors(), false);
+      const source = await readFile(join(outputPath, "main.js"), "utf8");
+      assert.equal(source.includes("UNUSED_SOURCE_ANALYSIS_MARKER"), markerExpected);
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+// Ported from webpack 5.108.1:
+// test/configCases/side-effects/side-effects-values
+test("package sideEffects patterns retain matching modules and skip other unused modules", async () => {
+  const fixture = await createFixture({
+    "package.json": JSON.stringify({ sideEffects: ["./src/kept.js"] }),
+    "src/index.js": "import { used } from './barrel'; export const result = used;",
+    "src/barrel.js": [
+      "export { used } from './used';",
+      "export { kept } from './kept';",
+      "export { dropped } from './dropped';"
+    ].join("\n"),
+    "src/used.js": "export const used = 42;",
+    "src/kept.js": "globalThis.KEPT_PATTERN_MARKER = true; export const kept = 1;",
+    "src/dropped.js": "globalThis.DROPPED_PATTERN_MARKER = true; export const dropped = 2;"
+  });
+  const outputPath = join(fixture, "dist");
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      mode: "none",
+      entry: "./src/index.js",
+      output: { path: outputPath },
+      sourcemap: false,
+      optimization: { usedExports: true, sideEffects: "flag" }
+    });
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+    const source = await readFile(join(outputPath, "main.js"), "utf8");
+    assert.match(source, /KEPT_PATTERN_MARKER/);
+    assert.doesNotMatch(source, /DROPPED_PATTERN_MARKER/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+// Ported from webpack 5.108.1:
+// test/configCases/side-effects/no-side-effects-annotation
+test("NO_SIDE_EFFECTS annotations make calls to annotated functions removable", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import './pure'; export const result = 42;",
+    "src/pure.js": [
+      "/*#__NO_SIDE_EFFECTS__*/ function fn1(value) { return value; }",
+      "/*@__NO_SIDE_EFFECTS__*/ const fn2 = value => value;",
+      "var fn3 = /*@__NO_SIDE_EFFECTS__*/ value => value;",
+      "fn1(1); fn2(2); fn3(3);",
+      "export const ANNOTATED_PURE_MODULE_MARKER = true;"
+    ].join("\n")
+  });
+  const outputPath = join(fixture, "dist");
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      output: { path: outputPath },
+      sourcemap: false,
+      optimization: { usedExports: true, sideEffects: true }
+    });
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+    assert.doesNotMatch(
+      await readFile(join(outputPath, "main.js"), "utf8"),
+      /ANNOTATED_PURE_MODULE_MARKER/
+    );
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+// Ported from webpack 5.108.1:
+// test/cases/optimize/side-effects-all-chain-unused
+test("side-effect-free re-export chains redirect imports to the providing module", async () => {
+  const fixture = await createFixture({
+    "package.json": JSON.stringify({ sideEffects: false }),
+    "src/index.js": "import { value } from './barrel-a'; export const result = value;",
+    "src/barrel-a.js": [
+      "globalThis.BARREL_A_MARKER = true;",
+      "export { value } from './barrel-b';"
+    ].join("\n"),
+    "src/barrel-b.js": [
+      "globalThis.BARREL_B_MARKER = true;",
+      "export { value } from './leaf';"
+    ].join("\n"),
+    "src/leaf.js": "export const value = 42;"
+  });
+  const outputPath = join(fixture, "dist");
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      output: { path: outputPath },
+      sourcemap: false
+    });
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+    const source = await readFile(join(outputPath, "main.js"), "utf8");
+    assert.doesNotMatch(source, /BARREL_A_MARKER/);
+    assert.doesNotMatch(source, /BARREL_B_MARKER/);
+    assert.match(source, /const value = 42/);
+    const entry = (await import(`${join(outputPath, "main.js")}?tree-shaking`)).default as {
+      result: number;
+    };
+    assert.equal(entry.result, 42);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+// Ported from webpack 5.108.1:
+// test/configCases/side-effects/side-effects-override
+test("module rule sideEffects overrides package sideEffects metadata", async () => {
+  const fixture = await createFixture({
+    "package.json": JSON.stringify({ sideEffects: false }),
+    "pass-through.cjs": "module.exports = source => source;",
+    "src/index.js": "import { used } from './barrel'; export const result = used;",
+    "src/barrel.js": "export { used } from './used'; export { unused } from './unused';",
+    "src/used.js": "export const used = 42;",
+    "src/unused.js": "globalThis.RULE_SIDE_EFFECTS_MARKER = true; export const unused = 0;"
+  });
+  const outputPath = join(fixture, "dist");
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      output: { path: outputPath },
+      sourcemap: false,
+      module: {
+        rules: [{
+          test: /unused\.js$/,
+          loader: join(fixture, "pass-through.cjs"),
+          sideEffects: true
+        }]
+      }
+    });
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+    assert.match(await readFile(join(outputPath, "main.js"), "utf8"), /RULE_SIDE_EFFECTS_MARKER/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("Stats.toJson returns an isolated baseline snapshot", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 42;"

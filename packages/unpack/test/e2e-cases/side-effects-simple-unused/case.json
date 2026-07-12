@@ -1,0 +1,9 @@
+{
+  "runtimeExpression": "entry.result",
+  "expected": {
+    "defaultName": "def",
+    "x": "x",
+    "z": "z",
+    "log": ["b.js", "c.js", "index.js"]
+  }
+}

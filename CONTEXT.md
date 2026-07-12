@@ -61,7 +61,7 @@ A webpack-shaped behavior, API, option, runtime helper, or internal compilation 
 _Avoid_: Future feature surface, proposed webpack surface
 
 **Webpack Internal Alignment**:
-The expectation that Unpack's internal bundler concepts use webpack names, phase ordering, responsibility boundaries, and source-layout boundaries where practical, while allowing Rust-native traits, enums, ownership, concurrency, dense handles, indexed storage, and bit sets. Implemented concepts should remain easy to locate from webpack's layout, but JavaScript object shapes, class inheritance, one-file-per-class structure, and hook storage should only be copied when they affect exposed plugin or loader behavior.
+The expectation that Unpack's internal bundler concepts use webpack names, phase ordering, responsibility boundaries, and source-layout boundaries where practical, while allowing Rust-native traits, enums, ownership, concurrency, dense handles, indexed storage, and bit sets. Implemented webpack units should map to the corresponding directory level and separate file boundary unless a documented Rust constraint requires otherwise. JavaScript object shapes, class inheritance, and hook storage should only be copied when they affect exposed plugin or loader behavior.
 _Avoid_: Rust-only terminology, unrelated source layout, copying webpack JavaScript classes by default
 
 **Mode**:

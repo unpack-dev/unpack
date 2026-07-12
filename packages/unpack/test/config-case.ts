@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, cp, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -34,6 +34,13 @@ interface TestCase {
   name: string;
   sourcePath: string;
   compiledPath: string;
+  skip?: TestCaseSkip;
+}
+
+interface TestCaseSkip {
+  issue: string;
+  reason: string;
+  upstream: string;
 }
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
@@ -47,9 +54,13 @@ export async function registerConfigCases(): Promise<void> {
   assert.notEqual(cases.length, 0, "expected at least one test case");
 
   for (const testCase of cases) {
-    test(`config case ${testCase.category}/${testCase.name}`, async () => {
-      await runCase(testCase);
-    });
+    test(
+      `config case ${testCase.category}/${testCase.name}`,
+      { skip: testCase.skip && `${testCase.skip.reason} (${testCase.skip.issue})` },
+      async () => {
+        await runCase(testCase);
+      }
+    );
   }
 }
 
@@ -58,16 +69,48 @@ async function discoverConfigCases(): Promise<TestCase[]> {
   const cases = await Promise.all(
     categories.map(async (category) => {
       const names = await readDirectories(join(sourceCasesPath, category));
-      return names.map((name) => ({
-        category,
-        name,
-        sourcePath: join(sourceCasesPath, category, name),
-        compiledPath: join(compiledCasesPath, category, name)
-      }));
+      return Promise.all(
+        names.map(async (name) => {
+          const sourcePath = join(sourceCasesPath, category, name);
+          return {
+            category,
+            name,
+            sourcePath,
+            compiledPath: join(compiledCasesPath, category, name),
+            skip: await readSkipMetadata(sourcePath)
+          };
+        })
+      );
     })
   );
 
   return cases.flat();
+}
+
+async function readSkipMetadata(sourcePath: string): Promise<TestCaseSkip | undefined> {
+  try {
+    const metadata = JSON.parse(
+      await readFile(join(sourcePath, "case.config.json"), "utf8")
+    ) as { skip?: unknown };
+    if (metadata.skip === undefined) return undefined;
+    if (!isTestCaseSkip(metadata.skip)) {
+      throw new TypeError(`invalid skip metadata in ${sourcePath}/case.config.json`);
+    }
+    return metadata.skip;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function isTestCaseSkip(value: unknown): value is TestCaseSkip {
+  if (typeof value !== "object" || value === null) return false;
+  const skip = value as Partial<TestCaseSkip>;
+  return (
+    typeof skip.issue === "string" &&
+    typeof skip.reason === "string" &&
+    typeof skip.upstream === "string"
+  );
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -128,6 +171,13 @@ async function runCase(testCase: TestCase): Promise<void> {
 }
 
 async function loadOptions(testCase: TestCase): Promise<ConfigCaseOptions> {
+  const sourceJavaScriptConfig = join(testCase.sourcePath, "webpack.config.js");
+  if (await fileExists(sourceJavaScriptConfig)) {
+    const optionsModule = (await import(pathToFileURL(sourceJavaScriptConfig).href)) as {
+      default: ConfigCaseOptions;
+    };
+    return optionsModule.default;
+  }
   const optionsModule = (await import(
     pathToFileURL(join(testCase.compiledPath, "webpack.config.js")).href
   )) as { default: ConfigCaseOptions };
@@ -171,7 +221,9 @@ async function copyFixture(sourcePath: string, fixturePath: string): Promise<voi
       .filter(
         (entry) =>
           entry.name !== "webpack.config.ts" &&
+          entry.name !== "webpack.config.js" &&
           entry.name !== "test.config.ts" &&
+          entry.name !== "case.config.json" &&
           entry.name !== "README.md"
       )
       .map((entry) =>

@@ -1,0 +1,1 @@
+{"skip":{"upstream":"https://github.com/web-infra-dev/rspack/tree/main/tests/rspack-test/configCases/plugins/copy-plugin-input-file-system","issue":"https://github.com/unpack-dev/unpack/issues/247","reason":"Compiler.inputFileSystem and beforeCompile are not exposed"}}

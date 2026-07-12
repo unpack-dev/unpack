@@ -1,0 +1,7 @@
+{
+  "skip": {
+    "upstream": "https://github.com/web-infra-dev/rspack/tree/main/tests/rspack-test/configCases/plugins/internal-processAssets",
+    "issue": "https://github.com/unpack-dev/unpack/issues/243",
+    "reason": "compilation.hooks.processAssets and updateAsset are not exposed"
+  }
+}

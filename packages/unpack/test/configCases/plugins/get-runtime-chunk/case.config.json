@@ -1,0 +1,1 @@
+{"skip":{"upstream":"https://github.com/web-infra-dev/rspack/tree/main/tests/rspack-test/configCases/plugins/get-runtime-chunk","issue":"https://github.com/unpack-dev/unpack/issues/244","reason":"Entrypoint.getRuntimeChunk is not exposed"}}

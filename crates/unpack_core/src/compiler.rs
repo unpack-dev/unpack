@@ -1027,14 +1027,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 0,
                 provided_exports_misses: 3,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 0,
                 static_reachable_misses: 1,
                 runtime_requirements_hits: 0,
                 runtime_requirements_misses: 3,
                 module_hash_hits: 0,
                 module_hash_misses: 3,
-                chunk_graph_invalidated_modules: 0,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
 
@@ -1048,14 +1048,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 3,
                 provided_exports_misses: 3,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 1,
                 static_reachable_misses: 1,
                 runtime_requirements_hits: 3,
                 runtime_requirements_misses: 3,
                 module_hash_hits: 3,
                 module_hash_misses: 3,
-                chunk_graph_invalidated_modules: 0,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
 
@@ -1076,14 +1076,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 4,
                 provided_exports_misses: 5,
-                invalidated_modules: 2,
+                pre_chunk_graph_invalidated_modules: 2,
                 static_reachable_hits: 1,
                 static_reachable_misses: 2,
                 runtime_requirements_hits: 4,
                 runtime_requirements_misses: 5,
                 module_hash_hits: 4,
                 module_hash_misses: 5,
-                chunk_graph_invalidated_modules: 0,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
 
@@ -1116,14 +1116,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 0,
                 provided_exports_misses: 2,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 0,
                 static_reachable_misses: 1,
                 runtime_requirements_hits: 0,
                 runtime_requirements_misses: 2,
                 module_hash_hits: 0,
                 module_hash_misses: 2,
-                chunk_graph_invalidated_modules: 0,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
 
@@ -1139,14 +1139,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 2,
                 provided_exports_misses: 2,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 1,
                 static_reachable_misses: 1,
                 runtime_requirements_hits: 2,
                 runtime_requirements_misses: 2,
                 module_hash_hits: 2,
                 module_hash_misses: 2,
-                chunk_graph_invalidated_modules: 0,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
 
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_unaffected_invalidates_second_stage_memos_when_async_chunk_ids_change()
+    async fn cache_unaffected_invalidates_post_id_assignment_memos_when_async_chunk_ids_change()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let entry_path = temp.path().join("index.js");
@@ -1202,7 +1202,7 @@ mod tests {
             .as_ref()
             .expect("cacheUnaffected should create a Module Computation Cache")
             .stats();
-        assert_eq!(stats.chunk_graph_invalidated_modules, 2);
+        assert_eq!(stats.post_id_assignment_invalidated_modules, 2);
         assert_eq!(stats.runtime_requirements_hits, 0);
         assert_eq!(stats.runtime_requirements_misses, 7);
         assert_eq!(stats.module_hash_hits, 0);
@@ -1215,7 +1215,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_unaffected_invalidates_second_stage_memos_when_used_exports_change()
+    async fn cache_unaffected_invalidates_post_id_assignment_memos_when_used_exports_change()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let entry_path = temp.path().join("index.js");
@@ -1255,7 +1255,7 @@ mod tests {
             .as_ref()
             .expect("cacheUnaffected should create a Module Computation Cache")
             .stats();
-        assert_eq!(stats.chunk_graph_invalidated_modules, 1);
+        assert_eq!(stats.post_id_assignment_invalidated_modules, 1);
         assert_eq!(stats.module_hash_hits, 0);
         assert_eq!(stats.module_hash_misses, 4);
         assert_eq!(second.errors(), []);
@@ -1266,7 +1266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_unaffected_invalidates_second_stage_memos_when_chunk_membership_changes()
+    async fn cache_unaffected_invalidates_post_id_assignment_memos_when_chunk_membership_changes()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let entry_path = temp.path().join("index.js");
@@ -1289,7 +1289,7 @@ mod tests {
             .as_ref()
             .expect("cacheUnaffected should create a Module Computation Cache")
             .stats();
-        assert_eq!(stats.chunk_graph_invalidated_modules, 1);
+        assert_eq!(stats.post_id_assignment_invalidated_modules, 1);
         assert_eq!(stats.runtime_requirements_hits, 0);
         assert_eq!(stats.runtime_requirements_misses, 4);
         assert_eq!(stats.module_hash_hits, 0);
@@ -1330,14 +1330,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 2,
                 provided_exports_misses: 2,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 1,
                 static_reachable_misses: 1,
                 runtime_requirements_hits: 2,
                 runtime_requirements_misses: 2,
                 module_hash_hits: 2,
                 module_hash_misses: 2,
-                chunk_graph_invalidated_modules: 0,
+                post_id_assignment_invalidated_modules: 0,
             }
         );
         assert_eq!(compiler.cache.stats().module_entries, 0);
@@ -1368,14 +1368,14 @@ mod tests {
             crate::module_computation_cache::ModuleComputationCacheStats {
                 provided_exports_hits: 0,
                 provided_exports_misses: 2,
-                invalidated_modules: 0,
+                pre_chunk_graph_invalidated_modules: 0,
                 static_reachable_hits: 0,
                 static_reachable_misses: 1,
                 runtime_requirements_hits: 0,
                 runtime_requirements_misses: 2,
                 module_hash_hits: 0,
                 module_hash_misses: 2,
-                chunk_graph_invalidated_modules: 0,
+                post_id_assignment_invalidated_modules: 0,
             },
             "Module Computation memos must not be restored from PackFile"
         );

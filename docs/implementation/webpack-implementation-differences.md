@@ -88,10 +88,11 @@ type, file, or source hierarchy.
 
 Webpack's `moduleMemCaches` and `moduleMemCaches2` use per-Module
 `WeakTupleMap` values. Unpack represents their implemented computations as
-typed slots in one Compiler-owned Module Computation Cache. The second-stage
-slots are validated after ID Assignment from Render IDs, Chunk membership,
-Async Block Chunk references, and Exports Info, and currently have one
-effective runtime rather than webpack's Runtime Spec variants.
+typed Pre-Chunk-Graph and Post-ID-Assignment entries in one Compiler-owned Module
+Computation Cache. The later entries are validated after ID Assignment from
+Render IDs, Chunk membership, Async Block Chunk references, and Exports Info,
+and currently have one effective runtime rather than webpack's Runtime Spec
+variants.
 
 Webpack wires these responsibilities through plugins and Tapable hooks. Unpack
 keeps its existing typed layers, explicit lifecycle methods, and closed Cache

@@ -194,7 +194,7 @@ impl Compilation {
             if result.is_ok()
                 && let Some(cache) = &self.module_computation_cache
             {
-                cache.prepare(&self.module_graph);
+                cache.prepare_before_chunk_graph(&self.module_graph);
             }
 
             if result.is_ok() {
@@ -247,7 +247,7 @@ impl Compilation {
         self.hooks.clone().optimize_dependencies.call(self);
         self.build_chunk_graph();
         self.assign_render_ids();
-        self.prepare_chunk_graph_computation_cache();
+        self.prepare_post_id_assignment_computation_cache();
         self.create_module_hashes();
         self.code_generation();
         self.process_runtime_requirements();
@@ -262,9 +262,9 @@ impl Compilation {
         assign_chunk_render_ids(&self.options, &self.module_graph, &mut self.chunk_graph);
     }
 
-    fn prepare_chunk_graph_computation_cache(&self) {
+    fn prepare_post_id_assignment_computation_cache(&self) {
         if let Some(cache) = &self.module_computation_cache {
-            cache.prepare_chunk_graph(&self.module_graph, &self.chunk_graph);
+            cache.prepare_after_id_assignment(&self.module_graph, &self.chunk_graph);
         }
     }
 

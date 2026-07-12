@@ -38,12 +38,16 @@ interface TestCase {
 }
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
-const sourceCasesPath = join(testDirectory, "..", "..", "test", "configCases");
-const compiledCasesPath = join(testDirectory, "configCases");
+const sourceTestDirectory = join(testDirectory, "..", "..", "test");
 const require = createRequire(import.meta.url);
 
 export async function registerConfigCases(): Promise<void> {
-  const cases = await discoverConfigCases();
+  const cases = (
+    await Promise.all([
+      discoverCases("default", "cases"),
+      discoverCases("config", "configCases")
+    ])
+  ).flat();
 
   assert.notEqual(cases.length, 0, "expected at least one test case");
 
@@ -54,26 +58,23 @@ export async function registerConfigCases(): Promise<void> {
   }
 }
 
-async function discoverConfigCases(): Promise<TestCase[]> {
+async function discoverCases(
+  kind: TestCase["kind"],
+  directory: "cases" | "configCases"
+): Promise<TestCase[]> {
+  const sourceCasesPath = join(sourceTestDirectory, directory);
+  const compiledCasesPath = join(testDirectory, directory);
   const categories = await readDirectories(sourceCasesPath);
   const cases = await Promise.all(
     categories.map(async (category) => {
       const names = await readDirectories(join(sourceCasesPath, category));
-      return Promise.all(
-        names.map(async (name) => {
-          const sourcePath = join(sourceCasesPath, category, name);
-
-          return {
-            category,
-            kind: (await fileExists(join(sourcePath, "webpack.config.ts")))
-              ? ("config" as const)
-              : ("default" as const),
-            name,
-            sourcePath,
-            compiledPath: join(compiledCasesPath, category, name)
-          };
-        })
-      );
+      return names.map((name) => ({
+        category,
+        kind,
+        name,
+        sourcePath: join(sourceCasesPath, category, name),
+        compiledPath: join(compiledCasesPath, category, name)
+      }));
     })
   );
 
@@ -97,7 +98,7 @@ async function readDirectories(path: string): Promise<string[]> {
 }
 
 async function runCase(testCase: TestCase): Promise<void> {
-  const fixturePath = await mkdtemp(join(tmpdir(), "unpack-config-case-"));
+  const fixturePath = await mkdtemp(join(tmpdir(), "unpack-test-case-"));
   const outputPath = join(fixturePath, "dist");
   let compiler: Compiler | undefined;
 

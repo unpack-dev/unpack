@@ -17,7 +17,6 @@ env:
   DEFAULT_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel,turbopack
   NO_TURBOPACK_BENCHMARK_BUNDLERS: unpack,webpack,rspack,rolldown,metro,parcel
   TURBOPACK_CLI_RELEASE_URL: https://github.com/hardfist/bundler-diff/releases/download/turbopack-cli-main/turbopack-cli-linux-x64.tar.gz
-  TURBOPACK_TRACING_PRESET: turbo-tasks
 
 jobs:
   cross-bundler-benchmarks:
@@ -122,8 +121,6 @@ jobs:
             turbopack_args=(
               --turbopack-binary .benchmark-tools/turbopack-cli/turbopack-cli
               --turbopack-commit "$turbopack_commit"
-              --turbopack-tracing "$TURBOPACK_TRACING_PRESET"
-              --turbopack-tracing-dir .benchmark-work/ci/turbopack-traces
             )
           fi
 
@@ -170,8 +167,6 @@ jobs:
               echo "The benchmark did not produce a summary. Check the workflow logs for setup or runner failures."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-          echo >> "$GITHUB_STEP_SUMMARY"
-          echo "Turbopack trace logs, when captured, are uploaded as separate workflow artifacts." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark results
         if: always()
@@ -184,98 +179,6 @@ jobs:
             .benchmark-work/ci/bundler-phase-timings.log
             .benchmark-work/ci/bundler-phase-timings.md
           if-no-files-found: warn
-
-      - name: Upload Turbopack trace large cold
-        id: upload_turbopack_trace_large_cold
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: turbopack-trace-large-cold
-          path: .benchmark-work/ci/turbopack-traces/large/cold/trace.log
-          if-no-files-found: ignore
-
-      - name: Upload Turbopack trace large warm
-        id: upload_turbopack_trace_large_warm
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: turbopack-trace-large-warm
-          path: .benchmark-work/ci/turbopack-traces/large/warm/trace.log
-          if-no-files-found: ignore
-
-      - name: Upload Turbopack trace large no-cache
-        id: upload_turbopack_trace_large_no_cache
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: turbopack-trace-large-no-cache
-          path: .benchmark-work/ci/turbopack-traces/large/no-cache/trace.log
-          if-no-files-found: ignore
-
-      - name: Upload Turbopack trace loader cold
-        id: upload_turbopack_trace_loader_cold
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: turbopack-trace-loader-cold
-          path: .benchmark-work/ci/turbopack-traces/loader/cold/trace.log
-          if-no-files-found: ignore
-
-      - name: Upload Turbopack trace loader warm
-        id: upload_turbopack_trace_loader_warm
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: turbopack-trace-loader-warm
-          path: .benchmark-work/ci/turbopack-traces/loader/warm/trace.log
-          if-no-files-found: ignore
-
-      - name: Upload Turbopack trace loader no-cache
-        id: upload_turbopack_trace_loader_no_cache
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: turbopack-trace-loader-no-cache
-          path: .benchmark-work/ci/turbopack-traces/loader/no-cache/trace.log
-          if-no-files-found: ignore
-
-      - name: Format Turbopack trace artifact links
-        if: always()
-        run: |
-          trace_artifacts_file=".benchmark-work/ci/turbopack-trace-artifacts.md"
-          mkdir -p "$(dirname "$trace_artifacts_file")"
-          artifact_rows_file="$(mktemp)"
-
-          append_artifact() {
-            local fixture="$1"
-            local build="$2"
-            local name="$3"
-            local url="$4"
-            if [ -n "$url" ]; then
-              echo "| $fixture | $build | [$name]($url) |" >> "$artifact_rows_file"
-            fi
-          }
-
-          append_artifact "large" "cold" "turbopack-trace-large-cold" "${{ steps.upload_turbopack_trace_large_cold.outputs['artifact-url'] }}"
-          append_artifact "large" "warm" "turbopack-trace-large-warm" "${{ steps.upload_turbopack_trace_large_warm.outputs['artifact-url'] }}"
-          append_artifact "large" "no-cache" "turbopack-trace-large-no-cache" "${{ steps.upload_turbopack_trace_large_no_cache.outputs['artifact-url'] }}"
-          append_artifact "loader" "cold" "turbopack-trace-loader-cold" "${{ steps.upload_turbopack_trace_loader_cold.outputs['artifact-url'] }}"
-          append_artifact "loader" "warm" "turbopack-trace-loader-warm" "${{ steps.upload_turbopack_trace_loader_warm.outputs['artifact-url'] }}"
-          append_artifact "loader" "no-cache" "turbopack-trace-loader-no-cache" "${{ steps.upload_turbopack_trace_loader_no_cache.outputs['artifact-url'] }}"
-
-          {
-            echo "## Turbopack Trace Artifacts"
-            echo
-            if [ ! -s "$artifact_rows_file" ]; then
-              echo "No Turbopack trace artifacts were uploaded. Check the workflow logs for setup or runner failures."
-            else
-              echo "Each trace log is uploaded as a separate workflow artifact."
-              echo
-              echo "| fixture | build | trace artifact |"
-              echo "| --- | --- | --- |"
-              cat "$artifact_rows_file"
-            fi
-          } > "$trace_artifacts_file"
 
       - name: Comment benchmark summary on PR
         if: always() && github.event_name == 'pull_request'
@@ -301,7 +204,7 @@ jobs:
             echo
             echo "[Workflow run]($RUN_URL)"
             echo
-            echo "Raw JSON results are uploaded as the \`cross-bundler-benchmark-results\` workflow artifact. Turbopack trace logs are uploaded as separate workflow artifacts."
+            echo "Raw JSON results are uploaded as the \`cross-bundler-benchmark-results\` workflow artifact."
           } > "$comment_file"
 
           comment_id="$(
@@ -326,11 +229,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          marker="<!-- unpack-bundler-phase-timings -->"
           trace_summary_file=".benchmark-work/ci/bundler-phase-timings.md"
           comment_file=".benchmark-work/ci/tracing-comment.md"
           mkdir -p "$(dirname "$comment_file")"
 
           {
+            echo "$marker"
             echo "## Bundler Phase Timings"
             echo
             echo "[Workflow run]($RUN_URL)"
@@ -340,11 +245,18 @@ jobs:
             else
               echo "No bundler phase timings were captured. Check the workflow logs for setup or runner failures."
             fi
-            if [ -f .benchmark-work/ci/turbopack-trace-artifacts.md ]; then
-              echo
-              cat .benchmark-work/ci/turbopack-trace-artifacts.md
-            fi
           } > "$comment_file"
 
-          gh api --method POST "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
-            -f body="$(cat "$comment_file")"
+          comment_id="$(
+            gh api "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" --paginate \
+              --jq ".[] | select(.user.type == \"Bot\" and ((.body | contains(\"$marker\")) or (.body | startswith(\"## Bundler Phase Timings\")))) | .id" \
+              | head -n 1
+          )"
+
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$comment_id" \
+              -f body="$(cat "$comment_file")"
+          else
+            gh api --method POST "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+              -f body="$(cat "$comment_file")"
+          fi

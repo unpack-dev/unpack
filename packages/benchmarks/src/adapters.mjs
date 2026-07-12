@@ -113,12 +113,22 @@ export const adapters = {
     async watchBuild({ fixture, outputDir, mutateAfterInitialBuild }) {
       const webpackModule = await import("webpack");
       const webpack = webpackModule.default ?? webpackModule;
+      const tracing = createWebpackLikePhaseTracing({
+        bundler: "webpack",
+        spanPrefix: "Webpack",
+        fixture,
+        phase: "watch",
+        persistentCache: false,
+        cacheReadonly: false
+      });
       const compiler = webpack({
         ...webpackLikeConfig({ fixture, outputDir, mode: "development" }),
-        cache: true
+        cache: true,
+        plugins: [tracing.plugin]
       });
       const rebuildMs = await runCompilerWatchBuild({
         compiler,
+        closeCompiler: () => tracing.close(compiler),
         mutateAfterInitialBuild,
         label: "webpack",
         validate: ({ err, stats }) => {
@@ -176,6 +186,14 @@ export const adapters = {
     async watchBuild({ fixture, outputDir, mutateAfterInitialBuild }) {
       const rspackModule = await import("@rspack/core");
       const rspack = rspackModule.rspack ?? rspackModule.default;
+      const tracing = createWebpackLikePhaseTracing({
+        bundler: "rspack",
+        spanPrefix: "Rspack",
+        fixture,
+        phase: "watch",
+        persistentCache: false,
+        cacheReadonly: false
+      });
       const compiler = rspack({
         ...createRspackBenchmarkConfig({
           fixture,
@@ -184,10 +202,12 @@ export const adapters = {
           persistentCache: false
         }),
         mode: "development",
-        cache: true
+        cache: true,
+        plugins: [tracing.plugin]
       });
       const rebuildMs = await runCompilerWatchBuild({
         compiler,
+        closeCompiler: () => tracing.close(compiler),
         mutateAfterInitialBuild,
         label: "Rspack",
         validate: ({ err, stats }) => {
@@ -901,6 +921,7 @@ function closeWatching(watching) {
 
 async function runCompilerWatchBuild({
   compiler,
+  closeCompiler = () => closeWebpackCompiler(compiler),
   mutateAfterInitialBuild,
   label,
   validate
@@ -911,7 +932,7 @@ async function runCompilerWatchBuild({
     return await rebuild.promise;
   } finally {
     await closeWatching(watching);
-    await closeWebpackCompiler(compiler);
+    await closeCompiler();
   }
 }
 
@@ -1093,6 +1114,7 @@ function createWebpackLikePhaseTracing({
       apply(compiler) {
         tap(compiler.hooks, "beforeRun", () => start("compilerRun"));
         tap(compiler.hooks, "run", () => start("compilerRun"));
+        tap(compiler.hooks, "watchRun", () => start("compilerRun"));
         tap(compiler.hooks, "done", () => end("compilerRun"));
         tap(compiler.hooks, "make", () => start("make"));
         tap(compiler.hooks, "finishMake", () => end("make"));

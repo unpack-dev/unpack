@@ -25,7 +25,6 @@ pub use module_dependency::ModuleDependency;
 pub use null_dependency::NullDependency;
 
 pub(crate) use const_dependency::ConstDependencyTemplate;
-pub(crate) use entry_dependency::EntryDependencyTemplate;
 pub(crate) use harmony_export_expression_dependency::HarmonyExportExpressionDependencyTemplate;
 pub(crate) use harmony_export_header_dependency::HarmonyExportHeaderDependencyTemplate;
 pub(crate) use harmony_export_imported_specifier_dependency::HarmonyExportImportedSpecifierDependencyTemplate;

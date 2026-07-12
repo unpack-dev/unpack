@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
 use crate::dependencies::{
-    ConstDependency, ConstDependencyTemplate, EntryDependency, EntryDependencyTemplate,
-    HarmonyExportExpressionDependency, HarmonyExportExpressionDependencyTemplate,
-    HarmonyExportHeaderDependency, HarmonyExportHeaderDependencyTemplate,
-    HarmonyExportImportedSpecifierDependency, HarmonyExportImportedSpecifierDependencyTemplate,
-    HarmonyExportSpecifierDependency, HarmonyExportSpecifierDependencyTemplate,
-    HarmonyImportSideEffectDependency, HarmonyImportSideEffectDependencyTemplate,
-    HarmonyImportSpecifierDependency, HarmonyImportSpecifierDependencyTemplate, ImportDependency,
-    ImportDependencyTemplate, ModuleDependency, NullDependency, NullDependencyTemplate,
+    ConstDependency, ConstDependencyTemplate, EntryDependency, HarmonyExportExpressionDependency,
+    HarmonyExportExpressionDependencyTemplate, HarmonyExportHeaderDependency,
+    HarmonyExportHeaderDependencyTemplate, HarmonyExportImportedSpecifierDependency,
+    HarmonyExportImportedSpecifierDependencyTemplate, HarmonyExportSpecifierDependency,
+    HarmonyExportSpecifierDependencyTemplate, HarmonyImportSideEffectDependency,
+    HarmonyImportSideEffectDependencyTemplate, HarmonyImportSpecifierDependency,
+    HarmonyImportSpecifierDependencyTemplate, ImportDependency, ImportDependencyTemplate,
+    ModuleDependency, NullDependency, NullDependencyTemplate,
 };
 use crate::dependency_template::{DependencyTemplateContext, apply_dependency_template};
 use crate::{ExportsInfo, cache_hash::StableHasher};
@@ -136,9 +136,7 @@ impl Dependency {
         context: &mut DependencyTemplateContext<'_>,
     ) -> Result<(), crate::Error> {
         match self {
-            Self::Entry(dependency) => {
-                apply_dependency_template(&EntryDependencyTemplate, dependency, source, context)
-            }
+            Self::Entry(_) => Ok(()),
             Self::HarmonyImportSideEffect(dependency) => apply_dependency_template(
                 &HarmonyImportSideEffectDependencyTemplate,
                 dependency,

@@ -29,7 +29,7 @@ export interface ConfigCaseTest {
   validate(result: ConfigCaseResult): Promise<void> | void;
 }
 
-interface ConfigCase {
+interface TestCase {
   category: string;
   kind: "default" | "config";
   name: string;
@@ -47,14 +47,14 @@ export async function registerConfigCases(): Promise<void> {
 
   assert.notEqual(cases.length, 0, "expected at least one test case");
 
-  for (const configCase of cases) {
-    test(`${configCase.kind} case ${configCase.category}/${configCase.name}`, async () => {
-      await runConfigCase(configCase);
+  for (const testCase of cases) {
+    test(`${testCase.kind} case ${testCase.category}/${testCase.name}`, async () => {
+      await runCase(testCase);
     });
   }
 }
 
-async function discoverConfigCases(): Promise<ConfigCase[]> {
+async function discoverConfigCases(): Promise<TestCase[]> {
   const categories = await readDirectories(sourceCasesPath);
   const cases = await Promise.all(
     categories.map(async (category) => {
@@ -96,17 +96,17 @@ async function readDirectories(path: string): Promise<string[]> {
     .sort();
 }
 
-async function runConfigCase(configCase: ConfigCase): Promise<void> {
+async function runCase(testCase: TestCase): Promise<void> {
   const fixturePath = await mkdtemp(join(tmpdir(), "unpack-config-case-"));
   const outputPath = join(fixturePath, "dist");
   let compiler: Compiler | undefined;
 
   try {
-    await copyFixture(configCase.sourcePath, fixturePath);
+    await copyFixture(testCase.sourcePath, fixturePath);
 
     const [options, caseTest] = await Promise.all([
-      loadOptions(configCase),
-      loadCaseTest(configCase)
+      loadOptions(testCase),
+      loadCaseTest(testCase)
     ]);
     const normalizedOptions = withHarnessDefaults(options, fixturePath, outputPath);
 
@@ -137,19 +137,19 @@ async function runConfigCase(configCase: ConfigCase): Promise<void> {
   }
 }
 
-async function loadOptions(configCase: ConfigCase): Promise<ConfigCaseOptions> {
-  if (configCase.kind === "default") {
+async function loadOptions(testCase: TestCase): Promise<ConfigCaseOptions> {
+  if (testCase.kind === "default") {
     return {};
   }
 
   const optionsModule = (await import(
-    pathToFileURL(join(configCase.compiledPath, "webpack.config.js")).href
+    pathToFileURL(join(testCase.compiledPath, "webpack.config.js")).href
   )) as { default: ConfigCaseOptions };
   return optionsModule.default;
 }
 
-async function loadCaseTest(configCase: ConfigCase): Promise<ConfigCaseTest> {
-  if (!(await fileExists(join(configCase.sourcePath, "test.config.ts")))) {
+async function loadCaseTest(testCase: TestCase): Promise<ConfigCaseTest> {
+  if (!(await fileExists(join(testCase.sourcePath, "test.config.ts")))) {
     return {
       validate({ requireEntry }) {
         requireEntry();
@@ -158,7 +158,7 @@ async function loadCaseTest(configCase: ConfigCase): Promise<ConfigCaseTest> {
   }
 
   const testModule = (await import(
-    pathToFileURL(join(configCase.compiledPath, "test.config.js")).href
+    pathToFileURL(join(testCase.compiledPath, "test.config.js")).href
   )) as { default: ConfigCaseTest };
   return testModule.default;
 }

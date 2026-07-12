@@ -9,7 +9,7 @@ The compilation pipeline is explicit and keeps webpack's post-Make sealing bound
 1. `make`
 2. `seal`
    1. `build_chunk_graph`
-   2. assign module and chunk render IDs
+   2. assign module and chunk IDs
    3. `code_generation`
    4. `create_assets`
 
@@ -183,7 +183,7 @@ exports.modules = {
 
 Include `exports.runtime` only when needed.
 
-Module render ids should use webpack-like readable request strings relative to context, preserving query and fragment. Async chunk render ids should be derived from the async target module for the first implementation, while filename resolution should go through `__webpack_require__.u(chunkId)`.
+Module IDs should use webpack-like readable request strings relative to context, preserving query and fragment. Async Chunk IDs should be derived from the async target Module for the first implementation, while filename resolution should go through `__webpack_require__.u(chunkId)`.
 
 ## Slice 8: Tests
 

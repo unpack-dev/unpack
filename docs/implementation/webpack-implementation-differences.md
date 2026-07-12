@@ -1,6 +1,6 @@
 # Webpack implementation differences
 
-This note compares the current Unpack implementation with the local webpack checkout at `/Users/bytedance/github/webpack` commit `10f5fccb2`. The goal is to identify gaps between current Unpack behavior and webpack so staged scope decisions can be separated from alignment gaps.
+This note compares the current Unpack implementation with the fixed webpack reference recorded in issue #217, commit `3d69e87dddb97ec4d6efe66a7c1e1bdb87dab50c`. The source-layout alignment for that reference landed in #218. The goal is to identify gaps between current Unpack behavior and webpack so staged scope decisions can be separated from alignment gaps.
 
 ## Webpack alignment boundary
 
@@ -19,7 +19,7 @@ Unpack currently runs a compact Rust pipeline with a webpack-shaped sealing boun
 1. `Compilation::make`
 2. `Compilation::seal`
    1. build the chunk graph
-   2. assign render IDs
+   2. assign Module IDs and Chunk IDs
    3. generate one result per module
    4. create assets
 
@@ -65,7 +65,7 @@ until execution reaches that factory.
 Necessity:
 
 - Rust-native queues are fine; copying webpack's `AsyncQueue` API is not needed.
-- Missing Render IDs and malformed graph connections remain infrastructure
+- Missing Module IDs or Chunk IDs and malformed graph connections remain infrastructure
   invariants and terminate compilation instead of being converted into module
   failures.
 
@@ -162,11 +162,11 @@ Necessity:
 
 The Node-runtime closure coordinates with the API-alignment and benchmark
 tracks (#140, #145, and #147). The JavaScript package entry remains ESM-only,
-while emitted entry assets intentionally use CommonJS startup. Render IDs are
-readable and deterministic with controlled churn, but are not a byte-for-byte
-webpack ID contract. Context modules, general CommonJS parsing/interop, broader
-loader rules and loader chains, plugins, tree shaking, module concatenation,
-browser loading targets, and other
+while emitted entry assets intentionally use CommonJS startup. Module IDs and
+Chunk IDs are readable and deterministic with controlled churn, but are not a
+byte-for-byte webpack ID contract. Context modules, general CommonJS
+parsing/interop, broader loader rules and loader chains, plugins, tree shaking,
+module concatenation, browser loading targets, and other
 unimplemented options remain explicit unsupported surfaces.
 
 ## ESM code generation
@@ -186,13 +186,29 @@ Necessity:
 - Always treating exports as used is a deliberate first implementation.
 - Full export usage pruning, ambiguous star export conflict handling, namespace/default interop, and module concatenation should be deferred until optimization or CommonJS interop becomes a goal.
 
-## Render IDs and filenames
+## Module and Chunk IDs
 
-Unpack uses readable module render IDs relative to context and derives async chunk render IDs from target module paths. Webpack assigns module and chunk IDs through configurable id plugins and computes filenames through output templates.
+Unpack reserves `ModuleId` and `ChunkId` for webpack's generated output and
+runtime identities. They are distinct Rust newtypes over a shared `IdValue`
+enum with string and `u32` variants. The IDs are assigned through the Chunk
+Graph and participate in code generation, runtime lookup and chunk loading, and
+filename resolution. They are observable through webpack-shaped JavaScript APIs such as
+`ChunkGraph.getModuleId` and `Chunk.id`.
+
+Module Graph and Chunk Graph currently own dense Module and Chunk storage scoped
+to one Compilation, addressed by opaque `ModuleHandle` and `ChunkHandle`
+references. Handles are compilation-local, never persisted, and not part of the
+JavaScript API. Moving those values into direct Compilation-owned stores remains
+a separate ownership step in #217. This keeps webpack terms stable for future
+JavaScript API alignment while using Rust-native indexed storage rather than
+imitating JavaScript object identity. Unpack currently uses readable Module IDs
+relative to context and derives Async Chunk IDs from target Module paths.
+Webpack assigns Module IDs and Chunk IDs through configurable ID plugins and
+computes filenames through output templates.
 
 Necessity:
 
-- Readable render IDs are good for early debugging and semantic tests.
+- Readable Module IDs and Chunk IDs are good for early debugging and semantic tests.
 - Deterministic production IDs, hashing, and filename templates are future output-stability features.
 - Byte-for-byte webpack output is not a goal.
 
@@ -204,7 +220,7 @@ Current staged scope limits:
 - Minimal Rust-native compiler and normal module factory.
 - ESM-first parser surface.
 - Fixed Node require chunk loading target.
-- Readable render IDs and semantic tests.
+- Readable Module IDs and Chunk IDs with semantic tests.
 - Byte-offset source ranges in Rust.
 
 Implementation gaps to resolve for current stated semantics:

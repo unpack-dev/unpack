@@ -117,7 +117,7 @@ The connected set of modules reachable from one or more entry points.
 _Avoid_: Dependency tree
 
 **Graph Handle**:
-An opaque, dense Rust index used to address a Module, Chunk, Chunk Group, or connection in compilation-owned storage. Handle names must not use webpack's Module ID or Chunk ID terms, which refer to generated output identity.
+An opaque, dense, compilation-local Rust reference used to address a Module, Chunk, Chunk Group, or connection in compilation-owned storage. `ModuleHandle` and `ChunkHandle` are the concrete Module and Chunk forms. Graph Handles are neither persisted nor exposed through the JavaScript API; webpack's Module ID and Chunk ID terms are reserved for generated output and runtime identity.
 _Avoid_: Internal Module ID, internal Chunk ID, Render ID
 
 **Chunk Graph**:
@@ -161,7 +161,7 @@ The per-module result of the Code Generation Phase: source-preserving rewritten 
 _Avoid_: Asset, rendered bundle, compilation result
 
 **ID Assignment**:
-The deterministic phase that assigns readable named Render IDs to modules and chunks, using stable identities and collision handling before code generation.
+The deterministic phase that assigns readable named Module IDs and Chunk IDs, using stable identities and collision handling before code generation.
 _Avoid_: Filename generation, incidental map index
 
 **Export Binding**:
@@ -208,9 +208,9 @@ _Avoid_: Entry bundle, startup file
 Bundle output loaded on demand because execution reaches an async split point.
 _Avoid_: Lazy chunk, dynamic import bundle
 
-**Chunk Render ID**:
-The chunk key used to name generated async chunk files and reference them from runtime chunk-loading code.
-_Avoid_: Chunk filename, chunk index
+**Chunk ID**:
+The webpack output and runtime identity for a Chunk, represented as a string or unsigned 32-bit integer. It is assigned through the Chunk Graph, participates in code generation, runtime chunk loading, and filename resolution, and is observable through webpack-shaped JavaScript APIs such as `Chunk.id`. It is distinct from a compilation-local Chunk Handle.
+_Avoid_: Chunk Render ID, Chunk Handle, chunk filename, chunk index
 
 **Context Module**:
 The bundler concept for a set of possible modules selected by a runtime expression rather than by one static dependency specifier.
@@ -408,9 +408,9 @@ _Avoid_: Missing module, skipped module
 The canonical key used during the make phase to decide whether two resolved module requests refer to the same module instance.
 _Avoid_: Module path, file path id
 
-**Module Render ID**:
-The module key written into generated bundle output for runtime lookup and debugging.
-_Avoid_: Module identity, module index
+**Module ID**:
+The webpack output and runtime identity for a Module, represented as a string or unsigned 32-bit integer. It is assigned through the Chunk Graph, written into generated bundle output for runtime lookup, and observable through webpack-shaped JavaScript APIs such as `ChunkGraph.getModuleId`. It is distinct from both Module Identity and a compilation-local Module Handle.
+_Avoid_: Module Render ID, Module Handle, module identity, module index
 
 **Resolver**:
 The component that turns a dependency specifier and issuer directory into a resolved module resource.

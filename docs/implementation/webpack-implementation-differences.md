@@ -38,11 +38,12 @@ Necessity:
 Unpack's top-level `cache` and `cache_facade` modules map to webpack's root
 `Cache.js` and `CacheFacade.js` responsibilities. Memory Cache Plugin, Memory
 With GC Cache Plugin, and Pack File Cache Strategy implementations live in
-separate modules below the `cache` category. The private `BuildCache`
-composition helper coordinates Compiler lifecycle, while Cache Items, options,
-and Pack File storage remain Rust-only helpers colocated with the webpack
-responsibility that owns them. There is no separate `build_cache` source
-hierarchy.
+separate modules below the `cache` category. The private `Cache`
+module is the Compiler-owned deep module for lifecycle and facade composition;
+its private `CacheLayers` helper coordinates ordered storage adapters. Cache
+Items, options, and Pack File storage remain Rust-only helpers colocated with
+the webpack responsibility that owns them. There is no separate `BuildCache`
+type, file, or source hierarchy.
 
 Webpack wires these responsibilities through plugins and Tapable hooks. Unpack
 keeps its existing typed layers, explicit lifecycle methods, and closed Cache

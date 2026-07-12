@@ -4,7 +4,10 @@
 
 use std::collections::HashMap;
 
-use super::{CacheEntry, CacheItemFamily, CacheLayer, CacheLayerLookup};
+use super::{
+    CacheItemFamily,
+    cache_layers::{CacheEntry, CacheLayer, CacheLayerLookup},
+};
 use crate::cache_facade::{CacheAddress, CacheETag};
 
 #[derive(Debug, Clone)]

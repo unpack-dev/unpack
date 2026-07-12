@@ -75,6 +75,8 @@ pub struct NativeCompilerOptions {
     pub side_effects: String,
     #[napi(js_name = "moduleRules")]
     pub module_rules: Vec<NativeModuleRule>,
+    #[napi(js_name = "serialRebuildMake")]
+    pub serial_rebuild_make: bool,
     #[napi(js_name = "unsafeWatchCacheInvalidation")]
     pub unsafe_watch_cache_invalidation: bool,
 }
@@ -961,6 +963,7 @@ impl NativeCompiler {
         compiler_options.sourcemap = options.sourcemap;
         compiler_options.provided_exports = options.provided_exports;
         compiler_options.used_exports = options.used_exports;
+        compiler_options.serial_rebuild_make = options.serial_rebuild_make;
         compiler_options.unsafe_watch_cache_invalidation = options.unsafe_watch_cache_invalidation;
         compiler_options.side_effects = match options.side_effects.as_str() {
             "disabled" => unpack_core::SideEffectsOption::Disabled,

@@ -44,6 +44,7 @@ export type WebpackPlugin =
 
 export interface ExperimentsOptions {
   cacheUnaffected?: boolean;
+  serialRebuildMake?: boolean;
   unsafeWatchCacheInvalidation?: boolean;
 }
 
@@ -425,6 +426,7 @@ interface NormalizedOptions {
   providedExports: boolean;
   usedExports: boolean;
   sideEffects: "disabled" | "flag" | "analyze";
+  serialRebuildMake: boolean;
   unsafeWatchCacheInvalidation: boolean;
 }
 
@@ -2865,6 +2867,7 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     providedExports: optimization.providedExports,
     usedExports: optimization.usedExports,
     sideEffects: optimization.sideEffects,
+    serialRebuildMake: experiments.serialRebuildMake,
     unsafeWatchCacheInvalidation: experiments.unsafeWatchCacheInvalidation
   };
 }
@@ -2921,14 +2924,22 @@ function applyPlugins(
 
 function normalizeExperimentsOptions(
   experiments: ExperimentsOptions | undefined
-): { cacheUnaffected: boolean; unsafeWatchCacheInvalidation: boolean } {
+): {
+  cacheUnaffected: boolean;
+  serialRebuildMake: boolean;
+  unsafeWatchCacheInvalidation: boolean;
+} {
   if (experiments === undefined) {
-    return { cacheUnaffected: false, unsafeWatchCacheInvalidation: false };
+    return {
+      cacheUnaffected: false,
+      serialRebuildMake: false,
+      unsafeWatchCacheInvalidation: false
+    };
   }
   assertPlainObject(experiments, "options.experiments");
   assertKnownKeys(
     experiments,
-    ["cacheUnaffected", "unsafeWatchCacheInvalidation"],
+    ["cacheUnaffected", "serialRebuildMake", "unsafeWatchCacheInvalidation"],
     "options.experiments"
   );
   return {
@@ -2938,6 +2949,13 @@ function normalizeExperimentsOptions(
         : assertBoolean(
             experiments.cacheUnaffected,
             "options.experiments.cacheUnaffected"
+          ),
+    serialRebuildMake:
+      experiments.serialRebuildMake === undefined
+        ? false
+        : assertBoolean(
+            experiments.serialRebuildMake,
+            "options.experiments.serialRebuildMake"
           ),
     unsafeWatchCacheInvalidation:
       experiments.unsafeWatchCacheInvalidation === undefined

@@ -120,6 +120,20 @@ test("cache objects require a type, enforce the unaffected experiment gate, and 
       experiments: { cacheUnaffected: true }
     })
   );
+  assert.doesNotThrow(() =>
+    unpack({
+      entry: "./src/index.js",
+      experiments: { serialRebuildMake: true }
+    })
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        experiments: { serialRebuildMake: "yes" as unknown as boolean }
+      }),
+    /options\.experiments\.serialRebuildMake must be a boolean/
+  );
   assert.throws(
     () =>
       unpack({

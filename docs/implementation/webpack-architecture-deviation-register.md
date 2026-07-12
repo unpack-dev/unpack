@@ -108,6 +108,25 @@ documented deviations or staged webpack scope.
   boundary, or Persistent Cache is restored. Those paths must retain Snapshot
   validation; the unsafe experiment must never silently become the default.
 
+### DEV-005: Rebuild Make task spawning is configurable
+
+- **Status**: Confirmed deviation.
+- **Performance-driven**: Yes. Profiling rebuild Make requires separating Tokio
+  task-spawn overhead from Factorize and Build work.
+- **Webpack shape**: webpack schedules Make work through its asynchronous queues;
+  it does not expose a public scheduler-selection option. Unpack normally wraps
+  background Make futures in Tokio tasks while preserving webpack's Factorize,
+  Add, Build, and Process Dependencies responsibilities.
+- **Approved shape**: ADR 0143 permits the explicit
+  `experiments.serialRebuildMake: true` option to poll rebuild Factorize and
+  Build futures directly in Make's `FuturesUnordered` queue. Initial
+  compilations retain Tokio task spawning, and both modes retain the semaphore
+  parallelism limit and observable compilation behavior.
+- **Disable or refactor when**: direct polling changes Make phase ordering,
+  error delivery, lifecycle behavior, or task responsibilities; the experiment
+  must remain opt-in unless measurements and a later decision justify changing
+  the default.
+
 ## Resolved violations and alignment gaps
 
 ### RES-001: Whole-Compilation warm cache shortcut

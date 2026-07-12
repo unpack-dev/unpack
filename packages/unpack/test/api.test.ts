@@ -1416,11 +1416,15 @@ test("watch close settles pending filesystem cache work and keeps compiler reusa
   }
 });
 
-test("watch invalidate triggers rebuild", async () => {
+test("serial rebuild Make preserves watch invalidation behavior", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 'before';"
   });
-  const compiler = unpack({ context: fixture, entry: "./src/index.js" });
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    experiments: { serialRebuildMake: true }
+  });
   const entry = join(fixture, "src/index.js");
 
   try {

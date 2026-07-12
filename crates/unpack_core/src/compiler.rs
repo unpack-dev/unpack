@@ -61,6 +61,7 @@ pub struct CompilerOptions {
     pub provided_exports: bool,
     pub used_exports: bool,
     pub side_effects: SideEffectsOption,
+    pub serial_rebuild_make: bool,
     pub unsafe_watch_cache_invalidation: bool,
 }
 
@@ -81,6 +82,7 @@ impl CompilerOptions {
             provided_exports: true,
             used_exports: true,
             side_effects: SideEffectsOption::Flag,
+            serial_rebuild_make: false,
             unsafe_watch_cache_invalidation: false,
         }
     }
@@ -746,7 +748,10 @@ impl Compiler {
             }
             compilation
                 .make(crate::MakeOptions {
-                    spawn_background_tasks: !is_rebuild,
+                    spawn_background_tasks: should_spawn_make_tasks(
+                        is_rebuild,
+                        self.options.serial_rebuild_make,
+                    ),
                     watch_change_set,
                 })
                 .await?;
@@ -796,6 +801,10 @@ impl Compiler {
     async fn wait_for_idle_cache_publication(&self) {
         self.cache_lifecycle.wait_for_idle_publication().await;
     }
+}
+
+fn should_spawn_make_tasks(is_rebuild: bool, serial_rebuild_make: bool) -> bool {
+    !is_rebuild || !serial_rebuild_make
 }
 
 fn apply_builtin_module_plugins(hooks: &mut CompilerHookSet) {
@@ -871,6 +880,14 @@ mod tests {
         cache::{CacheItemFamily, CacheItemWork},
         serialization::Serializer,
     };
+
+    #[test]
+    fn serial_make_scheduling_is_opt_in_and_rebuild_only() {
+        assert!(should_spawn_make_tasks(false, false));
+        assert!(should_spawn_make_tasks(false, true));
+        assert!(should_spawn_make_tasks(true, false));
+        assert!(!should_spawn_make_tasks(true, true));
+    }
 
     #[tokio::test]
     async fn repeated_runs_reuse_memory_module_build_records_without_sharing_compilations()

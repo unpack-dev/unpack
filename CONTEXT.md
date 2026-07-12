@@ -144,6 +144,10 @@ _Avoid_: Entry chunk, main chunk
 The compilation stage that starts from entry modules, discovers their dependencies, and constructs the module graph before bundling.
 _Avoid_: Build phase, parse phase
 
+**Serial Rebuild Make**:
+An experimental Make scheduling mode in which rebuild Factorize and Build futures are polled directly by the Make queue instead of being wrapped in Tokio tasks. It changes scheduling only; the Make task model and configured parallelism limit remain intact.
+_Avoid_: Single-threaded rebuild, disabled concurrency
+
 **Code Generation Phase**:
 The compilation stage that turns chunks and their modules into webpack-shaped output files.
 _Avoid_: Emit phase, print phase

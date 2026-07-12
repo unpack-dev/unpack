@@ -102,6 +102,12 @@ Ordinary runs, Persistent Cache restore, later Compiler processes, manual
 invalidations, and rebuilds without a usable Watch Change Set retain Snapshot
 validation.
 
+The Unpack-only `experiments.serialRebuildMake` diagnostic option controls
+whether rebuild Factorize and Build futures are polled directly by Make or
+wrapped in Tokio tasks. It defaults to `false`, affects rebuild scheduling only,
+and preserves the Make task responsibilities and parallelism limit described in
+ADR 0143.
+
 This layout change covers the cache-category alignment tracked by issue #217.
 The first serialization-layout slice moves generic Serializer identity,
 registration, type erasure, bounded encoding, and typed decoding into

@@ -9,11 +9,11 @@ use std::{
 use crate::{
     CacheOptions, Compilation, CompilationHooks, InfrastructureLoggingOptions, LoaderRunner,
     ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver,
-    asset::asset_modules_plugin::AssetModulesPlugin, cache::BuildCache,
-    compilation::CompilationHookSet, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
+    asset::asset_modules_plugin::AssetModulesPlugin, cache::Cache, compilation::CompilationHookSet,
+    flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
     flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
     javascript::javascript_modules_plugin::JavascriptModulesPlugin,
-    json::json_modules_plugin::JsonModulesPlugin,
+    json::json_modules_plugin::JsonModulesPlugin, module_computation_cache::ModuleComputationCache,
     optimize::side_effects_flag_plugin::SideEffectsFlagPlugin,
 };
 use tracing::Instrument;
@@ -87,8 +87,9 @@ impl CompilerOptions {
 #[derive(Debug, Clone)]
 pub struct Compiler {
     options: CompilerOptions,
-    build_cache: BuildCache,
+    cache: Cache,
     cache_lifecycle: Arc<CacheLifecycle>,
+    module_computation_cache: Option<ModuleComputationCache>,
     hooks: CompilerHookSet,
 }
 
@@ -203,17 +204,17 @@ struct CacheLifecycleState {
 
 #[derive(Debug)]
 struct CacheLifecycle {
-    build_cache: BuildCache,
+    cache: Cache,
     timeouts: CacheIdleTimeouts,
     state: Mutex<CacheLifecycleState>,
     changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl CacheLifecycle {
-    fn new(build_cache: BuildCache, options: &CacheOptions) -> Arc<Self> {
+    fn new(cache: Cache, options: &CacheOptions) -> Arc<Self> {
         let (changed, _) = tokio::sync::watch::channel(0);
         Arc::new(Self {
-            build_cache,
+            cache,
             timeouts: CacheIdleTimeouts::from_options(options),
             state: Mutex::new(CacheLifecycleState {
                 activity: CacheActivity::Ready,
@@ -274,11 +275,10 @@ impl CacheLifecycle {
                 return;
             } else {
                 state.activity = CacheActivity::Idle;
-                if self.build_cache.pending_generation().is_some() {
+                if self.cache.pending_generation().is_some() {
                     let now = tokio::time::Instant::now();
                     state.ordinary_deadline = Some(now + self.timeouts.ordinary);
-                    if self.build_cache.initial_store_pending()
-                        && state.initial_store_deadline.is_none()
+                    if self.cache.initial_store_pending() && state.initial_store_deadline.is_none()
                     {
                         state.initial_store_deadline = Some(now + self.timeouts.initial_store);
                     }
@@ -312,7 +312,7 @@ impl CacheLifecycle {
             {
                 return;
             }
-            let Some(target_generation) = self.build_cache.pending_generation() else {
+            let Some(target_generation) = self.cache.pending_generation() else {
                 state.initial_store_deadline = None;
                 state.ordinary_deadline = None;
                 state.large_change_deadline = None;
@@ -322,7 +322,7 @@ impl CacheLifecycle {
             if state.ordinary_deadline.is_none() {
                 state.ordinary_deadline = Some(now + self.timeouts.ordinary);
             }
-            if self.build_cache.initial_store_pending() && state.initial_store_deadline.is_none() {
+            if self.cache.initial_store_pending() && state.initial_store_deadline.is_none() {
                 state.initial_store_deadline = Some(now + self.timeouts.initial_store);
             }
             let (reason, deadline) = [
@@ -379,7 +379,7 @@ impl CacheLifecycle {
             }
         }
         self.notify_changed();
-        let Some(current_target) = self.build_cache.pending_generation() else {
+        let Some(current_target) = self.cache.pending_generation() else {
             return;
         };
         {
@@ -400,15 +400,14 @@ impl CacheLifecycle {
     }
 
     async fn perform_flush(self: &Arc<Self>, target_generation: u64) {
-        let build_cache = self.build_cache.clone();
-        let result = match tokio::task::spawn_blocking(move || {
-            build_cache.publish_generation(target_generation)
-        })
-        .await
-        {
-            Ok(result) => result.map_err(|error| error.to_string()),
-            Err(error) => Err(format!("cache publication task failed: {error}")),
-        };
+        let cache = self.cache.clone();
+        let result =
+            match tokio::task::spawn_blocking(move || cache.publish_generation(target_generation))
+                .await
+            {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(error) => Err(format!("cache publication task failed: {error}")),
+            };
         let mut state = self
             .state
             .lock()
@@ -421,7 +420,7 @@ impl CacheLifecycle {
         }
         let should_schedule = match result {
             Ok(()) => {
-                if self.build_cache.pending_generation().is_none() {
+                if self.cache.pending_generation().is_none() {
                     state.initial_store_deadline = None;
                     state.ordinary_deadline = None;
                     state.large_change_deadline = None;
@@ -473,7 +472,7 @@ impl CacheLifecycle {
                     Action::Wait
                 } else {
                     drop(state);
-                    let target = self.build_cache.pending_generation();
+                    let target = self.cache.pending_generation();
                     let mut state = self
                         .state
                         .lock()
@@ -510,7 +509,7 @@ impl CacheLifecycle {
                 Action::Done(mut outcome) => {
                     outcome
                         .infrastructure_log_events
-                        .extend(self.build_cache.take_infrastructure_log_events());
+                        .extend(self.cache.take_infrastructure_log_events());
                     self.notify_changed();
                     return outcome;
                 }
@@ -560,7 +559,7 @@ impl CacheLifecycle {
                         } else {
                             let diagnostic = state.diagnostic.take();
                             drop(state);
-                            let target = self.build_cache.pending_generation();
+                            let target = self.cache.pending_generation();
                             let mut state = self
                                 .state
                                 .lock()
@@ -607,7 +606,7 @@ impl CacheLifecycle {
                 Action::Done(mut outcome) => {
                     outcome
                         .infrastructure_log_events
-                        .extend(self.build_cache.take_infrastructure_log_events());
+                        .extend(self.cache.take_infrastructure_log_events());
                     self.notify_changed();
                     return outcome;
                 }
@@ -630,7 +629,7 @@ impl CacheLifecycle {
                 diagnostic.is_none(),
                 "cache publication failed: {diagnostic:?}"
             );
-            if self.build_cache.pending_generation().is_none() && !flush_in_flight {
+            if self.cache.pending_generation().is_none() && !flush_in_flight {
                 return;
             }
             changed
@@ -664,8 +663,12 @@ impl Drop for CacheRunActivity {
 
 impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
-        let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
-        let cache_lifecycle = CacheLifecycle::new(build_cache.clone(), &options.cache);
+        let cache = Cache::new(options.cache.clone(), options.snapshot.clone());
+        let cache_lifecycle = CacheLifecycle::new(cache.clone(), &options.cache);
+        let module_computation_cache = options
+            .cache
+            .cache_unaffected
+            .then(ModuleComputationCache::default);
         let mut hooks = CompilerHookSet::default();
         configure_default_module_types(&mut hooks);
         apply_builtin_module_plugins(&mut hooks);
@@ -682,8 +685,9 @@ impl Compiler {
         }
         Self {
             options,
-            build_cache,
+            cache,
             cache_lifecycle,
+            module_computation_cache,
             hooks,
         }
     }
@@ -698,7 +702,8 @@ impl Compiler {
         Compilation::new(
             self.options.clone(),
             UnpackResolver::new(self.options.resolve.clone()),
-            self.build_cache.clone(),
+            self.cache.clone(),
+            self.module_computation_cache.clone(),
             compilation_hooks,
         )
     }
@@ -714,7 +719,7 @@ impl Compiler {
         &self,
         idle_reason: CacheIdleReason,
     ) -> Result<PendingCompilation> {
-        self.build_cache
+        self.cache
             .prepare_for_compilation(
                 &self.options.context,
                 &UnpackResolver::new(self.options.resolve.clone()),
@@ -736,14 +741,13 @@ impl Compiler {
         .instrument(tracing::trace_span!("Compiler::run"))
         .await;
         if result.is_ok() {
-            self.build_cache.store_build_dependencies();
-            self.build_cache.on_compilation_completed();
+            self.cache.store_build_dependencies();
+            self.cache.on_compilation_completed();
         }
-        self.build_cache.trace_work_counters();
+        self.cache.trace_work_counters();
         result.map(|mut compilation| {
-            compilation.extend_infrastructure_log_events(
-                self.build_cache.take_infrastructure_log_events(),
-            );
+            compilation
+                .extend_infrastructure_log_events(self.cache.take_infrastructure_log_events());
             PendingCompilation {
                 compilation: Some(compilation),
                 cache_activity: Some(cache_activity),
@@ -754,7 +758,7 @@ impl Compiler {
     pub fn flush_cache(&self) -> std::result::Result<(), String> {
         let span = tracing::trace_span!("Compiler::flush_cache");
         let _enter = span.enter();
-        self.build_cache
+        self.cache
             .flush_to_filesystem()
             .map_err(|error| error.to_string())
     }
@@ -865,14 +869,14 @@ mod tests {
         ));
 
         let first = compiler.run().await?;
-        let first_cache = compiler.build_cache.stats();
+        let first_cache = compiler.cache.stats();
         assert_eq!(first_cache.module_entries, 2);
         assert_eq!(first_cache.module_hits, 0);
         assert_eq!(first_cache.module_misses, 2);
         assert_eq!(first_cache.resolve_entries, 2);
         assert_eq!(first_cache.resolve_hits, 0);
         assert_eq!(first_cache.resolve_misses, 2);
-        let first_work = compiler.build_cache.work_counters();
+        let first_work = compiler.cache.work_counters();
         assert_eq!(
             first_work.for_family(CacheItemFamily::Resolve),
             CacheItemWork {
@@ -895,14 +899,14 @@ mod tests {
         );
 
         let second = compiler.run().await?;
-        let second_cache = compiler.build_cache.stats();
+        let second_cache = compiler.cache.stats();
         assert_eq!(second_cache.module_entries, 2);
         assert_eq!(second_cache.module_hits, 2);
         assert_eq!(second_cache.module_misses, 2);
         assert_eq!(second_cache.resolve_entries, 2);
         assert_eq!(second_cache.resolve_hits, 2);
         assert_eq!(second_cache.resolve_misses, 2);
-        let second_work = compiler.build_cache.work_counters();
+        let second_work = compiler.cache.work_counters();
         assert_eq!(
             second_work.for_family(CacheItemFamily::Resolve),
             CacheItemWork {
@@ -981,6 +985,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_unaffected_reuses_only_module_computations_outside_the_affected_closure()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let changed_path = temp.path().join("changed.js");
+        write(
+            temp.path().join("index.js"),
+            r#"
+                import { changed } from "./changed";
+                import { stable } from "./stable";
+                export const result = `${changed}:${stable}`;
+            "#,
+        )?;
+        write(&changed_path, "export const changed = 'before';")?;
+        write(
+            temp.path().join("stable.js"),
+            "export const stable = 'stable';",
+        )?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache.cache_unaffected = true;
+        options.snapshot.module = crate::SnapshotStrategy::hash();
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        assert!(
+            asset_sources(&first)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("before")
+        );
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("cacheUnaffected should create a Module Computation Cache")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 0,
+                provided_exports_misses: 3,
+                invalidated_modules: 0,
+                static_reachable_hits: 0,
+                static_reachable_misses: 1,
+            }
+        );
+
+        compiler.run().await?;
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("cacheUnaffected should remain compiler-owned")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 3,
+                provided_exports_misses: 3,
+                invalidated_modules: 0,
+                static_reachable_hits: 1,
+                static_reachable_misses: 1,
+            }
+        );
+
+        write(&changed_path, "export const changed = 'after';")?;
+        let changed = compiler.run().await?;
+        assert!(
+            asset_sources(&changed)
+                .get("main.js")
+                .expect("main asset should exist")
+                .contains("after")
+        );
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("cacheUnaffected should survive multiple Compilations")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 4,
+                provided_exports_misses: 5,
+                invalidated_modules: 2,
+                static_reachable_hits: 1,
+                static_reachable_misses: 2,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filesystem_memory_cache_unaffected_is_independent_of_record_memory_retention()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(
+            temp.path().join("index.js"),
+            "import './dep'; export const value = 1;",
+        )?;
+        write(temp.path().join("dep.js"), "export const dep = 1;")?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.cache = CacheOptions::filesystem();
+        options.cache.cache_location = Some(temp.path().join(".cache/unpack/unaffected"));
+        options.cache.max_memory_generations = Some(0);
+        options.cache.cache_unaffected = true;
+        let compiler = Compiler::new(options.clone());
+
+        compiler.run().await?;
+        compiler.run().await?;
+
+        assert_eq!(
+            compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("memoryCacheUnaffected should own a separate in-process cache")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 2,
+                provided_exports_misses: 2,
+                invalidated_modules: 0,
+                static_reachable_hits: 1,
+                static_reachable_misses: 1,
+            }
+        );
+        assert_eq!(compiler.cache.stats().module_entries, 0);
+        assert_eq!(
+            compiler
+                .cache
+                .work_counters()
+                .for_family(CacheItemFamily::ModuleBuild),
+            CacheItemWork {
+                hits: 2,
+                misses: 2,
+                stores: 2,
+                restores: 0,
+                evictions: 0,
+            },
+            "ordinary Module Build records should be read without a Memory Cache layer"
+        );
+
+        compiler.flush_cache()?;
+        let later_compiler = Compiler::new(options);
+        later_compiler.run().await?;
+        assert_eq!(
+            later_compiler
+                .module_computation_cache
+                .as_ref()
+                .expect("a later Compiler should own a fresh Module Computation Cache")
+                .stats(),
+            crate::module_computation_cache::ModuleComputationCacheStats {
+                provided_exports_hits: 0,
+                provided_exports_misses: 2,
+                invalidated_modules: 0,
+                static_reachable_hits: 0,
+                static_reachable_misses: 1,
+            },
+            "Module Computation memos must not be restored from PackFile"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn filesystem_cache_restores_module_build_records_for_later_compiler_instances()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -1008,11 +1172,11 @@ mod tests {
         assert!(!cache_location.join("packs/modules.cbor").exists());
 
         let second_compiler = Compiler::new(options);
-        assert_eq!(second_compiler.build_cache.stats().resolve_entries, 0);
-        assert_eq!(second_compiler.build_cache.stats().module_entries, 0);
+        assert_eq!(second_compiler.cache.stats().resolve_entries, 0);
+        assert_eq!(second_compiler.cache.stats().module_entries, 0);
 
         let second = second_compiler.run().await?;
-        let second_cache = second_compiler.build_cache.stats();
+        let second_cache = second_compiler.cache.stats();
         assert_eq!(second_cache.resolve_hits, 2);
         assert_eq!(second_cache.module_hits, 2);
         assert_eq!(asset_sources(&first), asset_sources(&second));
@@ -1021,7 +1185,7 @@ mod tests {
             second.module_graph().modules().as_ptr(),
             "a later Compiler must assemble a fresh ModuleGraph"
         );
-        let restored_work = second_compiler.build_cache.work_counters();
+        let restored_work = second_compiler.cache.work_counters();
         assert_eq!(
             restored_work.for_family(CacheItemFamily::Resolve),
             CacheItemWork {
@@ -1054,7 +1218,7 @@ mod tests {
         );
 
         let third = second_compiler.run().await?;
-        let repopulated_work = second_compiler.build_cache.work_counters();
+        let repopulated_work = second_compiler.cache.work_counters();
         assert_eq!(
             repopulated_work.for_family(CacheItemFamily::Resolve),
             CacheItemWork {
@@ -1095,11 +1259,6 @@ mod tests {
             third.chunk_graph().chunks().as_ptr()
         );
         for restored_module in second.module_graph().modules() {
-            let cached_record = second_compiler
-                .build_cache
-                .module_builds()
-                .get(restored_module.identity(), None)
-                .expect("restored Module Build Record should remain in Memory Cache");
             let rebuilt_module = third
                 .module_graph()
                 .modules()
@@ -1111,10 +1270,6 @@ mod tests {
                 !std::ptr::eq(restored_module, rebuilt_module),
                 "each Compilation must create a distinct Module object"
             );
-            assert!(Arc::ptr_eq(
-                restored_module.built_content(),
-                cached_record.built_content()
-            ));
             assert!(Arc::ptr_eq(
                 restored_module.built_content(),
                 rebuilt_module.built_content()
@@ -1270,7 +1425,7 @@ mod tests {
         let entered = Arc::new(Barrier::new(2));
         let release = Arc::new(Barrier::new(2));
         compiler
-            .build_cache
+            .cache
             .install_publish_barrier(entered.clone(), release.clone());
 
         let settling_compiler = compiler.clone();
@@ -1324,7 +1479,7 @@ mod tests {
         second.run().await?;
         assert_eq!(
             second
-                .build_cache
+                .cache
                 .work_counters()
                 .for_family(CacheItemFamily::ModuleBuild),
             CacheItemWork {
@@ -1382,7 +1537,7 @@ mod tests {
         );
         assert_eq!(
             compiler
-                .build_cache
+                .cache
                 .work_counters()
                 .for_family(CacheItemFamily::ModuleBuild)
                 .evictions,
@@ -1397,7 +1552,7 @@ mod tests {
             "#,
         )?;
         let third = compiler.run().await?;
-        let work = compiler.build_cache.work_counters();
+        let work = compiler.cache.work_counters();
 
         assert!(
             asset_sources(&third)
@@ -1441,7 +1596,7 @@ mod tests {
         let first = compiler.run().await?;
         compiler.flush_cache()?;
         let second = compiler.run().await?;
-        let work = compiler.build_cache.work_counters();
+        let work = compiler.cache.work_counters();
 
         assert_eq!(asset_sources(&first), asset_sources(&second));
         assert_eq!(
@@ -1464,7 +1619,7 @@ mod tests {
                 evictions: 0,
             }
         );
-        assert_eq!(compiler.build_cache.stats().module_entries, 0);
+        assert_eq!(compiler.cache.stats().module_entries, 0);
         assert_ne!(
             first.module_graph().modules().as_ptr(),
             second.module_graph().modules().as_ptr()
@@ -1507,11 +1662,11 @@ mod tests {
         readonly_options.cache.readonly = true;
         readonly_options.cache.max_age = std::time::Duration::ZERO;
         let readonly_compiler = Compiler::new(readonly_options);
-        assert_eq!(readonly_compiler.build_cache.stats().resolve_entries, 0);
-        assert_eq!(readonly_compiler.build_cache.stats().module_entries, 0);
+        assert_eq!(readonly_compiler.cache.stats().resolve_entries, 0);
+        assert_eq!(readonly_compiler.cache.stats().module_entries, 0);
 
         let second = readonly_compiler.run().await?;
-        let readonly_cache = readonly_compiler.build_cache.stats();
+        let readonly_cache = readonly_compiler.cache.stats();
         assert_eq!(readonly_cache.resolve_entries, 2);
         assert_eq!(readonly_cache.module_entries, 2);
         readonly_compiler.flush_cache()?;
@@ -1571,7 +1726,7 @@ mod tests {
         warm_compiler.run().await?;
         assert_eq!(
             warm_compiler
-                .build_cache
+                .cache
                 .work_counters()
                 .for_family(CacheItemFamily::ModuleBuild),
             CacheItemWork {
@@ -1588,7 +1743,7 @@ mod tests {
         cold_compiler.run().await?;
         assert_eq!(
             cold_compiler
-                .build_cache
+                .cache
                 .work_counters()
                 .for_family(CacheItemFamily::ModuleBuild),
             CacheItemWork {

@@ -277,6 +277,10 @@ mod tests {
         PackFile::publish_module_build_records(temp.path(), &serializer, records.clone())?;
 
         assert_eq!(MODULE_BUILD_RECORD_TYPE_ID.as_bytes(), b"unpack.moduleb.1");
+        assert_eq!(
+            ModuleBuildRecordCodec::current().codec_id(),
+            StableCodecId::new(*b"unpack.modb.c003")
+        );
         let mut pack_file = PackFile::open(temp.path(), serializer);
         for (address, _, record) in records {
             assert_eq!(
@@ -1822,6 +1826,7 @@ mod tests {
                 }],
                 presentational_dependencies: dependencies,
                 data: ParsedModuleDataDto::JavaScript,
+                build_side_effect_free: Some(true),
             },
             source_hash: stable_hash(&source),
             source,
@@ -2248,6 +2253,7 @@ pub(crate) struct ParsedModuleDto {
     pub(crate) blocks: Vec<AsyncDependenciesBlockDto>,
     pub(crate) presentational_dependencies: Vec<DependencyDto>,
     pub(crate) data: ParsedModuleDataDto,
+    pub(crate) build_side_effect_free: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2943,6 +2949,7 @@ impl TryFrom<&ParsedModule> for ParsedModuleDto {
                     }
                 }
             },
+            build_side_effect_free: parsed.build_meta.side_effect_free,
         })
     }
 }
@@ -2956,6 +2963,7 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
             blocks,
             presentational_dependencies,
             data,
+            build_side_effect_free,
         } = parsed;
         let dependencies = dependencies
             .into_iter()
@@ -2999,6 +3007,9 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
                     };
                     crate::parser::ParsedModuleData::Asset { module_type }
                 }
+            },
+            build_meta: crate::parser::JavascriptBuildMeta {
+                side_effect_free: build_side_effect_free,
             },
         })
     }
@@ -3431,6 +3442,11 @@ fn encode_module_build_record(record: &ModuleBuildRecordDto) -> io::Result<Vec<u
     encoder.write_u64(record.source_hash);
     encode_parsed_module(&mut encoder, &record.parsed)?;
     encode_snapshot(&mut encoder, &record.snapshot)?;
+    encoder.write_u8(match record.parsed.build_side_effect_free {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    });
     Ok(encoder.finish())
 }
 
@@ -3439,8 +3455,14 @@ fn decode_module_build_record(bytes: &[u8]) -> Option<ModuleBuildRecordDto> {
     let source = decoder.read_string()?;
     let binary_source = decoder.read_optional_bytes()?;
     let source_hash = decoder.read_u64()?;
-    let parsed = decode_parsed_module(&mut decoder)?;
+    let mut parsed = decode_parsed_module(&mut decoder)?;
     let snapshot = decode_snapshot(&mut decoder)?;
+    parsed.build_side_effect_free = match decoder.read_u8()? {
+        0 => None,
+        1 => Some(false),
+        2 => Some(true),
+        _ => return None,
+    };
     decoder.finish()?;
     let record = ModuleBuildRecordDto {
         parsed,
@@ -3510,6 +3532,7 @@ fn decode_parsed_module(decoder: &mut Decoder<'_>) -> Option<ParsedModuleDto> {
         blocks,
         presentational_dependencies,
         data,
+        build_side_effect_free: None,
     })
 }
 

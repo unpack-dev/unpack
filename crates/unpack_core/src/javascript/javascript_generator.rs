@@ -3,15 +3,14 @@
 use rspack_sources::{OriginalSource, ReplaceSource};
 
 use crate::{
-    AsyncDependenciesBlockIndex, DependencyIndex, Result,
-    code_generation::{
-        apply_dependency_template, apply_harmony_compatibility_template, render_init_fragments,
-    },
+    AsyncDependenciesBlockIndex, Dependency, DependencyIndex, Result,
     code_generation_record::{
         CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationSource,
     },
+    dependency_template::DependencyTemplateContext,
+    init_fragment::{InitFragment, InitFragmentStage},
     normal_module_factory::ModuleGeneratorContext,
-    runtime::RuntimeRequirements,
+    runtime::{RuntimeRequirement, RuntimeRequirements},
 };
 
 pub(crate) fn generate(context: ModuleGeneratorContext<'_>) -> Result<CodeGenerationRecord> {
@@ -31,58 +30,55 @@ pub(crate) fn generate(context: ModuleGeneratorContext<'_>) -> Result<CodeGenera
     let mut init_fragments = Vec::new();
     let mut runtime_requirements = RuntimeRequirements::default();
     if module.is_harmony() {
-        apply_harmony_compatibility_template(&mut runtime_requirements, &mut init_fragments);
+        runtime_requirements.insert(RuntimeRequirement::MakeNamespaceObject);
+        init_fragments.push(InitFragment::new(
+            InitFragmentStage::Compatibility,
+            init_fragments.len(),
+            "__webpack_require__.r(__webpack_exports__);\n".to_string(),
+        ));
     }
 
-    for dependency in module.presentational_dependencies() {
-        apply_dependency_template(
-            dependency,
-            module_handle,
-            None,
-            None,
-            module_graph,
-            chunk_graph,
-            module.exports_info(),
-            module_render_ids,
-            &mut runtime_requirements,
-            &mut source,
-            &mut init_fragments,
-        )?;
-    }
-    for (dependency_index, dependency) in module.dependencies().iter().enumerate() {
-        apply_dependency_template(
-            dependency,
-            module_handle,
-            None,
-            Some(DependencyIndex::new(dependency_index)),
-            module_graph,
-            chunk_graph,
-            module.exports_info(),
-            module_render_ids,
-            &mut runtime_requirements,
-            &mut source,
-            &mut init_fragments,
-        )?;
-    }
-    for (block_index, block) in module.blocks().iter().enumerate() {
-        for (dependency_index, dependency) in block.dependencies().iter().enumerate() {
-            apply_dependency_template(
+    {
+        let mut apply_template =
+            |dependency: &Dependency,
+             origin_block: Option<AsyncDependenciesBlockIndex>,
+             dependency_index: Option<DependencyIndex>| {
+                let mut context = DependencyTemplateContext {
+                    module: module_handle,
+                    origin_block,
+                    dependency_index,
+                    module_graph,
+                    chunk_graph,
+                    exports_info: module.exports_info(),
+                    module_render_ids,
+                    runtime_requirements: &mut runtime_requirements,
+                    init_fragments: &mut init_fragments,
+                };
+                dependency.apply_template(&mut source, &mut context)
+            };
+
+        for dependency in module.presentational_dependencies() {
+            apply_template(dependency, None, None)?;
+        }
+        for (dependency_index, dependency) in module.dependencies().iter().enumerate() {
+            apply_template(
                 dependency,
-                module_handle,
-                Some(AsyncDependenciesBlockIndex::new(block_index)),
+                None,
                 Some(DependencyIndex::new(dependency_index)),
-                module_graph,
-                chunk_graph,
-                module.exports_info(),
-                module_render_ids,
-                &mut runtime_requirements,
-                &mut source,
-                &mut init_fragments,
             )?;
+        }
+        for (block_index, block) in module.blocks().iter().enumerate() {
+            for (dependency_index, dependency) in block.dependencies().iter().enumerate() {
+                apply_template(
+                    dependency,
+                    Some(AsyncDependenciesBlockIndex::new(block_index)),
+                    Some(DependencyIndex::new(dependency_index)),
+                )?;
+            }
         }
     }
 
-    let init = render_init_fragments(init_fragments);
+    let init = InitFragment::render(init_fragments);
     Ok(
         CodeGenerationRecord::new(CodeGenerationSource::OriginalWithReplacements {
             prefix: init,

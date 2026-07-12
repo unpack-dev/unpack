@@ -5,24 +5,21 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use rspack_sources::{ConcatSource, RawStringSource, ReplaceSource, SourceMap};
+use rspack_sources::{ConcatSource, RawStringSource, SourceMap};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AsyncBlockOrigin, AsyncDependenciesBlockIndex, Chunk, ChunkGraph, CompilerOptions,
-    ConstDependency, Dependency, DependencyIndex, Error, ExportsInfo,
-    HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
-    HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
-    HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Module,
-    ModuleGraph, ModuleHandle, SourceRange,
-    cache::BuildCache,
+    DependencyIndex, Error, Module, ModuleGraph, ModuleHandle,
+    cache::Cache,
     cache_facade::{CacheETag, CacheIdentifier, CacheKey},
     cache_hash::StableHasher,
     code_generation_record::{CodeGenerationRecord, CodeGenerationResult, CodeGenerationSource},
+    dependency_template::{json_render_id, json_string},
     id_assignment::RenderId,
     normal_module_factory::{ModuleGeneratorContext, ModuleTypeRegistry},
     rendered_source::RenderedSource,
-    runtime::{RuntimeModule, RuntimeRequirement, RuntimeRequirements},
+    runtime::{RuntimeModule, RuntimeRequirements},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,28 +137,7 @@ fn hash_used_export_names(module: &Module, hasher: &mut StableHasher) {
                 .flat_map(|block| block.dependencies()),
         )
     {
-        match dependency {
-            Dependency::HarmonyExportSpecifier(dependency) => {
-                hasher.write_u8(0);
-                module
-                    .exports_info()
-                    .get_used_name(&dependency.name)
-                    .hash(hasher);
-            }
-            Dependency::HarmonyExportExpression(_) => {
-                hasher.write_u8(1);
-                module.exports_info().get_used_name("default").hash(hasher);
-            }
-            Dependency::HarmonyExportImportedSpecifier(dependency) => {
-                hasher.write_u8(2);
-                dependency
-                    .name
-                    .as_deref()
-                    .and_then(|name| module.exports_info().get_used_name(name))
-                    .hash(hasher);
-            }
-            _ => {}
-        }
+        dependency.update_code_generation_hash(module.exports_info(), hasher);
     }
 }
 
@@ -240,21 +216,6 @@ impl CacheKey for AssetRenderKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InitFragment {
-    stage: InitFragmentStage,
-    order: usize,
-    content: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum InitFragmentStage {
-    HarmonyCompatibility,
-    HarmonyExport,
-    HarmonyImport,
-    HarmonyStarReexport,
-}
-
 #[cfg(test)]
 pub(crate) fn generate_code(
     module_graph: &ModuleGraph,
@@ -269,10 +230,10 @@ pub(crate) fn generate_code(
 pub(crate) fn generate_code_cached(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
-    build_cache: &BuildCache,
+    cache: &Cache,
     module_types: &ModuleTypeRegistry,
 ) -> CodeGenerationOutcome {
-    let cache = build_cache.code_generations();
+    let cache = cache.code_generations();
     generate_code_with(module_graph, chunk_graph, |input| {
         let key = input.module.identity().clone();
         let etag = code_generation_etag(&input);
@@ -376,12 +337,12 @@ pub(crate) fn create_render_manifest(
 
 pub(crate) fn render_assets(
     options: &CompilerOptions,
-    build_cache: &BuildCache,
+    cache: &Cache,
     manifest: &RenderManifest,
     code_generation_results: &CodeGenerationResults,
 ) -> Vec<Asset> {
     let mut assets = Vec::new();
-    let cache = build_cache.asset_renders::<AssetRenderKey>();
+    let cache = cache.asset_renders::<AssetRenderKey>();
     let cache_enabled = options.cache.kind == crate::CacheKind::Filesystem;
     for entry in &manifest.entries {
         let RenderManifestContent::JavaScript(render) = &entry.render else {
@@ -659,413 +620,6 @@ fn render_failed_module_content(error: &Error) -> String {
     format!("throw new Error({});", json_string(&error.to_string()))
 }
 
-pub(crate) fn apply_harmony_compatibility_template(
-    runtime_requirements: &mut RuntimeRequirements,
-    init_fragments: &mut Vec<InitFragment>,
-) {
-    runtime_requirements.insert(RuntimeRequirement::MakeNamespaceObject);
-    push_init_fragment(
-        init_fragments,
-        InitFragmentStage::HarmonyCompatibility,
-        "__webpack_require__.r(__webpack_exports__);\n".to_string(),
-    );
-}
-
-pub(crate) fn render_init_fragments(mut fragments: Vec<InitFragment>) -> String {
-    fragments.sort_by_key(|fragment| (fragment.stage, fragment.order));
-    fragments
-        .into_iter()
-        .map(|fragment| fragment.content)
-        .collect()
-}
-
-fn push_init_fragment(
-    init_fragments: &mut Vec<InitFragment>,
-    stage: InitFragmentStage,
-    content: String,
-) {
-    init_fragments.push(InitFragment {
-        stage,
-        order: init_fragments.len(),
-        content,
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_dependency_template(
-    dependency: &Dependency,
-    module_handle: ModuleHandle,
-    origin_block: Option<AsyncDependenciesBlockIndex>,
-    dependency_index: Option<DependencyIndex>,
-    module_graph: &ModuleGraph,
-    chunk_graph: &ChunkGraph,
-    exports_info: &ExportsInfo,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
-    runtime_requirements: &mut RuntimeRequirements,
-    source: &mut ReplaceSource,
-    init_fragments: &mut Vec<InitFragment>,
-) -> std::result::Result<(), Error> {
-    let module = module_graph
-        .module(module_handle)
-        .expect("Dependency Template origin Module must exist in the Module Graph");
-    for range in dependency.source_ranges() {
-        if range.start > range.end || range.end as usize > module.source_len() {
-            return Err(Error::CodeGeneration {
-                module: module_handle,
-                path: module.identity().resource.clone(),
-                message: format!(
-                    "dependency source range {}..{} exceeds module source length {}",
-                    range.start,
-                    range.end,
-                    module.source_len()
-                ),
-            });
-        }
-    }
-    match dependency {
-        Dependency::Const(dep) => apply_const_dependency(dep, source),
-        Dependency::Null(_) => {}
-        Dependency::HarmonyExportHeader(dep) => apply_export_header_dependency(dep, source),
-        Dependency::HarmonyImportSideEffect(dep) => {
-            runtime_requirements.insert(RuntimeRequirement::Require);
-            apply_harmony_import_side_effect_dependency(
-                dep,
-                module_handle,
-                dependency_index,
-                module_graph,
-                module_render_ids,
-                init_fragments,
-            )
-        }
-        Dependency::HarmonyImportSpecifier(dep) => apply_harmony_import_specifier_dependency(
-            dep,
-            module_handle,
-            dependency_index,
-            module_graph,
-            module_render_ids,
-            source,
-        ),
-        Dependency::HarmonyExportSpecifier(dep) => {
-            runtime_requirements.insert(RuntimeRequirement::DefinePropertyGetters);
-            apply_harmony_export_specifier_dependency(dep, exports_info, init_fragments)
-        }
-        Dependency::HarmonyExportExpression(dep) => {
-            runtime_requirements.insert(RuntimeRequirement::DefinePropertyGetters);
-            apply_harmony_export_expression_dependency(dep, exports_info, source, init_fragments)
-        }
-        Dependency::HarmonyExportImportedSpecifier(dep) => {
-            runtime_requirements.insert(RuntimeRequirement::DefinePropertyGetters);
-            apply_harmony_export_imported_specifier_dependency(
-                dep,
-                module_handle,
-                dependency_index,
-                module_graph,
-                exports_info,
-                module_render_ids,
-                init_fragments,
-            )
-        }
-        Dependency::Import(dep) => {
-            runtime_requirements.insert(RuntimeRequirement::Require);
-            apply_import_dependency(
-                dep,
-                module_handle,
-                origin_block,
-                dependency_index,
-                module_graph,
-                chunk_graph,
-                module_render_ids,
-                runtime_requirements,
-                source,
-            )
-        }
-        Dependency::Entry(_) => {}
-    }
-    Ok(())
-}
-
-fn apply_const_dependency(dep: &ConstDependency, source: &mut ReplaceSource) {
-    replace(source, dep.range, dep.expression.clone());
-}
-
-fn apply_export_header_dependency(dep: &HarmonyExportHeaderDependency, source: &mut ReplaceSource) {
-    let end = dep
-        .declaration_range
-        .map(|range| range.start)
-        .unwrap_or(dep.statement_range.end);
-    replace(
-        source,
-        SourceRange::new(dep.statement_range.start, end),
-        String::new(),
-    );
-}
-
-fn apply_harmony_import_side_effect_dependency(
-    dep: &HarmonyImportSideEffectDependency,
-    module_handle: ModuleHandle,
-    dependency_index: Option<DependencyIndex>,
-    module_graph: &ModuleGraph,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
-    init_fragments: &mut Vec<InitFragment>,
-) {
-    let dependency_index = dependency_index.expect("Harmony import must have a Dependency Index");
-    let target = module_graph
-        .module_for_dependency(module_handle, None, dependency_index)
-        .expect("Harmony import must have a Module Graph connection");
-    let Some(target_render_id) = module_render_ids.get(&target) else {
-        return;
-    };
-    let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
-    let target_id = json_render_id(target_render_id);
-    push_init_fragment(
-        init_fragments,
-        InitFragmentStage::HarmonyImport,
-        format!("/* harmony import */ var {import_var} = __webpack_require__({target_id});\n"),
-    );
-}
-
-fn apply_harmony_import_specifier_dependency(
-    dep: &HarmonyImportSpecifierDependency,
-    module_handle: ModuleHandle,
-    dependency_index: Option<DependencyIndex>,
-    module_graph: &ModuleGraph,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
-    source: &mut ReplaceSource,
-) {
-    let dependency_index =
-        dependency_index.expect("Harmony import specifier must have a Dependency Index");
-    module_graph
-        .module_for_dependency(module_handle, None, dependency_index)
-        .expect("Harmony import specifier must have a Module Graph connection");
-    let expression = import_expression(
-        &dep.module.request,
-        dep.module.source_order.unwrap_or(0),
-        &dep.ids,
-    );
-    let expression = if dep.shorthand {
-        format!("{}: {expression}", dep.name)
-    } else {
-        expression
-    };
-    replace(source, dep.usage_range, expression);
-    let _ = module_render_ids;
-}
-
-fn apply_harmony_export_specifier_dependency(
-    dep: &HarmonyExportSpecifierDependency,
-    exports_info: &ExportsInfo,
-    init_fragments: &mut Vec<InitFragment>,
-) {
-    let Some(used_name) = exports_info.get_used_name(&dep.name) else {
-        return;
-    };
-    push_init_fragment(
-        init_fragments,
-        InitFragmentStage::HarmonyExport,
-        format!(
-            "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({}) }});\n",
-            property_name(used_name),
-            dep.id
-        ),
-    );
-}
-
-fn apply_harmony_export_expression_dependency(
-    dep: &HarmonyExportExpressionDependency,
-    exports_info: &ExportsInfo,
-    source: &mut ReplaceSource,
-    init_fragments: &mut Vec<InitFragment>,
-) {
-    let binding = dep
-        .declaration_id
-        .clone()
-        .unwrap_or_else(|| "__WEBPACK_DEFAULT_EXPORT__".to_string());
-    if dep.declaration_id.is_some() {
-        replace(
-            source,
-            SourceRange::new(dep.statement_range.start, dep.range.start),
-            "/* harmony default export */ ".to_string(),
-        );
-    } else {
-        replace(
-            source,
-            SourceRange::new(dep.statement_range.start, dep.range.start),
-            "/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = ".to_string(),
-        );
-    }
-    let Some(used_name) = exports_info.get_used_name("default") else {
-        return;
-    };
-    push_init_fragment(
-        init_fragments,
-        InitFragmentStage::HarmonyExport,
-        format!(
-            "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({binding}) }});\n",
-            property_name(used_name)
-        ),
-    );
-}
-
-fn apply_harmony_export_imported_specifier_dependency(
-    dep: &HarmonyExportImportedSpecifierDependency,
-    module_handle: ModuleHandle,
-    dependency_index: Option<DependencyIndex>,
-    module_graph: &ModuleGraph,
-    exports_info: &ExportsInfo,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
-    init_fragments: &mut Vec<InitFragment>,
-) {
-    let dependency_index =
-        dependency_index.expect("Harmony re-export must have a Dependency Index");
-    let target = module_graph
-        .module_for_dependency(module_handle, None, dependency_index)
-        .expect("Harmony re-export must have a Module Graph connection");
-    if !module_render_ids.contains_key(&target) {
-        return;
-    }
-    let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
-    if dep.is_star {
-        push_init_fragment(
-            init_fragments,
-            InitFragmentStage::HarmonyStarReexport,
-            format!(
-                "/* harmony reexport (unknown) */ for(const __WEBPACK_IMPORT_KEY__ in {import_var}) if(__WEBPACK_IMPORT_KEY__ !== \"default\" && __WEBPACK_IMPORT_KEY__ !== \"__esModule\") __webpack_require__.d(__webpack_exports__, {{ [__WEBPACK_IMPORT_KEY__]: () => ({import_var}[__WEBPACK_IMPORT_KEY__]) }});\n"
-            ),
-        );
-    } else if let Some(name) = &dep.name {
-        let Some(used_name) = exports_info.get_used_name(name) else {
-            return;
-        };
-        let expression = export_access_expression(&import_var, &dep.ids);
-        push_init_fragment(
-            init_fragments,
-            InitFragmentStage::HarmonyExport,
-            format!(
-                "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({expression}) }});\n",
-                property_name(used_name),
-            ),
-        );
-    }
-}
-
-fn apply_import_dependency(
-    dep: &ImportDependency,
-    module_handle: ModuleHandle,
-    origin_block: Option<AsyncDependenciesBlockIndex>,
-    dependency_index: Option<DependencyIndex>,
-    module_graph: &ModuleGraph,
-    chunk_graph: &ChunkGraph,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
-    runtime_requirements: &mut RuntimeRequirements,
-    source: &mut ReplaceSource,
-) {
-    let block_index = origin_block.expect("Dynamic import must belong to an Async Block");
-    let dependency_index = dependency_index.expect("Dynamic import must have a Dependency Index");
-    let target = module_graph
-        .module_for_dependency(module_handle, Some(block_index), dependency_index)
-        .expect("Dynamic import must have a Module Graph connection");
-    let target_id = json_render_id(&module_render_ids[&target]);
-    let origin = AsyncBlockOrigin {
-        module: module_handle,
-        block: block_index,
-    };
-    let expression = if let Some(group_handle) = chunk_graph.block_chunk_group(origin) {
-        runtime_requirements.insert(RuntimeRequirement::EnsureChunk);
-        let group = &chunk_graph.chunk_groups()[group_handle.index()];
-        let chunk_handle = group
-            .chunks()
-            .first()
-            .copied()
-            .expect("Async Chunk Group must contain a Chunk");
-        let chunk = chunk_graph
-            .chunk(chunk_handle)
-            .expect("Async Chunk must exist before Dynamic Import generation");
-        let chunk_id = json_render_id(chunk.render_id());
-        format!(
-            "__webpack_require__.e({chunk_id}).then(__webpack_require__.bind(__webpack_require__, {target_id}))"
-        )
-    } else {
-        format!(
-            "Promise.resolve().then(__webpack_require__.bind(__webpack_require__, {target_id}))"
-        )
-    };
-    replace(source, dep.range(), expression);
-}
-
-fn replace(source: &mut ReplaceSource, range: SourceRange, content: String) {
-    source.replace(range.start, range.end, content, None);
-}
-
-fn import_var(request: &str, source_order: usize) -> String {
-    let ident = sanitize_identifier(request);
-    let index = source_order.saturating_sub(1);
-    format!("_{ident}__WEBPACK_IMPORTED_MODULE_{index}__")
-}
-
-fn import_expression(request: &str, source_order: usize, ids: &[String]) -> String {
-    let import_var = import_var(request, source_order);
-    export_access_expression(&import_var, ids)
-}
-
-fn export_access_expression(base: &str, ids: &[String]) -> String {
-    let mut expression = base.to_string();
-    for id in ids {
-        expression.push_str(&property_access(id));
-    }
-    expression
-}
-
-fn sanitize_identifier(value: &str) -> String {
-    let mut ident = value
-        .trim_start_matches("./")
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect::<String>();
-    if ident.is_empty() {
-        ident.push_str("module");
-    }
-    if ident.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        ident.insert(0, '_');
-    }
-    ident
-}
-
-fn property_access(property: &str) -> String {
-    if is_identifier(property) {
-        format!(".{property}")
-    } else {
-        format!("[{}]", json_string(property))
-    }
-}
-
-fn property_name(property: &str) -> String {
-    if is_identifier(property) {
-        property.to_string()
-    } else {
-        format!("[{}]", json_string(property))
-    }
-}
-
-fn is_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first == '$' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
-}
-
-fn json_string(value: &str) -> String {
-    simd_json::to_string(value).expect("JavaScript string input must serialize as JSON")
-}
-
-fn json_render_id(render_id: &RenderId) -> String {
-    match render_id {
-        RenderId::String(value) => json_string(value),
-        RenderId::Number(value) => value.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, fs};
@@ -1075,23 +629,23 @@ mod tests {
     use crate::{
         CacheOptions, Compiler, CompilerOptions, ConstDependency, Dependency, Entry, Error,
         ModuleGraph, ModuleHandle, ModuleIdentity, SnapshotOptions, SourceRange,
-        cache::{BuildCache, CacheItemFamily, CacheItemWork},
+        cache::{Cache, CacheItemFamily, CacheItemWork},
         cache_facade::{CacheIdentifier, CacheKey, CacheNamespace},
         id_assignment::{RenderId, assign_chunk_render_ids, assign_module_render_ids},
-        runtime::RuntimeModule,
+        runtime::{RuntimeModule, RuntimeRequirement},
     };
 
     use super::{
         AssetRenderKey, AssetRenderKind, CodeGenerationResult, CodeGenerationResults,
         CodeGenerationSource, JavascriptRenderManifest, ModuleRenderManifest,
-        RenderedRuntimeModule, RenderedSource, RuntimeRequirement, emit_asset,
+        RenderedRuntimeModule, RenderedSource, emit_asset,
     };
     use crate::code_generation_record::{CodeGenerationRecord, CodeGenerationReplacement};
 
     #[test]
     fn asset_render_facade_uses_stable_namespace_and_manifest_identity() {
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-        let facade = build_cache.asset_renders::<AssetRenderKey>();
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let facade = cache.asset_renders::<AssetRenderKey>();
         assert_eq!(
             facade.namespace(),
             CacheNamespace::new("unpack/asset-render")
@@ -1201,12 +755,11 @@ mod tests {
             assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
             (module_graph, chunk_graph, module)
         };
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
 
         let (first_graph, first_chunks, first_module) = build("first");
         let module_types = crate::compiler::test_compilation_hooks().normal_module_factory_hooks;
-        let first =
-            super::generate_code_cached(&first_graph, &first_chunks, &build_cache, &module_types);
+        let first = super::generate_code_cached(&first_graph, &first_chunks, &cache, &module_types);
         assert_eq!(
             first.results.results[&first_module]
                 .source()
@@ -1217,7 +770,7 @@ mod tests {
 
         let (second_graph, second_chunks, second_module) = build("second");
         let second =
-            super::generate_code_cached(&second_graph, &second_chunks, &build_cache, &module_types);
+            super::generate_code_cached(&second_graph, &second_chunks, &cache, &module_types);
         assert_eq!(
             second.results.results[&second_module]
                 .source()
@@ -1226,7 +779,7 @@ mod tests {
             "second"
         );
         assert_eq!(
-            build_cache
+            cache
                 .work_counters()
                 .for_family(CacheItemFamily::CodeGeneration),
             CacheItemWork {
@@ -1269,9 +822,9 @@ mod tests {
             module_render_ids: &module_render_ids,
         };
         let etag = super::code_generation_etag(&input);
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-        let cache = build_cache.code_generations();
-        cache.store(
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let code_generation_cache = cache.code_generations();
+        code_generation_cache.store(
             module_ref.identity().clone(),
             Some(etag.clone()),
             CodeGenerationRecord::new(CodeGenerationSource::OriginalWithReplacements {
@@ -1292,7 +845,7 @@ mod tests {
         let outcome = super::generate_code_cached(
             &module_graph,
             &chunk_graph,
-            &build_cache,
+            &cache,
             &crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
         );
         assert_eq!(
@@ -1303,7 +856,7 @@ mod tests {
             "éx"
         );
         assert!(
-            cache
+            code_generation_cache
                 .get(module_ref.identity(), Some(&etag))
                 .expect("regenerated Code Generation Record should be stored")
                 .is_compatible_with(module_ref.source())
@@ -1333,18 +886,18 @@ mod tests {
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
         for outcome in [
             super::generate_code_cached(
                 &module_graph,
                 &chunk_graph,
-                &build_cache,
+                &cache,
                 &crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
             ),
             super::generate_code_cached(
                 &module_graph,
                 &chunk_graph,
-                &build_cache,
+                &cache,
                 &crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
             ),
         ] {
@@ -1367,7 +920,7 @@ mod tests {
             );
         }
         assert_eq!(
-            build_cache
+            cache
                 .work_counters()
                 .for_family(CacheItemFamily::CodeGeneration),
             CacheItemWork {

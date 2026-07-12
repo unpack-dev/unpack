@@ -17,14 +17,14 @@ use tokio::{
 };
 
 use crate::{
-    AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, DependencyKind,
+    AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, EntryDependency,
     Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleHandle,
     ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
-    cache::{BuildCache, ModuleBuildRecord},
-    cache_facade::ModuleBuildCache,
+    cache::{Cache, ModuleBuildRecord},
+    cache_facade::{CacheETag, ModuleBuildCache},
     module::BuiltModuleContent,
     normal_module_factory::{ModuleParserContext, ModuleSourceKind, ModuleTypeRegistry},
-    parser::ParsedModule,
+    parser::{JavascriptParserHookSet, ParsedModule},
     snapshot::{FileSystemInfo, SnapshotCache},
 };
 
@@ -43,6 +43,8 @@ pub(crate) struct MakeState {
 struct MakeServices {
     normal_module_factory: NormalModuleFactory,
     module_build_cache: ModuleBuildCache,
+    module_build_etag: CacheETag,
+    parser_hooks: JavascriptParserHookSet,
     module_snapshot_strategy: SnapshotStrategy,
     file_system_info: FileSystemInfo,
     snapshot_cache: SnapshotCache,
@@ -189,16 +191,17 @@ type BackgroundMakeTask = JoinHandle<Result<Vec<MakeTask>>>;
 pub(crate) async fn run(
     options: &CompilerOptions,
     resolver: UnpackResolver,
-    build_cache: BuildCache,
+    cache: Cache,
     file_system_info: FileSystemInfo,
     module_types: ModuleTypeRegistry,
+    parser_hooks: JavascriptParserHookSet,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
     let snapshot_cache = SnapshotCache::default();
     let services = MakeServices {
         normal_module_factory: NormalModuleFactory::new(
             resolver,
-            build_cache.normal_module_factory(),
+            cache.normal_module_factory(),
             file_system_info.clone(),
             options.snapshot.resolve,
             snapshot_cache.clone(),
@@ -206,7 +209,9 @@ pub(crate) async fn run(
         )
         .with_module_rules(options.module_rules.clone())
         .with_side_effects(options.side_effects != crate::SideEffectsOption::Disabled),
-        module_build_cache: build_cache.module_builds(),
+        module_build_cache: cache.module_builds(),
+        module_build_etag: CacheETag::new(parser_hooks.cache_fingerprint()),
+        parser_hooks,
         file_system_info,
         module_snapshot_strategy: options.snapshot.module,
         snapshot_cache,
@@ -228,7 +233,7 @@ pub(crate) async fn run(
                     entry_index: Some(entry_index),
                     origin_block: None,
                     origin_dependency_index: None,
-                    dependency: Dependency::new(DependencyKind::Entry, entry.request.clone()),
+                    dependency: Dependency::Entry(EntryDependency::new(entry.request.clone())),
                 }],
             }),
             services.clone(),
@@ -456,7 +461,10 @@ impl BuildTask {
             .ok_or(Error::MissingModuleDirectory(self.module_handle))?
             .to_path_buf();
 
-        if let Some(record) = services.module_build_cache.get(&self.identity, None) {
+        if let Some(record) = services
+            .module_build_cache
+            .get(&self.identity, Some(&services.module_build_etag))
+        {
             let valid = if services.module_snapshot_strategy.hash {
                 record
                     .is_valid_with_cache(
@@ -559,6 +567,7 @@ impl BuildTask {
             resource: &self.resource,
             source: &source,
             source_bytes,
+            javascript_parser_hooks: &services.parser_hooks,
         }) {
             Ok(parsed) => parsed,
             Err(error) if error.is_compilation_error() => {
@@ -616,9 +625,11 @@ impl BuildTask {
             .lock()
             .await
             .finish_build(self.module_handle, built_content)?;
-        services
-            .module_build_cache
-            .store(self.identity, None, record);
+        services.module_build_cache.store(
+            self.identity,
+            Some(services.module_build_etag.clone()),
+            record,
+        );
 
         Ok(process_dependencies.into_iter().collect())
     }
@@ -862,20 +873,21 @@ mod tests {
 
         let options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
         let resolver = UnpackResolver::new(options.resolve.clone());
-        let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
+        let cache = Cache::new(options.cache.clone(), options.snapshot.clone());
         let state = Arc::new(Mutex::new(MakeState::default()));
 
         run(
             &options,
             resolver,
-            build_cache.clone(),
+            cache.clone(),
             FileSystemInfo::new(),
             crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
+            JavascriptParserHookSet::default(),
             Arc::clone(&state),
         )
         .await?;
 
-        let cache = build_cache.stats();
+        let cache = cache.stats();
         let state = state.lock().await;
         let graph = &state.module_graph;
         let dep = graph

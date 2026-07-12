@@ -3,6 +3,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use super::Compilation;
+use crate::parser::JavascriptParserHookSet;
 
 type AsyncTap = Arc<
     dyn for<'a> Fn(&'a mut Compilation) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
@@ -63,6 +64,7 @@ impl SyncCompilationHook {
 pub(crate) struct CompilationHookSet {
     pub normal_module_factory_hooks: crate::normal_module_factory::ModuleTypeRegistry,
     pub render_manifest: RenderManifestHook,
+    pub javascript_parser: JavascriptParserHookSet,
     pub finish_modules: AsyncCompilationHook,
     pub optimize_dependencies: SyncCompilationHook,
 }
@@ -94,6 +96,7 @@ impl std::fmt::Debug for CompilationHookSet {
                 &self.normal_module_factory_hooks,
             )
             .field("render_manifest", &self.render_manifest)
+            .field("javascript_parser", &self.javascript_parser)
             .field("finish_modules_taps", &self.finish_modules.taps.len())
             .field(
                 "optimize_dependencies_taps",

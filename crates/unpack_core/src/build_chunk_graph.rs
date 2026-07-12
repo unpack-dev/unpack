@@ -9,6 +9,7 @@ use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, ModuleGraph, ModuleHandle,
     chunk_graph::ChunkGraph,
     chunk_group::{AsyncBlockOrigin, ChunkGroupHandle, ChunkGroupKind},
+    module_computation_cache::ModuleComputationCache,
 };
 
 const MODULES_PER_MASK_WORD: usize = u64::BITS as usize;
@@ -160,10 +161,20 @@ impl AsyncChunkPlan {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_chunk_graph(
     options: &CompilerOptions,
     module_graph: &ModuleGraph,
     entries: &[ModuleHandle],
+) -> ChunkGraph {
+    build_chunk_graph_with_cache(options, module_graph, entries, None)
+}
+
+pub(crate) fn build_chunk_graph_with_cache(
+    options: &CompilerOptions,
+    module_graph: &ModuleGraph,
+    entries: &[ModuleHandle],
+    module_computation_cache: Option<&ModuleComputationCache>,
 ) -> ChunkGraph {
     let mut chunk_graph = ChunkGraph::default();
     let module_count = module_graph.modules().len();
@@ -184,7 +195,8 @@ pub(crate) fn build_chunk_graph(
         chunk_graph.connect_chunk_and_group(entry_chunk, entry_group);
         chunk_graph.add_entrypoint(entry_group);
 
-        let initial_modules = collect_static_reachable(module_graph, entry_module);
+        let initial_modules =
+            collect_static_reachable_cached(module_graph, entry_module, module_computation_cache);
         for module in &initial_modules {
             chunk_graph.connect_chunk_and_module(entry_chunk, *module);
         }
@@ -237,7 +249,8 @@ pub(crate) fn build_chunk_graph(
                     pending.push_back(LogicalChunkGroup::AsyncChunk(target));
                 }
             } else {
-                let static_modules = collect_static_reachable(module_graph, target);
+                let static_modules =
+                    collect_static_reachable_cached(module_graph, target, module_computation_cache);
                 async_chunk_plans.insert(
                     target,
                     AsyncChunkPlan::new(
@@ -301,6 +314,27 @@ pub(crate) fn build_chunk_graph(
     }
 
     chunk_graph
+}
+
+fn collect_static_reachable_cached(
+    module_graph: &ModuleGraph,
+    start: ModuleHandle,
+    module_computation_cache: Option<&ModuleComputationCache>,
+) -> Vec<ModuleHandle> {
+    let identity = module_graph
+        .module(start)
+        .expect("static reachability must start at an existing Module")
+        .identity();
+    if let Some(modules) =
+        module_computation_cache.and_then(|cache| cache.get_static_reachable(identity))
+    {
+        return modules;
+    }
+    let modules = collect_static_reachable(module_graph, start);
+    if let Some(cache) = module_computation_cache {
+        cache.store_static_reachable(identity, &modules, module_graph);
+    }
+    modules
 }
 
 fn collect_static_reachable(module_graph: &ModuleGraph, start: ModuleHandle) -> Vec<ModuleHandle> {

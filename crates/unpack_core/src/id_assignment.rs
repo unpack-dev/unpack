@@ -304,7 +304,7 @@ mod tests {
     use super::*;
     use crate::{
         CacheOptions, CompilerOptions, Entry, ModuleGraph, ModuleIdentity, SnapshotOptions,
-        cache::BuildCache,
+        cache::Cache,
         code_generation::{create_render_manifest, generate_code, render_assets},
     };
 
@@ -381,7 +381,7 @@ mod tests {
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
         let results = generate_code(&module_graph, &chunk_graph).results;
         chunk_graph.process_runtime_requirements(
             results
@@ -399,7 +399,7 @@ mod tests {
             },
             &hooks.render_manifest,
         );
-        let assets = render_assets(&options, &build_cache, &manifest, &results);
+        let assets = render_assets(&options, &cache, &manifest, &results);
         let main = assets
             .iter()
             .find(|asset| asset.filename == "main.js")
@@ -438,7 +438,7 @@ mod tests {
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
         let results = generate_code(&module_graph, &chunk_graph).results;
         chunk_graph.process_runtime_requirements(
             results
@@ -455,7 +455,7 @@ mod tests {
             },
             &hooks.render_manifest,
         );
-        render_assets(&options, &build_cache, &manifest, &results)
+        render_assets(&options, &cache, &manifest, &results)
     }
 
     fn add_built_module(

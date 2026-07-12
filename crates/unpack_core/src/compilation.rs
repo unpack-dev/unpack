@@ -7,11 +7,12 @@ use tokio::sync::Mutex;
 use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleHandle, Result, UnpackResolver,
-    build_chunk_graph::build_chunk_graph,
-    cache::BuildCache,
+    build_chunk_graph::build_chunk_graph_with_cache,
+    cache::Cache,
     code_generation::{self, CodeGenerationResults, RenderManifest},
     id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
     make::{self, MakeState},
+    module_computation_cache::ModuleComputationCache,
     snapshot::FileSystemInfo,
 };
 use tracing::Instrument;
@@ -23,7 +24,8 @@ pub(crate) use hooks::{CompilationHookSet, RenderManifestHook};
 pub struct Compilation {
     options: CompilerOptions,
     resolver: UnpackResolver,
-    build_cache: BuildCache,
+    cache: Cache,
+    module_computation_cache: Option<ModuleComputationCache>,
     module_graph: ModuleGraph,
     chunk_graph: ChunkGraph,
     render_ids_assigned: bool,
@@ -42,14 +44,16 @@ impl Compilation {
     pub(crate) fn new(
         options: CompilerOptions,
         resolver: UnpackResolver,
-        build_cache: BuildCache,
+        cache: Cache,
+        module_computation_cache: Option<ModuleComputationCache>,
         hooks: CompilationHookSet,
     ) -> Self {
         let file_system_info = FileSystemInfo::from_snapshot_options(&options.snapshot);
         Self {
             options,
             resolver,
-            build_cache,
+            cache,
+            module_computation_cache,
             module_graph: ModuleGraph::default(),
             chunk_graph: ChunkGraph::default(),
             render_ids_assigned: false,
@@ -75,6 +79,10 @@ impl Compilation {
 
     pub(crate) fn module_graph_mut(&mut self) -> &mut ModuleGraph {
         &mut self.module_graph
+    }
+
+    pub(crate) fn module_computation_cache(&self) -> Option<&ModuleComputationCache> {
+        self.module_computation_cache.as_ref()
     }
 
     pub fn into_graphs(self) -> (ModuleGraph, ChunkGraph) {
@@ -123,9 +131,10 @@ impl Compilation {
             let result = make::run(
                 &self.options,
                 self.resolver.clone(),
-                self.build_cache.clone(),
+                self.cache.clone(),
                 self.file_system_info.clone(),
                 self.hooks.normal_module_factory_hooks.clone(),
+                self.hooks.javascript_parser.clone(),
                 Arc::clone(&state),
             )
             .await;
@@ -145,6 +154,12 @@ impl Compilation {
                     .into_iter()
                     .collect(),
             };
+
+            if result.is_ok()
+                && let Some(cache) = &self.module_computation_cache
+            {
+                cache.prepare(&self.module_graph);
+            }
 
             if result.is_ok() {
                 self.hooks.clone().finish_modules.call(self).await;
@@ -172,7 +187,12 @@ impl Compilation {
             "unpack.Compilation",
             "chunk graph build started",
         );
-        self.chunk_graph = build_chunk_graph(&self.options, &self.module_graph, &self.entries);
+        self.chunk_graph = build_chunk_graph_with_cache(
+            &self.options,
+            &self.module_graph,
+            &self.entries,
+            self.module_computation_cache.as_ref(),
+        );
         self.render_ids_assigned = false;
         self.log_infrastructure(
             InfrastructureLogLevel::Verbose,
@@ -240,7 +260,7 @@ impl Compilation {
     pub fn render_assets(&mut self) {
         self.assets = code_generation::render_assets(
             &self.options,
-            &self.build_cache,
+            &self.cache,
             self.asset_render_manifest
                 .as_ref()
                 .expect("render manifest should exist before Asset rendering"),
@@ -260,7 +280,7 @@ impl Compilation {
         let outcome = code_generation::generate_code_cached(
             &self.module_graph,
             &self.chunk_graph,
-            &self.build_cache,
+            &self.cache,
             &self.hooks.normal_module_factory_hooks,
         );
         self.errors.extend(outcome.errors);

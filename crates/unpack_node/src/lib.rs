@@ -109,6 +109,10 @@ pub struct NativeCacheOptions {
     pub allow_collecting_memory: Option<bool>,
     #[napi(js_name = "maxMemoryGenerations")]
     pub max_memory_generations: Option<f64>,
+    #[napi(js_name = "cacheUnaffected")]
+    pub cache_unaffected: Option<bool>,
+    #[napi(js_name = "memoryCacheUnaffected")]
+    pub memory_cache_unaffected: Option<bool>,
     #[napi(js_name = "idleTimeout")]
     pub idle_timeout: Option<u32>,
     #[napi(js_name = "idleTimeoutForInitialStore")]
@@ -676,6 +680,8 @@ fn cache_options_from_native(options: NativeCacheOptions) -> Result<CacheOptions
     cache.max_memory_generations = options
         .max_memory_generations
         .map(|generations| generations as u64);
+    cache.cache_unaffected = options.cache_unaffected.unwrap_or(false)
+        || options.memory_cache_unaffected.unwrap_or(false);
     if let Some(max_age) = options.max_age {
         if max_age.is_nan() || max_age < 0.0 {
             return Err(napi::Error::from_reason(
@@ -1091,5 +1097,48 @@ fn watch_dependencies(dependencies: &unpack_core::WatchDependencies) -> NativeWa
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_public_unaffected_options_enable_the_core_module_computation_cache() {
+        let mut memory = native_cache_options("memory");
+        memory.cache_unaffected = Some(true);
+        assert!(cache_options_from_native(memory).unwrap().cache_unaffected);
+
+        let mut filesystem = native_cache_options("filesystem");
+        filesystem.memory_cache_unaffected = Some(true);
+        assert!(
+            cache_options_from_native(filesystem)
+                .unwrap()
+                .cache_unaffected
+        );
+    }
+
+    fn native_cache_options(cache_type: &str) -> NativeCacheOptions {
+        NativeCacheOptions {
+            cache_type: cache_type.to_string(),
+            cache_directory: None,
+            cache_location: None,
+            name: None,
+            version: None,
+            build_dependencies: Vec::new(),
+            automatic_build_dependencies: Vec::new(),
+            max_age: None,
+            compression: None,
+            allow_collecting_memory: None,
+            max_memory_generations: None,
+            cache_unaffected: None,
+            memory_cache_unaffected: None,
+            idle_timeout: None,
+            idle_timeout_for_initial_store: None,
+            idle_timeout_after_large_changes: None,
+            profile: None,
+            readonly: None,
+        }
     }
 }

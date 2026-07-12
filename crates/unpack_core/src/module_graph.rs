@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::index_vec::IndexVec;
 use crate::{
     Dependency, Module, ModuleGraphConnection, ModuleGraphConnectionHandle,
     ModuleGraphConnectionState, ModuleHandle, ModuleIdentity,
@@ -11,9 +12,10 @@ use crate::{
 pub struct ModuleGraph {
     modules: Vec<Module>,
     connections: Vec<ModuleGraphConnection>,
-    outgoing: Vec<Vec<ModuleGraphConnectionHandle>>,
-    incoming: Vec<Vec<ModuleGraphConnectionHandle>>,
-    outgoing_by_location: Vec<HashMap<DependencyLocation, ModuleGraphConnectionHandle>>,
+    outgoing: IndexVec<ModuleHandle, Vec<ModuleGraphConnectionHandle>>,
+    incoming: IndexVec<ModuleHandle, Vec<ModuleGraphConnectionHandle>>,
+    outgoing_by_location:
+        IndexVec<ModuleHandle, HashMap<DependencyLocation, ModuleGraphConnectionHandle>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -46,9 +48,9 @@ impl ModuleGraph {
     pub(crate) fn add_module(&mut self, identity: ModuleIdentity) -> ModuleHandle {
         let handle = ModuleHandle::new(self.modules.len());
         self.modules.push(Module::new(handle, identity));
-        self.outgoing.push(Vec::new());
-        self.incoming.push(Vec::new());
-        self.outgoing_by_location.push(HashMap::new());
+        debug_assert_eq!(self.outgoing.push(Vec::new()), handle);
+        debug_assert_eq!(self.incoming.push(Vec::new()), handle);
+        debug_assert_eq!(self.outgoing_by_location.push(HashMap::new()), handle);
         handle
     }
 
@@ -75,9 +77,9 @@ impl ModuleGraph {
             state: ModuleGraphConnectionState::Active,
         });
         if let Some(origin_module) = origin_module {
-            self.outgoing[origin_module.index()].push(connection_handle);
+            self.outgoing[origin_module].push(connection_handle);
             if let Some(dependency_index) = origin_dependency_index {
-                self.outgoing_by_location[origin_module.index()].insert(
+                self.outgoing_by_location[origin_module].insert(
                     DependencyLocation {
                         block: origin_block,
                         dependency_index,
@@ -86,7 +88,7 @@ impl ModuleGraph {
                 );
             }
         }
-        self.incoming[module.index()].push(connection_handle);
+        self.incoming[module].push(connection_handle);
     }
 
     pub fn modules(&self) -> &[Module] {
@@ -114,8 +116,8 @@ impl ModuleGraph {
         if connection.module == module {
             return;
         }
-        self.incoming[connection.module.index()].retain(|candidate| *candidate != handle);
-        self.incoming[module.index()].push(handle);
+        self.incoming[connection.module].retain(|candidate| *candidate != handle);
+        self.incoming[module].push(handle);
         connection.module = module;
     }
 
@@ -130,7 +132,7 @@ impl ModuleGraph {
         &self,
         module: ModuleHandle,
     ) -> impl Iterator<Item = &ModuleGraphConnection> {
-        self.outgoing[module.index()]
+        self.outgoing[module]
             .iter()
             .map(|connection_handle| &self.connections[connection_handle.index()])
     }
@@ -139,7 +141,7 @@ impl ModuleGraph {
         &self,
         module: ModuleHandle,
     ) -> impl Iterator<Item = &ModuleGraphConnection> {
-        self.incoming[module.index()]
+        self.incoming[module]
             .iter()
             .map(|connection_handle| &self.connections[connection_handle.index()])
     }
@@ -155,7 +157,7 @@ impl ModuleGraph {
             dependency_index,
         };
         self.outgoing_by_location
-            .get(origin_module.index())?
+            .get(origin_module)?
             .get(&location)
             .map(|connection_handle| self.connections[connection_handle.index()].module)
     }

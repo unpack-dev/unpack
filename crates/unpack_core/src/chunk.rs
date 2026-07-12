@@ -77,8 +77,12 @@ impl Chunk {
         }
     }
 
-    pub(crate) fn root_modules(&self) -> &[ModuleHandle] {
+    pub fn root_modules(&self) -> &[ModuleHandle] {
         &self.root_modules
+    }
+
+    pub fn filename(&self) -> String {
+        crate::output_filename::resolve_chunk_filename(self)
     }
 
     pub(crate) fn filename_override(&self) -> Option<&str> {

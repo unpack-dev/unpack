@@ -239,6 +239,19 @@ pub struct NativeChunk {
 }
 
 #[napi(object)]
+pub struct NativeChunkGroup {
+    pub handle: u32,
+    pub name: Option<String>,
+    #[napi(js_name = "chunkHandles")]
+    pub chunk_handles: Vec<u32>,
+    #[napi(js_name = "runtimeChunkHandle")]
+    pub runtime_chunk_handle: Option<u32>,
+    pub files: Vec<String>,
+    #[napi(js_name = "isEntrypoint")]
+    pub is_entrypoint: bool,
+}
+
+#[napi(object)]
 pub struct NativeWatchDependencies {
     pub files: Vec<String>,
     pub contexts: Vec<String>,
@@ -407,6 +420,59 @@ impl NativeCompilation {
             .collect())
     }
 
+    #[napi(js_name = "chunkGroups")]
+    pub fn chunk_groups(&self) -> Result<Vec<NativeChunkGroup>> {
+        self.module_graph()?;
+        Ok(self
+            .chunk_graph
+            .chunk_groups()
+            .iter()
+            .map(|group| {
+                let chunks = group.chunks();
+                NativeChunkGroup {
+                    handle: group.handle().index().try_into().unwrap_or(u32::MAX),
+                    name: match group.kind() {
+                        unpack_core::ChunkGroupKind::Entrypoint { name } => Some(name.clone()),
+                        unpack_core::ChunkGroupKind::Async => None,
+                    },
+                    chunk_handles: chunks
+                        .iter()
+                        .map(|chunk| chunk.index().try_into().unwrap_or(u32::MAX))
+                        .collect(),
+                    runtime_chunk_handle: chunks
+                        .first()
+                        .map(|chunk| chunk.index().try_into().unwrap_or(u32::MAX)),
+                    files: chunks
+                        .iter()
+                        .filter_map(|handle| self.chunk_graph.chunk(*handle))
+                        .map(|chunk| chunk.filename())
+                        .collect(),
+                    is_entrypoint: matches!(
+                        group.kind(),
+                        unpack_core::ChunkGroupKind::Entrypoint { .. }
+                    ),
+                }
+            })
+            .collect())
+    }
+
+    #[napi(js_name = "chunkEntryModules")]
+    pub fn chunk_entry_modules(&self, chunk_handle: u32) -> Result<Vec<u32>> {
+        self.module_graph()?;
+        Ok(self
+            .chunk_graph
+            .chunk(unpack_core::ChunkHandle::new(chunk_handle as usize))
+            .map(|chunk| {
+                chunk
+                    .root_modules()
+                    .iter()
+                    .copied()
+                    .map(native_module_handle)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     #[napi(js_name = "chunkModules")]
     pub fn chunk_modules(&self, chunk_handle: u32) -> Result<Vec<u32>> {
         self.module_graph()?;
@@ -460,6 +526,8 @@ impl NativeCompilation {
 #[napi]
 pub struct NativeAssets {
     state: NativeAssetsState,
+    module_graph: unpack_core::ModuleGraph,
+    chunk_graph: unpack_core::ChunkGraph,
 }
 
 enum NativeAssetsState {
@@ -512,6 +580,15 @@ impl Drop for NativeAssets {
 
 #[napi]
 impl NativeAssets {
+    #[napi]
+    pub fn compilation(&mut self) -> NativeCompilation {
+        NativeCompilation {
+            module_graph: NativeModuleGraph::Owned(self.module_graph.clone()),
+            chunk_graph: self.chunk_graph.clone(),
+            assets: Vec::new(),
+        }
+    }
+
     #[napi(js_name = "takeAssetSources")]
     pub fn take_asset_sources(&mut self) -> Result<Vec<NativeAssetSource>> {
         Ok(native_asset_sources(std::mem::take(self.assets_mut()?)))
@@ -703,6 +780,8 @@ fn call_process_assets_hook<'a>(
             assets,
             return_sender,
         },
+        module_graph: compilation.module_graph().clone(),
+        chunk_graph: compilation.chunk_graph().clone(),
     };
     Box::pin(async move {
         let callback_result = match callback.call_async_catch(native_assets).await {

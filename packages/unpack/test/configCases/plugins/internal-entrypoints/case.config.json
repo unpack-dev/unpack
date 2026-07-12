@@ -1,1 +1,0 @@
-{"skip":{"upstream":"https://github.com/web-infra-dev/rspack/tree/main/tests/rspack-test/configCases/plugins/internal-entrypoints","issue":"https://github.com/unpack-dev/unpack/issues/244","reason":"Compilation.entrypoints is not exposed"}}

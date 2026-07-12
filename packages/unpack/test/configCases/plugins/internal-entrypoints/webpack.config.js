@@ -1,4 +1,6 @@
-import { RawSource } from "webpack-sources";
+import webpackSources from "webpack-sources";
+
+const { RawSource } = webpackSources;
 
 export default { plugins: [{ apply(compiler) { compiler.hooks.compilation.tap("plugin", (compilation) => {
   compilation.hooks.processAssets.tapPromise("plugin", async () => {

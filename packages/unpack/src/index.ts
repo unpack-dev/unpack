@@ -174,10 +174,23 @@ export interface Compilation {
   readonly moduleGraph: ModuleGraph;
   readonly chunkGraph: ChunkGraph;
   readonly modules: ReadonlySet<Module>;
+  readonly chunks: ReadonlySet<Chunk>;
+  readonly chunkGroups: readonly ChunkGroup[];
+  readonly namedChunkGroups: ReadonlyMap<string, ChunkGroup>;
+  readonly entrypoints: ReadonlyMap<string, Entrypoint>;
   readonly assets: Record<string, Source>;
   emitAsset(name: string, source: Source): void;
   updateAsset(name: string, source: Source | ((source: Source) => Source)): void;
   getAsset(name: string): CompilationAsset | undefined;
+}
+
+export interface ChunkGroup {
+  readonly chunks: readonly Chunk[];
+  getFiles(): string[];
+}
+
+export interface Entrypoint extends ChunkGroup {
+  getRuntimeChunk(): Chunk | null;
 }
 
 export interface CompilationAsset {
@@ -191,6 +204,7 @@ export interface Chunk {
 }
 
 export interface Module {
+  readonly context: string | null;
   readonly resource: string;
   readonly type: string;
   readonly dependencies: readonly Dependency[];
@@ -280,6 +294,7 @@ export interface ChunkGraph {
   getNumberOfModuleChunks(module: Module): number;
   getNumberOfChunkModules(chunk: Chunk): number;
   getChunkModulesIterable(chunk: Chunk): Iterable<Module>;
+  getChunkEntryModulesIterable(chunk: Chunk): Iterable<Module>;
   getOrderedChunkModulesIterable(
     chunk: Chunk,
     comparator: (left: Module, right: Module) => number
@@ -535,10 +550,21 @@ interface NativeCompilation {
   incomingConnections(moduleHandle: number): NativeModuleGraphConnection[];
   connectionsByHandle(connectionHandles: number[]): NativeModuleGraphConnection[];
   chunks(): NativeChunk[];
+  chunkGroups(): NativeChunkGroup[];
+  chunkEntryModules(chunkHandle: number): number[];
   chunkModules(chunkHandle: number): number[];
   moduleChunks(moduleHandle: number): number[];
   moduleId(moduleHandle: number): string | number | null;
   returnModuleGraphLease(): void;
+}
+
+interface NativeChunkGroup {
+  handle: number;
+  name?: string | null;
+  chunkHandles: number[];
+  runtimeChunkHandle?: number | null;
+  files: string[];
+  isEntrypoint: boolean;
 }
 
 interface NativeAssetSource {
@@ -547,6 +573,7 @@ interface NativeAssetSource {
 }
 
 interface NativeAssets {
+  compilation(): NativeCompilation;
   takeAssetSources(): NativeAssetSource[];
   replaceAssetSources(assets: NativeAssetSource[]): void;
   returnAssetsLease(): void;
@@ -1080,6 +1107,7 @@ class CompilerImpl implements Compiler {
           if (!compilation) {
             throw new Error("processAssets ran without an active Compilation");
           }
+          compilation.update(nativeAssets.compilation());
           const hook = compilation.hooks.processAssets as ProcessAssetsHookImpl;
           if (hook.isUsed() || compilation.hasPendingAssetMutations()) {
             compilation.beginProcessAssets(nativeAssets.takeAssetSources());
@@ -1095,6 +1123,7 @@ class CompilerImpl implements Compiler {
             nativeAssets.returnAssetsLease();
           } finally {
             if (assetPhaseStarted) compilation?.endProcessAssets();
+            compilation?.releaseNativeCompilation();
           }
         }
       }
@@ -1732,6 +1761,7 @@ class ModuleImpl implements Module {
   providedExports: readonly string[] | null;
   usedExports: readonly string[] | null;
   allExportsUsed: boolean;
+  readonly context: string | null;
 
   constructor(
     readonly nativeHandle: number,
@@ -1746,6 +1776,7 @@ class ModuleImpl implements Module {
     this.providedExports = providedExports;
     this.usedExports = usedExports;
     this.allExportsUsed = allExportsUsed;
+    this.context = dirname(resource.split(/[?#]/, 1)[0]);
   }
 
   identifier(): string {
@@ -2186,6 +2217,31 @@ class ChunkImpl implements Chunk {
   ) {}
 }
 
+class ChunkGroupImpl implements ChunkGroup {
+  readonly #files: readonly string[];
+
+  constructor(readonly chunks: readonly Chunk[], files: readonly string[]) {
+    this.#files = files;
+  }
+
+  getFiles(): string[] {
+    return [...this.#files];
+  }
+}
+
+class EntrypointImpl extends ChunkGroupImpl implements Entrypoint {
+  readonly #runtimeChunk: Chunk | null;
+
+  constructor(chunks: readonly Chunk[], files: readonly string[], runtimeChunk: Chunk | null) {
+    super(chunks, files);
+    this.#runtimeChunk = runtimeChunk;
+  }
+
+  getRuntimeChunk(): Chunk | null {
+    return this.#runtimeChunk;
+  }
+}
+
 class SortableSetView<T> extends Set<T> {
   #lastComparator: ((left: T, right: T) => number) | undefined;
 
@@ -2311,6 +2367,18 @@ class ChunkGraphImpl implements ChunkGraph {
     return this.#loadChunkModules(chunk);
   }
 
+  getChunkEntryModulesIterable(chunk: Chunk): Iterable<Module> {
+    if (!(chunk instanceof ChunkImpl)) return EMPTY_MODULE_ITERABLE;
+    return new SortableSetView(
+      (this.#nativeCompilation?.chunkEntryModules(chunk.nativeHandle) ?? []).flatMap(
+        (handle) => {
+          const module = this.#modulesByHandle.get(handle);
+          return module ? [module] : [];
+        }
+      )
+    );
+  }
+
   getOrderedChunkModulesIterable(
     chunk: Chunk,
     comparator: (left: Module, right: Module) => number
@@ -2355,9 +2423,14 @@ class CompilationImpl implements Compilation {
   readonly moduleGraph: ModuleGraphImpl;
   readonly chunkGraph: ChunkGraphImpl;
   readonly modules: ReadonlySet<Module>;
+  readonly chunks: ReadonlySet<Chunk>;
+  chunkGroups: readonly ChunkGroup[] = [];
+  namedChunkGroups: ReadonlyMap<string, ChunkGroup> = new Map();
+  entrypoints: ReadonlyMap<string, Entrypoint> = new Map();
   readonly #modulesByHandle = new Map<number, ModuleImpl>();
   readonly #chunksByHandle = new Map<number, ChunkImpl>();
   readonly #moduleSet = new Set<Module>();
+  readonly #chunkSet = new Set<Chunk>();
   readonly #assetValues = Object.create(null) as Record<string, Source>;
   readonly assets: Record<string, Source> = new Proxy(this.#assetValues, {
     set: (target, property, value) => {
@@ -2387,6 +2460,7 @@ class CompilationImpl implements Compilation {
       this.#chunksByHandle
     );
     this.modules = this.#moduleSet;
+    this.chunks = this.#chunkSet;
     this.update(compilation);
   }
 
@@ -2424,8 +2498,28 @@ class CompilationImpl implements Compilation {
           chunk.name ?? undefined
         )
         );
+        this.#chunkSet.add(this.#chunksByHandle.get(chunk.handle)!);
       }
     }
+    const namedChunkGroups = new Map<string, ChunkGroupImpl>();
+    const entrypoints = new Map<string, EntrypointImpl>();
+    this.chunkGroups = (compilation?.chunkGroups() ?? []).map((group) => {
+      const chunks = group.chunkHandles.flatMap((handle) => {
+        const chunk = this.#chunksByHandle.get(handle);
+        return chunk ? [chunk] : [];
+      });
+      const runtimeChunk = group.runtimeChunkHandle == null
+        ? null
+        : this.#chunksByHandle.get(group.runtimeChunkHandle) ?? null;
+      const facade = group.isEntrypoint
+        ? new EntrypointImpl(chunks, group.files, runtimeChunk)
+        : new ChunkGroupImpl(chunks, group.files);
+      if (group.name) namedChunkGroups.set(group.name, facade);
+      if (group.name && facade instanceof EntrypointImpl) entrypoints.set(group.name, facade);
+      return facade;
+    });
+    this.namedChunkGroups = namedChunkGroups;
+    this.entrypoints = entrypoints;
     if (!this.#assetsMaterialized) {
       const assetSources = compilation?.takeAssetSources() ?? [];
       if (assetSources.length > 0) {

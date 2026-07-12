@@ -15,14 +15,14 @@ use crate::{
     SnapshotStrategy,
     cache::pack_file::{
         AccessStamp, AssetRenderRecordCodec, AssetRenderRecordDto, CodeGenerationRecordCodec,
-        CodeGenerationRecordDto, CodecRegistry, ModuleBuildRecordCodec, ModuleBuildRecordDto,
-        PackFile, PackFileAddress, PackFileCompression, PackFileETag, PackFileGuardDto,
-        PackFileOpenOptions, PackFilePublicationOptions, PackFileRestore as PackFileRecordRestore,
-        PackFileRetention, PackFileWriteBatch, PublicationBase, ResolveRecordCodec,
-        ResolveRecordDto,
+        CodeGenerationRecordDto, ModuleBuildRecordCodec, ModuleBuildRecordDto, PackFile,
+        PackFileAddress, PackFileCompression, PackFileETag, PackFileGuardDto, PackFileOpenOptions,
+        PackFilePublicationOptions, PackFileRestore as PackFileRecordRestore, PackFileRetention,
+        PackFileWriteBatch, PublicationBase, ResolveRecordCodec, ResolveRecordDto,
     },
     code_generation_record::CodeGenerationRecord,
     rendered_source::RenderedSource,
+    serialization::Serializer,
     snapshot::{FileSystemInfo, Snapshot},
 };
 
@@ -162,7 +162,7 @@ impl PersistentTouch {
 #[derive(Debug)]
 pub(super) struct PackFileCacheLayer {
     root: Option<PathBuf>,
-    registry: CodecRegistry,
+    serializer: Serializer,
     pack_file: Option<Arc<Mutex<PackFile>>>,
     reader_generation: u64,
     compression: PackFileCompression,
@@ -284,14 +284,14 @@ fn writer_marker_is_live(contents: &str) -> bool {
 
 impl PackFileCacheLayer {
     pub(super) fn open(options: &CacheOptions, diagnostics: Arc<CacheDiagnostics>) -> Self {
-        let registry = persistent_codec_registry();
+        let serializer = persistent_serializer();
         let root = options.cache_location.clone();
         let compression = options.compression.into();
         let open_options = PackFileOpenOptions::new(options.allow_collecting_memory);
         let pack_file = root.as_ref().map(|root| {
             Arc::new(Mutex::new(PackFile::open_with_options(
                 root,
-                registry.clone(),
+                serializer.clone(),
                 open_options,
             )))
         });
@@ -325,7 +325,7 @@ impl PackFileCacheLayer {
         };
         Self {
             root,
-            registry,
+            serializer,
             pack_file,
             reader_generation: 0,
             compression,
@@ -380,7 +380,7 @@ impl PackFileCacheLayer {
                         )
                     })?;
                     let dto = ResolveRecordDto::try_from(record.as_ref())?;
-                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                    batch.insert(&self.serializer, pack_address, pack_etag, dto)?;
                 }
                 CacheItemFamily::ModuleBuild => {
                     let record = entry.value::<ModuleBuildRecord>().ok_or_else(|| {
@@ -390,7 +390,7 @@ impl PackFileCacheLayer {
                         )
                     })?;
                     let dto = ModuleBuildRecordDto::try_from(record.as_ref())?;
-                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                    batch.insert(&self.serializer, pack_address, pack_etag, dto)?;
                 }
                 CacheItemFamily::CodeGeneration => {
                     let record = entry.value::<CodeGenerationRecord>().ok_or_else(|| {
@@ -400,7 +400,7 @@ impl PackFileCacheLayer {
                         )
                     })?;
                     let dto = CodeGenerationRecordDto::from(record.as_ref());
-                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                    batch.insert(&self.serializer, pack_address, pack_etag, dto)?;
                 }
                 CacheItemFamily::AssetRender => {
                     let record = entry.value::<RenderedSource>().ok_or_else(|| {
@@ -410,7 +410,7 @@ impl PackFileCacheLayer {
                         )
                     })?;
                     let dto = AssetRenderRecordDto::from(record.as_ref());
-                    batch.insert(&self.registry, pack_address, pack_etag, dto)?;
+                    batch.insert(&self.serializer, pack_address, pack_etag, dto)?;
                 }
             }
         }
@@ -430,7 +430,8 @@ impl PackFileCacheLayer {
             ),
         )?;
         self.pending.clear();
-        let pack_file = PackFile::open_with_options(root, self.registry.clone(), self.open_options);
+        let pack_file =
+            PackFile::open_with_options(root, self.serializer.clone(), self.open_options);
         let after_entries = pack_file.entry_count();
         self.diagnostics.profile(format!(
             "store items={queued_items} duration_us={}; garbage collection removed_items={}; merge packs=0; split packs=0; compaction packs=0",
@@ -592,10 +593,10 @@ impl CacheLayer for PackFileCacheLayer {
     }
 }
 
-pub(super) fn persistent_codec_registry() -> CodecRegistry {
-    CodecRegistry::new()
-        .with_resolve_record(ResolveRecordCodec::current())
-        .with_module_build_record(ModuleBuildRecordCodec::current())
-        .with_code_generation_record(CodeGenerationRecordCodec::current())
-        .with_asset_render_record(AssetRenderRecordCodec::current())
+pub(super) fn persistent_serializer() -> Serializer {
+    Serializer::new()
+        .with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current())
+        .with_codec::<ModuleBuildRecordDto, _>(ModuleBuildRecordCodec::current())
+        .with_codec::<CodeGenerationRecordDto, _>(CodeGenerationRecordCodec::current())
+        .with_codec::<AssetRenderRecordDto, _>(AssetRenderRecordCodec::current())
 }

@@ -32,6 +32,7 @@ mod parser;
 mod rendered_source;
 mod resolver;
 mod runtime;
+mod serialization;
 mod snapshot;
 
 pub use async_dependencies_block::AsyncDependenciesBlock;

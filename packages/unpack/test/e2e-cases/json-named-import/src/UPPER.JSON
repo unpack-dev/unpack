@@ -1,0 +1,7 @@
+{
+  "answer": 42,
+  "nested": {
+    "ok": true
+  },
+  "__esModule": "json"
+}

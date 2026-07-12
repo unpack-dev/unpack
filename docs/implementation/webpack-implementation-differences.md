@@ -33,6 +33,27 @@ Necessity:
   results deliberately belong to one `Compilation`; they are not a persistent
   cache boundary.
 
+## Cache layout
+
+Unpack's top-level `cache` and `cache_facade` modules map to webpack's root
+`Cache.js` and `CacheFacade.js` responsibilities. Memory Cache Plugin, Memory
+With GC Cache Plugin, and Pack File Cache Strategy implementations live in
+separate modules below the `cache` category. The private `BuildCache`
+composition helper coordinates Compiler lifecycle, while Cache Items, options,
+and Pack File storage remain Rust-only helpers colocated with the webpack
+responsibility that owns them. There is no separate `build_cache` source
+hierarchy.
+
+Webpack wires these responsibilities through plugins and Tapable hooks. Unpack
+keeps its existing typed layers, explicit lifecycle methods, and closed Cache
+Item families under ADR 0131; the different Rust representation is deliberate,
+while the directory and file boundaries remain webpack-locatable.
+
+This layout change covers the cache-category alignment tracked by issue #217.
+Moving reusable codecs and indexes into a separate `serialization` category is
+the distinct serialization-layout step from that issue and remains follow-up
+work; the private Pack File format and codec behavior do not change here.
+
 ## Normal module factory
 
 Unpack's `NormalModuleFactory` resolves a dependency request, matches the

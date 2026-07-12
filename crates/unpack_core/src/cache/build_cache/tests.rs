@@ -3,9 +3,15 @@ use std::{collections::BTreeSet, fs, io, path::Path, sync::Arc, time::Duration};
 use filetime::{FileTime, set_file_mtime};
 use tempfile::tempdir;
 
-use super::persistent::persistent_codec_registry;
 use super::*;
-use crate::{ModuleIdentity, pack_file::PackFile, snapshot::FileSystemInfo};
+use crate::cache::pack_file_cache_strategy::persistent_codec_registry;
+use crate::{
+    ModuleIdentity,
+    cache::pack_file::PackFile,
+    cache::{ResolveRecord, ResolveRequest},
+    cache_facade::{CacheETag, CacheIdentifier, CacheKey},
+    snapshot::FileSystemInfo,
+};
 
 #[derive(Debug, Clone)]
 struct TestCacheKey(&'static str);

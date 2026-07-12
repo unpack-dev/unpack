@@ -10,7 +10,8 @@ use tokio::sync::OnceCell;
 use crate::{
     Dependency, Error, MatchedLoader, ModuleIdentity, ModuleRule, Result, SnapshotStrategy,
     UnpackResolver,
-    build_cache::{NormalModuleFactoryCache, ResolveRecord, ResolveRequest},
+    cache::{ResolveRecord, ResolveRequest},
+    cache_facade::NormalModuleFactoryCache,
     snapshot::{FileSystemInfo, SnapshotCache},
 };
 
@@ -270,7 +271,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        CacheOptions, Dependency, DependencyKind, UnpackResolver, build_cache::BuildCache,
+        CacheOptions, Dependency, DependencyKind, UnpackResolver, cache::BuildCache,
         resolver::ResolveOptions,
     };
 

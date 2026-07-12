@@ -1,8 +1,8 @@
-//! Public Cache options and defaults consumed by the Build Cache composition root.
+//! Public Cache options and defaults consumed by the Cache composition root.
 
 use std::{path::PathBuf, time::Duration};
 
-use crate::pack_file::{DEFAULT_MAX_AGE, PackFileCompression};
+use super::pack_file::{DEFAULT_MAX_AGE, PackFileCompression};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheOptions {

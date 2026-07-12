@@ -1,32 +1,9 @@
-//! In-process Memory Cache Layer with optional generation-based retention.
+//! Webpack-aligned Memory Cache Plugin with generation-based garbage collection.
 
 use std::collections::HashMap;
 
-use super::{
-    cache::{CacheEntry, CacheItemFamily, CacheLayer, CacheLayerLookup},
-    facade::{CacheAddress, CacheETag},
-    options::{CacheKind, CacheOptions},
-};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MemoryRetention {
-    Disabled,
-    Generations(u64),
-    Unbounded,
-}
-
-impl MemoryRetention {
-    pub(super) fn from_options(options: &CacheOptions) -> Self {
-        match options.kind {
-            CacheKind::Disabled => Self::Disabled,
-            CacheKind::Memory | CacheKind::Filesystem => match options.max_memory_generations {
-                Some(0) => Self::Disabled,
-                Some(generations) => Self::Generations(generations),
-                None => Self::Unbounded,
-            },
-        }
-    }
-}
+use super::{CacheEntry, CacheItemFamily, CacheLayer, CacheLayerLookup};
+use crate::cache_facade::{CacheAddress, CacheETag};
 
 #[derive(Debug, Clone)]
 struct MemoryCacheEntry {
@@ -35,17 +12,17 @@ struct MemoryCacheEntry {
 }
 
 #[derive(Debug)]
-pub(super) struct MemoryCacheLayer {
+pub(super) struct MemoryWithGcCacheLayer {
     entries: HashMap<CacheAddress, MemoryCacheEntry>,
-    retention: MemoryRetention,
+    max_unused_generations: u64,
     completed_generation: u64,
 }
 
-impl MemoryCacheLayer {
-    pub(super) fn new(retention: MemoryRetention) -> Self {
+impl MemoryWithGcCacheLayer {
+    pub(super) fn new(max_unused_generations: u64) -> Self {
         Self {
             entries: HashMap::new(),
-            retention,
+            max_unused_generations,
             completed_generation: 0,
         }
     }
@@ -55,15 +32,12 @@ impl MemoryCacheLayer {
     }
 
     pub(super) fn on_compilation_completed(&mut self) -> Vec<CacheItemFamily> {
-        let MemoryRetention::Generations(limit) = self.retention else {
-            return Vec::new();
-        };
         self.completed_generation = self.completed_generation.saturating_add(1);
         let completed_generation = self.completed_generation;
         let mut evicted = Vec::new();
         self.entries.retain(|_, entry| {
-            let should_retain =
-                completed_generation.saturating_sub(entry.last_used_generation) < limit;
+            let should_retain = completed_generation.saturating_sub(entry.last_used_generation)
+                < self.max_unused_generations;
             if !should_retain {
                 evicted.push(entry.entry.family);
             }
@@ -86,17 +60,8 @@ impl MemoryCacheLayer {
     }
 }
 
-impl CacheLayer for MemoryCacheLayer {
+impl CacheLayer for MemoryWithGcCacheLayer {
     fn lookup(&mut self, address: &CacheAddress, etag: Option<&CacheETag>) -> CacheLayerLookup {
-        if self.retention == MemoryRetention::Unbounded {
-            return self
-                .entries
-                .get(address)
-                .filter(|entry| entry.entry.etag.as_ref() == etag)
-                .map_or(CacheLayerLookup::Miss, |entry| {
-                    CacheLayerLookup::Hit(entry.entry.clone())
-                });
-        }
         let active_generation = self.active_generation();
         let Some(entry) = self
             .entries

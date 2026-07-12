@@ -1,6 +1,7 @@
 mod async_dependencies_block;
-mod build_cache;
 mod build_chunk_graph;
+mod cache;
+mod cache_facade;
 mod cache_hash;
 mod chunk;
 mod chunk_graph;
@@ -27,7 +28,6 @@ mod module_graph_connection;
 mod normal_module_factory;
 mod optimize;
 mod output_filename;
-mod pack_file;
 mod parser;
 mod rendered_source;
 mod resolver;
@@ -35,7 +35,7 @@ mod runtime;
 mod snapshot;
 
 pub use async_dependencies_block::AsyncDependenciesBlock;
-pub use build_cache::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
+pub use cache::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
 pub use chunk::{Chunk, ChunkHandle};
 pub use chunk_graph::ChunkGraph;
 pub use chunk_group::{AsyncBlockOrigin, ChunkGroup, ChunkGroupHandle, ChunkGroupKind};

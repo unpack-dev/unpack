@@ -206,6 +206,35 @@ test("finishModules exposes a live webpack-shaped ModuleGraph", async () => {
   }
 });
 
+test("module graph access after finishModules rejects an expired native lease", async () => {
+  const fixture = await createGraphFixture();
+  const compiler = createCompiler(fixture);
+  let detachedAccess: Promise<Error | undefined> | undefined;
+
+  compiler.hooks.compilation.tap("schedule detached graph access", (compilation) => {
+    compilation.hooks.finishModules.tap("schedule detached graph access", (modules) => {
+      const entry = findModule(modules, "/src/index.js");
+      detachedAccess = afterMicrotasks(20).then(() => {
+        try {
+          compilation.moduleGraph.getOutgoingConnections(entry);
+          return undefined;
+        } catch (error) {
+          return error instanceof Error ? error : new Error(String(error));
+        }
+      });
+    });
+  });
+
+  try {
+    await runCompiler(compiler);
+    const error = await detachedAccess;
+    assert.match(error?.message ?? "", /module graph lease has been released/i);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("done refreshes connections materialized before seal", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "unpack-module-graph-rewrite-"));
   await writeFixtureFile(join(fixture, "package.json"), JSON.stringify({ sideEffects: false }));
@@ -708,4 +737,12 @@ function closeCompiler(compiler: Compiler): Promise<void> {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function afterMicrotasks(turns: number): Promise<void> {
+  let pending = Promise.resolve();
+  for (let index = 0; index < turns; index += 1) {
+    pending = pending.then(() => undefined);
+  }
+  return pending;
 }

@@ -16,10 +16,10 @@ pipeline, so this is a zero-clone, phase-serialized live view during the hook.
 That implementation validates the main performance premise behind Unpack's
 current ownership handoff: no full graph clone is required merely to service an
 awaited hook. It does not, however, provide a memory-safe pattern worth copying.
-Unpack should keep the ownership-handoff design and its post-hook JS-owned view.
-The main follow-up is to measure and reduce the new eager O(modules +
-connections) N-API materialization cost, because Rspack normally fetches graph
-data lazily.
+Unpack should keep the ownership-handoff design and fetch graph connections in
+lazy per-module batches. This avoids the eager O(modules + connections) N-API
+materialization cost while preserving a checked lifetime boundary instead of
+copying Rspack's raw pointer.
 
 ## Rust ownership and storage
 
@@ -167,20 +167,21 @@ place:
 2. A `finally` path returns the graph before seal continues, and native `Drop`
    is a fallback return path. Unlike Rspack, no raw pointer is exposed as a
    `'static` graph reference.
-3. Before releasing the native lease, the TypeScript wrapper materializes the
-   modules and connections it needs to remain queryable during seal. Later
-   `done` rebinds the final native graph and refreshes phase-dependent data on
-   the same JS object. This gives retained-object semantics intentionally,
-   rather than as an unchecked consequence of a compiler-field pointer.
+3. The TypeScript wrapper materializes the modules required by the hook, then
+   requests incoming or outgoing connections in per-module batches only when a
+   graph API reads them. After the hook settles, detached graph queries fail
+   with an expired-lease error while Rust seals. Later `done` rebinds the final
+   native graph and refreshes already-materialized connections by stable handle
+   on the same JS object.
 
 The cost profile differs:
 
 - Rspack: O(1) to expose the handle; graph records cross N-API lazily per JS
   query; unsafe lifetime/concurrency assumptions remain.
-- Current Unpack handoff: O(1) Rust graph move, but O(modules + connections) to
-  create/update the persistent JS view at `finishModules`, plus another
-  synchronization at final rebinding; no deep Rust graph clone and no live raw
-  pointer.
+- Current Unpack handoff: O(1) Rust graph move, O(modules) to expose the hook's
+  module set, and O(accessed connections) in lazy per-module batches. Final
+  rebinding refreshes only connection handles that JavaScript already
+  materialized; there is no deep Rust graph clone or live raw pointer.
 
 For this repository, keep the Unpack design. Do not replace it with Rspack's
 `NonNull<Compilation>` approach merely to match Rspack. The safer ownership
@@ -192,14 +193,13 @@ Before considering the clone problem closed, benchmark these separately on a
 large graph:
 
 1. the old Rust `ModuleGraph::clone()` time and peak memory;
-2. the new `connections()` DTO allocation and N-API conversion time;
+2. lazy incoming/outgoing connection DTO allocation and N-API conversion time;
 3. JS `ModuleGraphConnectionImpl` allocation/indexing time;
-4. the second full connection synchronization at final rebinding.
+4. materialized-handle synchronization at final rebinding.
 
-If eager JS materialization is still expensive, optimize the representation
-(batched compact arrays, fewer strings, stable handles, and in-place target
-patches) rather than reintroducing a raw live pointer. The semantic requirement
-to answer arbitrary graph queries while the native lease has returned means
-the retained JS view must own enough information; that O(graph size) data
-movement can be compressed and batched, but it cannot be made O(1) without
-weakening retained-query behavior or introducing another shared snapshot.
+If lazy JS materialization is still expensive under full-graph traversal,
+optimize the representation (compact arrays, fewer strings, stable handles,
+and in-place target patches) rather than reintroducing a raw live pointer. A
+plugin that detaches work beyond its awaited hook receives an explicit expired
+lease error until the final compilation is rebound; `done` and later supported
+lifecycle surfaces see the final graph normally.

@@ -328,12 +328,47 @@ impl NativeCompilation {
             .collect())
     }
 
-    #[napi]
-    pub fn connections(&self) -> Result<Vec<NativeModuleGraphConnection>> {
-        Ok(self
-            .module_graph()?
-            .connections()
-            .iter()
+    #[napi(js_name = "outgoingConnections")]
+    pub fn outgoing_connections(
+        &self,
+        module_handle: u32,
+    ) -> Result<Vec<NativeModuleGraphConnection>> {
+        let module_graph = self.module_graph()?;
+        let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
+        if module_graph.module(module_handle).is_none() {
+            return Ok(Vec::new());
+        }
+        Ok(module_graph
+            .outgoing_connections(module_handle)
+            .map(native_module_graph_connection)
+            .collect())
+    }
+
+    #[napi(js_name = "incomingConnections")]
+    pub fn incoming_connections(
+        &self,
+        module_handle: u32,
+    ) -> Result<Vec<NativeModuleGraphConnection>> {
+        let module_graph = self.module_graph()?;
+        let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
+        if module_graph.module(module_handle).is_none() {
+            return Ok(Vec::new());
+        }
+        Ok(module_graph
+            .incoming_connections(module_handle)
+            .map(native_module_graph_connection)
+            .collect())
+    }
+
+    #[napi(js_name = "connectionsByHandle")]
+    pub fn connections_by_handle(
+        &self,
+        connection_handles: Vec<u32>,
+    ) -> Result<Vec<NativeModuleGraphConnection>> {
+        let module_graph = self.module_graph()?;
+        Ok(connection_handles
+            .into_iter()
+            .filter_map(|handle| module_graph.connections().get(handle as usize))
             .map(native_module_graph_connection)
             .collect())
     }

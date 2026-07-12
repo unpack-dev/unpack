@@ -56,8 +56,7 @@ impl BuiltModuleContent {
     ) -> Self {
         let mut hasher = StableHasher::default();
         hasher.write(b"unpack/code-generation/local-inputs/1");
-        parsed.dependencies.hash(&mut hasher);
-        parsed.blocks.hash(&mut hasher);
+        parsed.dependencies_block.hash(&mut hasher);
         parsed.presentational_dependencies.hash(&mut hasher);
         let code_generation_local_input_digest = hasher.finish();
         Self {
@@ -109,11 +108,11 @@ impl Module {
     }
 
     pub fn dependencies(&self) -> &[Dependency] {
-        &self.built_content.parsed.dependencies
+        self.built_content.parsed.dependencies_block.dependencies()
     }
 
     pub fn blocks(&self) -> &[AsyncDependenciesBlock] {
-        &self.built_content.parsed.blocks
+        self.built_content.parsed.dependencies_block.blocks()
     }
 
     pub fn presentational_dependencies(&self) -> &[Dependency] {
@@ -168,8 +167,7 @@ impl Module {
     ) {
         self.finish_build_content(Arc::new(BuiltModuleContent::from_persistent_parts(
             ParsedModule {
-                dependencies,
-                blocks,
+                dependencies_block: crate::DependenciesBlock::new(dependencies, blocks),
                 presentational_dependencies,
             },
             source,
@@ -181,7 +179,8 @@ impl Module {
         self.exports_info = ExportsInfo::default();
         self.harmony = content
             .parsed
-            .dependencies
+            .dependencies_block
+            .dependencies()
             .iter()
             .chain(&content.parsed.presentational_dependencies)
             .any(Dependency::is_harmony_dependency);
@@ -190,7 +189,9 @@ impl Module {
     }
 
     pub(crate) fn analyze_provided_exports(&mut self) {
-        self.exports_info = ExportsInfo::from_dependencies(&self.built_content.parsed.dependencies);
+        self.exports_info = ExportsInfo::from_dependencies(
+            self.built_content.parsed.dependencies_block.dependencies(),
+        );
     }
 
     pub(crate) fn fail_build(&mut self, error: Error, source: String) {

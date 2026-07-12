@@ -4,10 +4,11 @@ use std::{
 };
 
 use crate::{
-    AsyncDependenciesBlock, ConstDependency, Dependency, Error, HarmonyExportExpressionDependency,
-    HarmonyExportHeaderDependency, HarmonyExportImportedSpecifierDependency,
-    HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
-    HarmonyImportSpecifierDependency, ImportDependency, Result, SourceRange,
+    AsyncDependenciesBlock, ConstDependency, DependenciesBlock, Dependency, Error,
+    HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
+    HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
+    HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Result,
+    SourceRange,
 };
 use serde::{Deserialize, Serialize};
 use swc_experimental_allocator::Allocator;
@@ -24,8 +25,7 @@ const UNSUPPORTED_DYNAMIC_IMPORT_MESSAGE: &str =
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ParsedModule {
-    pub dependencies: Vec<Dependency>,
-    pub blocks: Vec<AsyncDependenciesBlock>,
+    pub dependencies_block: DependenciesBlock,
     pub presentational_dependencies: Vec<Dependency>,
 }
 
@@ -61,7 +61,11 @@ fn parse_module_dependencies_sync(path: &Path, source: &str) -> Result<ParsedMod
     let mut parsed = ParsedModule::default();
     let mut import_bindings = HashMap::new();
     collect_module_decl_dependencies(path, &module, &mut parsed, &mut import_bindings)?;
-    collect_import_usages(&module, &import_bindings, &mut parsed.dependencies);
+    collect_import_usages(
+        &module,
+        &import_bindings,
+        &mut parsed.dependencies_block.dependencies,
+    );
     collect_dynamic_import_dependencies(path, &module, &mut parsed)?;
 
     Ok(parsed)
@@ -95,6 +99,7 @@ fn collect_module_decl_dependencies(
                         range(import_decl.span),
                     )));
                 parsed
+                    .dependencies_block
                     .dependencies
                     .push(Dependency::HarmonyImportSideEffect(
                         HarmonyImportSideEffectDependency::new(
@@ -163,7 +168,10 @@ fn collect_module_decl_dependencies(
                             range(export_decl.span),
                         ),
                     ));
-                collect_decl_exports(&export_decl.decl, &mut parsed.dependencies);
+                collect_decl_exports(
+                    &export_decl.decl,
+                    &mut parsed.dependencies_block.dependencies,
+                );
             }
             ModuleDecl::ExportNamed(named_export) => {
                 if named_export.type_only {
@@ -176,15 +184,15 @@ fn collect_module_decl_dependencies(
                     parsed.presentational_dependencies.push(Dependency::Const(
                         ConstDependency::new("", range(named_export.span)),
                     ));
-                    parsed
-                        .dependencies
-                        .push(Dependency::HarmonyImportSideEffect(
+                    parsed.dependencies_block.dependencies.push(
+                        Dependency::HarmonyImportSideEffect(
                             HarmonyImportSideEffectDependency::new(
                                 request.clone(),
                                 source_order,
                                 Some(range(named_export.span)),
                             ),
-                        ));
+                        ),
+                    );
                     for specifier in named_export.specifiers.iter() {
                         if let ExportSpecifier::Named(named) = specifier {
                             if named.is_type_only {
@@ -197,9 +205,8 @@ fn collect_module_decl_dependencies(
                                 .map(module_export_name_to_string)
                                 .transpose()?
                                 .unwrap_or_else(|| orig.clone());
-                            parsed
-                                .dependencies
-                                .push(Dependency::HarmonyExportImportedSpecifier(
+                            parsed.dependencies_block.dependencies.push(
+                                Dependency::HarmonyExportImportedSpecifier(
                                     HarmonyExportImportedSpecifierDependency::new(
                                         request.clone(),
                                         source_order,
@@ -208,7 +215,8 @@ fn collect_module_decl_dependencies(
                                         false,
                                         Some(range(named.span)),
                                     ),
-                                ));
+                                ),
+                            );
                         }
                     }
                 } else {
@@ -230,7 +238,7 @@ fn collect_module_decl_dependencies(
                                 .transpose()?
                                 .unwrap_or_else(|| orig.clone());
                             if let Some(binding) = import_bindings.get(&orig) {
-                                parsed.dependencies.push(
+                                parsed.dependencies_block.dependencies.push(
                                     Dependency::HarmonyExportImportedSpecifier(
                                         HarmonyExportImportedSpecifierDependency::new(
                                             binding.request.clone(),
@@ -243,9 +251,11 @@ fn collect_module_decl_dependencies(
                                     ),
                                 );
                             } else {
-                                parsed.dependencies.push(Dependency::HarmonyExportSpecifier(
-                                    HarmonyExportSpecifierDependency::new(orig, exported),
-                                ));
+                                parsed.dependencies_block.dependencies.push(
+                                    Dependency::HarmonyExportSpecifier(
+                                        HarmonyExportSpecifierDependency::new(orig, exported),
+                                    ),
+                                );
                             }
                         }
                     }
@@ -259,6 +269,7 @@ fn collect_module_decl_dependencies(
                     DefaultDecl::Class(class) => class.ident.as_ref().map(|id| ident_to_string(id)),
                 };
                 parsed
+                    .dependencies_block
                     .dependencies
                     .push(Dependency::HarmonyExportExpression(
                         HarmonyExportExpressionDependency::new(
@@ -270,6 +281,7 @@ fn collect_module_decl_dependencies(
             }
             ModuleDecl::ExportDefaultExpr(default_expr) => {
                 parsed
+                    .dependencies_block
                     .dependencies
                     .push(Dependency::HarmonyExportExpression(
                         HarmonyExportExpressionDependency::new(
@@ -292,6 +304,7 @@ fn collect_module_decl_dependencies(
                         range(export_all.span),
                     )));
                 parsed
+                    .dependencies_block
                     .dependencies
                     .push(Dependency::HarmonyImportSideEffect(
                         HarmonyImportSideEffectDependency::new(
@@ -300,9 +313,8 @@ fn collect_module_decl_dependencies(
                             Some(range(export_all.span)),
                         ),
                     ));
-                parsed
-                    .dependencies
-                    .push(Dependency::HarmonyExportImportedSpecifier(
+                parsed.dependencies_block.dependencies.push(
+                    Dependency::HarmonyExportImportedSpecifier(
                         HarmonyExportImportedSpecifierDependency::new(
                             request,
                             source_order,
@@ -311,7 +323,8 @@ fn collect_module_decl_dependencies(
                             true,
                             Some(range(export_all.span)),
                         ),
-                    ));
+                    ),
+                );
             }
         }
     }
@@ -335,7 +348,7 @@ fn collect_dynamic_import_dependencies(
         return Err(error);
     }
 
-    parsed.blocks.extend(visitor.blocks);
+    parsed.dependencies_block.blocks.extend(visitor.blocks);
     Ok(())
 }
 

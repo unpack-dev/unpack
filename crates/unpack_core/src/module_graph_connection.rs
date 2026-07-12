@@ -1,0 +1,24 @@
+use crate::{AsyncDependenciesBlockIndex, Dependency, DependencyIndex, ModuleHandle};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModuleGraphConnectionHandle(usize);
+
+impl ModuleGraphConnectionHandle {
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleGraphConnection {
+    pub handle: ModuleGraphConnectionHandle,
+    pub origin_module: Option<ModuleHandle>,
+    pub origin_block: Option<AsyncDependenciesBlockIndex>,
+    pub origin_dependency_index: Option<DependencyIndex>,
+    pub dependency: Dependency,
+    pub module: ModuleHandle,
+}

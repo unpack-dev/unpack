@@ -1860,7 +1860,7 @@ use flate2::{Compression as GzipLevel, read::GzDecoder, write::GzEncoder};
 use rspack_sources::ReplacementEnforce;
 
 use crate::{
-    AsyncDependenciesBlock, ConstDependency, Dependency, EntryDependency,
+    AsyncDependenciesBlock, ConstDependency, DependenciesBlock, Dependency, EntryDependency,
     HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
     HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency,
@@ -2856,12 +2856,14 @@ impl TryFrom<&ParsedModule> for ParsedModuleDto {
     fn try_from(parsed: &ParsedModule) -> io::Result<Self> {
         Ok(Self {
             dependencies: parsed
-                .dependencies
+                .dependencies_block
+                .dependencies()
                 .iter()
                 .map(dependency_to_dto)
                 .collect::<io::Result<_>>()?,
             blocks: parsed
-                .blocks
+                .dependencies_block
+                .blocks()
                 .iter()
                 .map(|block| {
                     Ok(AsyncDependenciesBlockDto {
@@ -2891,23 +2893,24 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
             blocks,
             presentational_dependencies,
         } = parsed;
+        let dependencies = dependencies
+            .into_iter()
+            .map(dependency_from_dto)
+            .collect::<io::Result<_>>()?;
+        let blocks = blocks
+            .into_iter()
+            .map(|block| {
+                Ok(AsyncDependenciesBlock::new(
+                    block
+                        .dependencies
+                        .into_iter()
+                        .map(dependency_from_dto)
+                        .collect::<io::Result<_>>()?,
+                ))
+            })
+            .collect::<io::Result<_>>()?;
         Ok(Self {
-            dependencies: dependencies
-                .into_iter()
-                .map(dependency_from_dto)
-                .collect::<io::Result<_>>()?,
-            blocks: blocks
-                .into_iter()
-                .map(|block| {
-                    Ok(AsyncDependenciesBlock::new(
-                        block
-                            .dependencies
-                            .into_iter()
-                            .map(dependency_from_dto)
-                            .collect::<io::Result<_>>()?,
-                    ))
-                })
-                .collect::<io::Result<_>>()?,
+            dependencies_block: DependenciesBlock::new(dependencies, blocks),
             presentational_dependencies: presentational_dependencies
                 .into_iter()
                 .map(dependency_from_dto)

@@ -73,6 +73,14 @@ Necessity:
 
 Unpack uses a minimal webpack-like dependency set for ESM imports, exports, re-exports, and static-string dynamic imports. It stores normal dependencies, async dependency blocks, and presentational dependencies separately, and code generation applies dependency templates to `rspack_sources` replacement sources.
 
+The closed `Dependency` enum remains at the top-level webpack `Dependency`
+boundary. `AsyncDependenciesBlock` and `ModuleGraphConnection` each have their
+own top-level modules, while implemented concrete dependency payloads live in
+the `dependencies` category with one webpack-corresponding module per upstream
+class. Public crate re-exports preserve the existing Rust API; the physical
+split is an ownership and navigation boundary rather than a new extension
+surface.
+
 Webpack supports a much wider parser surface: CommonJS, AMD, `import.meta`, context imports, dynamic import modes, magic comments, import attributes, weak/eager imports, deferred/source import phases, referenced-export tracking, branch guards, and detailed export presence behavior.
 
 Necessity:

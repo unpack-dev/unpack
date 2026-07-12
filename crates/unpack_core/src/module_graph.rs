@@ -80,6 +80,7 @@ impl ModuleGraph {
             origin_dependency_index,
             dependency,
             module,
+            state: ModuleGraphConnectionState::Active,
         });
         if let Some(origin_module) = origin_module {
             self.outgoing[origin_module.index()].push(connection_handle);
@@ -106,6 +107,31 @@ impl ModuleGraph {
 
     pub fn connections(&self) -> &[ModuleGraphConnection] {
         &self.connections
+    }
+
+    pub(crate) fn connections_mut(&mut self) -> &mut [ModuleGraphConnection] {
+        &mut self.connections
+    }
+
+    pub(crate) fn update_connection_module(
+        &mut self,
+        handle: ModuleGraphConnectionHandle,
+        module: ModuleHandle,
+    ) {
+        let connection = &mut self.connections[handle.index()];
+        if connection.module == module {
+            return;
+        }
+        self.incoming[connection.module.index()].retain(|candidate| *candidate != handle);
+        self.incoming[module.index()].push(handle);
+        connection.module = module;
+    }
+
+    pub(crate) fn connection_mut(
+        &mut self,
+        handle: ModuleGraphConnectionHandle,
+    ) -> &mut ModuleGraphConnection {
+        &mut self.connections[handle.index()]
     }
 
     pub fn outgoing_connections(
@@ -157,4 +183,26 @@ pub struct ModuleGraphConnection {
     pub origin_dependency_index: Option<DependencyIndex>,
     pub dependency: Dependency,
     pub module: ModuleHandle,
+    state: ModuleGraphConnectionState,
+}
+
+impl ModuleGraphConnection {
+    pub fn state(&self) -> ModuleGraphConnectionState {
+        self.state
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.state != ModuleGraphConnectionState::Inactive
+    }
+
+    pub(crate) fn set_state(&mut self, state: ModuleGraphConnectionState) {
+        self.state = state;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleGraphConnectionState {
+    Active,
+    Inactive,
+    Circular,
 }

@@ -21,6 +21,7 @@ mod make;
 mod module;
 mod module_graph;
 mod normal_module_factory;
+mod optimize;
 mod output_filename;
 mod pack_file;
 mod parser;
@@ -37,7 +38,7 @@ pub use code_generation::Asset;
 pub use compilation::{Compilation, WatchDependencies};
 pub use compiler::{
     CacheIdleReason, CacheLifecycleOutcome, Compiler, CompilerOptions, DEFAULT_EXTENSIONS, Entry,
-    PendingCompilation,
+    PendingCompilation, SideEffectsOption,
 };
 pub use dependency::{
     AsyncDependenciesBlock, ConstDependency, Dependency, DependencyKind, EntryDependency,
@@ -54,7 +55,7 @@ pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, Infrastructure
 pub use module::{Module, ModuleHandle, ModuleIdentity, ModuleType};
 pub use module_graph::{
     AsyncDependenciesBlockIndex, DependencyIndex, ModuleGraph, ModuleGraphConnection,
-    ModuleGraphConnectionHandle,
+    ModuleGraphConnectionHandle, ModuleGraphConnectionState,
 };
 pub use normal_module_factory::{FactorizedModule, NormalModuleFactory};
 pub use resolver::{ResolveOptions, ResolvedResource, UnpackResolver};

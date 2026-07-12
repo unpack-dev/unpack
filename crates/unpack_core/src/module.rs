@@ -33,6 +33,8 @@ pub struct Module {
     exports_info: ExportsInfo,
     build_error: Option<Error>,
     harmony: bool,
+    factory_side_effect_free: Option<bool>,
+    build_side_effect_free: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +99,8 @@ impl Module {
             exports_info: ExportsInfo::default(),
             build_error: None,
             harmony: false,
+            factory_side_effect_free: None,
+            build_side_effect_free: None,
         }
     }
 
@@ -155,6 +159,20 @@ impl Module {
 
     pub(crate) fn is_harmony(&self) -> bool {
         self.harmony
+    }
+
+    pub(crate) fn is_side_effect_free(&self) -> bool {
+        self.factory_side_effect_free
+            .or(self.build_side_effect_free)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn set_factory_side_effect_free(&mut self, side_effect_free: Option<bool>) {
+        self.factory_side_effect_free = side_effect_free;
+    }
+
+    pub(crate) fn set_build_side_effect_free(&mut self, side_effect_free: bool) {
+        self.build_side_effect_free = Some(side_effect_free);
     }
 
     #[cfg(test)]

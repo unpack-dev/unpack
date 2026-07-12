@@ -182,7 +182,7 @@ pub(crate) fn build_chunk_graph(
         chunk_graph.connect_chunk_and_group(entry_chunk, entry_group);
         chunk_graph.add_entrypoint(entry_group);
 
-        let initial_modules = collect_static_reachable(options, module_graph, entry_module);
+        let initial_modules = collect_static_reachable(module_graph, entry_module);
         for module in &initial_modules {
             chunk_graph.connect_chunk_and_module(entry_chunk, *module);
         }
@@ -235,7 +235,7 @@ pub(crate) fn build_chunk_graph(
                     pending.push_back(LogicalChunkGroup::AsyncChunk(target));
                 }
             } else {
-                let static_modules = collect_static_reachable(options, module_graph, target);
+                let static_modules = collect_static_reachable(module_graph, target);
                 async_chunk_plans.insert(
                     target,
                     AsyncChunkPlan::new(
@@ -301,11 +301,7 @@ pub(crate) fn build_chunk_graph(
     chunk_graph
 }
 
-fn collect_static_reachable(
-    options: &CompilerOptions,
-    module_graph: &ModuleGraph,
-    start: ModuleHandle,
-) -> Vec<ModuleHandle> {
+fn collect_static_reachable(module_graph: &ModuleGraph, start: ModuleHandle) -> Vec<ModuleHandle> {
     let mut visited = ModuleMask::new(module_graph.modules().len());
     let mut queue = VecDeque::from([start]);
     let mut modules = Vec::new();
@@ -319,7 +315,7 @@ fn collect_static_reachable(
         for connection in module_graph.outgoing_connections(module) {
             if connection.origin_block.is_none()
                 && connection.dependency.is_static_module_dependency()
-                && static_connection_is_active(options, module_graph, connection)
+                && connection.is_active()
             {
                 queue.push_back(connection.module);
             }
@@ -327,60 +323,6 @@ fn collect_static_reachable(
     }
 
     modules
-}
-
-fn static_connection_is_active(
-    options: &CompilerOptions,
-    module_graph: &ModuleGraph,
-    connection: &crate::ModuleGraphConnection,
-) -> bool {
-    if !options.side_effects {
-        return true;
-    }
-    match &connection.dependency {
-        crate::Dependency::HarmonyImportSideEffect(_) => {
-            module_has_side_effects(module_graph, connection.module)
-                || module_exports_are_used(module_graph, connection.module)
-                || connection.origin_module.is_some_and(|origin| {
-                    module_graph.outgoing_connections(origin).any(|candidate| {
-                        candidate.module == connection.module
-                            && matches!(
-                                candidate.dependency,
-                                crate::Dependency::HarmonyImportSpecifier(_)
-                            )
-                    })
-                })
-        }
-        crate::Dependency::HarmonyExportImportedSpecifier(dep) => {
-            dep.name.as_ref().is_some_and(|name| {
-                module_graph
-                    .module(
-                        connection
-                            .origin_module
-                            .expect("static export has an origin"),
-                    )
-                    .and_then(|module| module.exports_info().get_used_name(name))
-                    .is_some()
-            }) || (dep.is_star && module_exports_are_used(module_graph, connection.module))
-        }
-        _ => true,
-    }
-}
-
-fn module_exports_are_used(module_graph: &ModuleGraph, handle: ModuleHandle) -> bool {
-    module_graph.module(handle).is_some_and(|module| {
-        module.exports_info().are_all_exports_used()
-            || module
-                .exports_info()
-                .used_exports()
-                .is_some_and(|mut used| used.next().is_some())
-    })
-}
-
-fn module_has_side_effects(module_graph: &ModuleGraph, handle: ModuleHandle) -> bool {
-    !module_graph
-        .module(handle)
-        .is_some_and(crate::Module::is_side_effect_free)
 }
 
 fn dynamic_import_origins(

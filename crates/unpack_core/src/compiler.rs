@@ -9,6 +9,7 @@ use crate::{
     ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
     compilation::CompilationHookSet, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
     flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
+    optimize::side_effects_flag_plugin::SideEffectsFlagPlugin,
 };
 use tracing::Instrument;
 
@@ -16,6 +17,13 @@ mod hooks;
 pub(crate) use hooks::CompilerHookSet;
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideEffectsOption {
+    Disabled,
+    Flag,
+    Analyze,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -47,7 +55,7 @@ pub struct CompilerOptions {
     pub sourcemap: bool,
     pub provided_exports: bool,
     pub used_exports: bool,
-    pub side_effects: bool,
+    pub side_effects: SideEffectsOption,
 }
 
 impl CompilerOptions {
@@ -66,7 +74,7 @@ impl CompilerOptions {
             sourcemap: true,
             provided_exports: true,
             used_exports: true,
-            side_effects: true,
+            side_effects: SideEffectsOption::Flag,
         }
     }
 }
@@ -659,6 +667,11 @@ impl Compiler {
         }
         if options.used_exports {
             FlagDependencyUsagePlugin.apply(&mut hooks);
+        }
+        match options.side_effects {
+            SideEffectsOption::Disabled => {}
+            SideEffectsOption::Flag => SideEffectsFlagPlugin::new(false).apply(&mut hooks),
+            SideEffectsOption::Analyze => SideEffectsFlagPlugin::new(true).apply(&mut hooks),
         }
         Self {
             options,

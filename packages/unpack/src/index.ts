@@ -33,6 +33,7 @@ export interface ModuleRule {
   test: RegExp;
   loader: string;
   options?: Record<string, unknown>;
+  sideEffects?: boolean;
 }
 
 export type Mode = "development" | "production" | "none";
@@ -334,13 +335,14 @@ interface NormalizedOptions {
   moduleRules: NormalizedModuleRule[];
   providedExports: boolean;
   usedExports: boolean;
-  sideEffects: boolean;
+  sideEffects: "disabled" | "flag" | "analyze";
 }
 
 interface NormalizedModuleRule {
   test: string;
   loader: string;
   options: string;
+  sideEffects?: boolean;
 }
 
 interface NormalizedCacheOptions {
@@ -2279,9 +2281,13 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
 function normalizeOptimizationOptions(
   optimization: OptimizationOptions | undefined,
   mode: Mode
-): { providedExports: boolean; usedExports: boolean; sideEffects: boolean } {
+): { providedExports: boolean; usedExports: boolean; sideEffects: "disabled" | "flag" | "analyze" } {
   if (optimization === undefined) {
-    return { providedExports: true, usedExports: mode === "production", sideEffects: true };
+    return {
+      providedExports: true,
+      usedExports: mode === "production",
+      sideEffects: mode === "production" ? "analyze" : "flag"
+    };
   }
   assertPlainObject(optimization, "options.optimization");
   assertKnownKeys(optimization, ["providedExports", "usedExports", "sideEffects"], "options.optimization");
@@ -2295,10 +2301,12 @@ function normalizeOptimizationOptions(
         ? true
         : assertBoolean(optimization.usedExports, "options.optimization.usedExports"),
     sideEffects: optimization.sideEffects === undefined
-      ? true
+      ? mode === "production" ? "analyze" : "flag"
       : optimization.sideEffects === "flag"
-        ? true
+        ? "flag"
         : assertBoolean(optimization.sideEffects, "options.optimization.sideEffects")
+          ? "analyze"
+          : "disabled"
   };
 }
 
@@ -2312,7 +2320,7 @@ function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedMo
   return module.rules.map((rule, index) => {
     const name = `options.module.rules[${index}]`;
     assertPlainObject(rule, name);
-    assertKnownKeys(rule, ["test", "loader", "options"], name);
+    assertKnownKeys(rule, ["test", "loader", "options", "sideEffects"], name);
     if (!(rule.test instanceof RegExp)) {
       throw new TypeError(`${name}.test must be a RegExp`);
     }
@@ -2331,7 +2339,10 @@ function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedMo
     } catch {
       throw new TypeError(`${name}.options must be JSON-serializable`);
     }
-    return { test: rule.test.source, loader, options: serializedOptions };
+    const sideEffects = rule.sideEffects === undefined
+      ? undefined
+      : assertBoolean(rule.sideEffects, `${name}.sideEffects`);
+    return { test: rule.test.source, loader, options: serializedOptions, sideEffects };
   });
 }
 

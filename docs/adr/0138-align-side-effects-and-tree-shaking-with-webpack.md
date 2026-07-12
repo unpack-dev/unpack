@@ -22,8 +22,8 @@ The plugin will follow webpack's lifecycle and responsibilities:
   including relative-path and glob handling;
 - set module side-effects metadata during module creation instead of reading
   package files while building the Chunk Graph;
-- when `optimization.sideEffects` is `true`, use parser hooks to perform
-  webpack-equivalent source-level side-effect analysis;
+- when `optimization.sideEffects` is `true`, perform webpack-equivalent
+  source-level side-effect analysis;
 - when it is `"flag"`, consume declared side-effects flags without enabling
   source-level analysis;
 - optimize side-effect-free re-export connections during webpack's equivalent
@@ -61,11 +61,22 @@ constraint. Each deviation must document:
 Convenience, a smaller initial patch, or the absence of an exposed plugin API
 is not by itself a sufficient reason to diverge.
 
+## Deferred parser-hook integration
+
+Introducing a general parser-hook infrastructure is explicitly outside the
+scope of the current side-effects change. Until that infrastructure is
+implemented, `SideEffectsFlagPlugin` may invoke the source analyzer from its
+`finish_modules` tap instead of registering webpack-shaped parser hooks. The
+plugin must still own the analysis policy, preserve the observable distinction
+between `true` and `"flag"`, and match webpack's source-side-effect semantics.
+This allowance covers hook plumbing only; it does not permit weaker purity
+analysis or moving the policy into Chunk Graph construction.
+
 ## Migration requirement
 
-The initial implementation that reads `package.json` from Make, collapses
-`true` and `"flag"`, and decides dependency activity in `build_chunk_graph` is
-an alignment gap, not the target architecture. It must be migrated to the
-plugin and graph-metadata design above before the feature is considered
-complete. Webpack's source analysis and package pattern arrays are required
-parts of completion, not optional follow-up features.
+The initial implementation that read `package.json` from Make, collapsed
+`true` and `"flag"`, and decided dependency activity in `build_chunk_graph` was
+an alignment gap, not the target architecture. The implementation must use the
+plugin and graph-metadata design above. Webpack's source analysis and package
+pattern arrays are required parts of completion; only the parser-hook plumbing
+described above is deferred.

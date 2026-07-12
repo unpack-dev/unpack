@@ -7,11 +7,8 @@ use std::{marker::PhantomData, sync::Arc};
 
 use crate::{
     ModuleIdentity,
-    cache::pack_file::{AccessStamp, PackFileAddress, PackFileETag},
-    cache::{
-        BuildCache, CacheGet, CacheItemFamily, CacheKind, ModuleBuildRecord, ResolveRecord,
-        ResolveRequest,
-    },
+    cache::pack_file::{PackFileAddress, PackFileETag},
+    cache::{Cache, CacheItemFamily, ModuleBuildRecord, ResolveRecord, ResolveRequest},
 };
 
 pub(super) const RESOLVE_CACHE_NAMESPACE: CacheNamespace = CacheNamespace::new("unpack/resolve");
@@ -24,7 +21,7 @@ pub(super) const ASSET_RENDER_CACHE_NAMESPACE: CacheNamespace =
 
 #[derive(Debug, Clone)]
 pub(crate) struct CacheFacade<K, V> {
-    pub(super) build_cache: BuildCache,
+    pub(super) cache: Cache,
     pub(super) namespace: CacheNamespace,
     pub(super) family: CacheItemFamily,
     pub(super) marker: PhantomData<fn(K) -> V>,
@@ -111,7 +108,7 @@ where
     V: Send + Sync + 'static,
 {
     pub(crate) fn is_enabled(&self) -> bool {
-        self.build_cache.options.kind != CacheKind::Disabled
+        self.cache.is_enabled()
     }
 
     #[allow(dead_code)]
@@ -120,85 +117,19 @@ where
     }
 
     pub(crate) fn get(&self, key: &K, etag: Option<&CacheETag>) -> Option<Arc<V>> {
-        if !self.is_enabled() {
-            return None;
-        }
-
         let address = CacheAddress {
             namespace: self.namespace,
             identifier: key.cache_identifier(),
         };
-        // Access timestamps only matter for the filesystem layer. Avoid a clock
-        // syscall for memory caches and read-only persistent caches, which never
-        // record access updates.
-        let stamp = if self.build_cache.is_writable_filesystem_cache() {
-            self.build_cache.clock.now()
-        } else {
-            AccessStamp::from_millis(0)
-        };
-
-        let mut result = {
-            let mut cache = self
-                .build_cache
-                .inner
-                .cache
-                .lock()
-                .expect("build cache data mutex should not be poisoned");
-            let result = cache.begin_get(self.family, &address, etag, stamp);
-            if result.persistent_access_changed() {
-                self.build_cache.inner.mark_dirty();
-            }
-            result
-        };
-
-        loop {
-            match result {
-                CacheGet::Ready { value, .. } => return value,
-                CacheGet::Deferred(plan) => {
-                    let restored = plan.restore.restore();
-                    result = {
-                        let mut cache = self
-                            .build_cache
-                            .inner
-                            .cache
-                            .lock()
-                            .expect("build cache data mutex should not be poisoned");
-                        let result = cache.finish_restore(
-                            self.family,
-                            &address,
-                            etag,
-                            stamp,
-                            plan,
-                            restored,
-                        );
-                        if result.persistent_access_changed() {
-                            self.build_cache.inner.mark_dirty();
-                        }
-                        result
-                    };
-                }
-            }
-        }
+        self.cache.get(self.family, &address, etag)
     }
 
     pub(crate) fn store(&self, key: K, etag: Option<CacheETag>, value: V) {
-        if !self.is_enabled() {
-            return;
-        }
-
         let address = CacheAddress {
             namespace: self.namespace,
             identifier: key.cache_identifier(),
         };
-        let mut cache = self
-            .build_cache
-            .inner
-            .cache
-            .lock()
-            .expect("build cache data mutex should not be poisoned");
-        if cache.store(self.family, address, etag, value) {
-            self.build_cache.inner.mark_dirty();
-        }
+        self.cache.store(self.family, address, etag, value);
     }
 
     #[cfg(test)]
@@ -207,11 +138,6 @@ where
             namespace: self.namespace,
             identifier: key.cache_identifier(),
         };
-        self.build_cache
-            .inner
-            .cache
-            .lock()
-            .expect("build cache data mutex should not be poisoned")
-            .evict_memory(self.family, &address);
+        self.cache.evict_memory(self.family, &address);
     }
 }

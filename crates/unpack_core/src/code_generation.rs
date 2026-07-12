@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AsyncBlockOrigin, AsyncDependenciesBlockIndex, Chunk, ChunkGraph, ChunkGroupKind,
     CompilerOptions, Dependency, DependencyIndex, Error, Module, ModuleGraph, ModuleHandle,
-    cache::BuildCache,
+    cache::Cache,
     cache_facade::{CacheETag, CacheIdentifier, CacheKey},
     cache_hash::StableHasher,
     code_generation_record::{
@@ -210,9 +210,9 @@ pub(crate) fn generate_code(
 pub(crate) fn generate_code_cached(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
-    build_cache: &BuildCache,
+    cache: &Cache,
 ) -> CodeGenerationOutcome {
-    let cache = build_cache.code_generations();
+    let cache = cache.code_generations();
     generate_code_with(module_graph, chunk_graph, |input| {
         let key = input.module.identity().clone();
         let etag = code_generation_etag(&input);
@@ -370,12 +370,12 @@ pub(crate) fn create_render_manifest(
 
 pub(crate) fn render_assets(
     options: &CompilerOptions,
-    build_cache: &BuildCache,
+    cache: &Cache,
     manifest: &RenderManifest,
     code_generation_results: &CodeGenerationResults,
 ) -> Vec<Asset> {
     let mut assets = Vec::new();
-    let cache = build_cache.asset_renders::<AssetRenderKey>();
+    let cache = cache.asset_renders::<AssetRenderKey>();
     let cache_enabled = options.cache.kind == crate::CacheKind::Filesystem;
     for entry in &manifest.entries {
         let key = entry.render.cache_key();
@@ -748,7 +748,7 @@ mod tests {
     use crate::{
         CacheOptions, Compiler, CompilerOptions, ConstDependency, Dependency, Entry, Error,
         ModuleGraph, ModuleHandle, ModuleIdentity, SnapshotOptions, SourceRange,
-        cache::{BuildCache, CacheItemFamily, CacheItemWork},
+        cache::{Cache, CacheItemFamily, CacheItemWork},
         cache_facade::{CacheIdentifier, CacheKey, CacheNamespace},
         id_assignment::{RenderId, assign_chunk_render_ids, assign_module_render_ids},
         runtime::RuntimeModule,
@@ -763,8 +763,8 @@ mod tests {
 
     #[test]
     fn asset_render_facade_uses_stable_namespace_and_manifest_identity() {
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-        let facade = build_cache.asset_renders::<AssetRenderKey>();
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let facade = cache.asset_renders::<AssetRenderKey>();
         assert_eq!(
             facade.namespace(),
             CacheNamespace::new("unpack/asset-render")
@@ -874,10 +874,10 @@ mod tests {
             assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
             (module_graph, chunk_graph, module)
         };
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
 
         let (first_graph, first_chunks, first_module) = build("first");
-        let first = super::generate_code_cached(&first_graph, &first_chunks, &build_cache);
+        let first = super::generate_code_cached(&first_graph, &first_chunks, &cache);
         assert_eq!(
             first.results.results[&first_module]
                 .source()
@@ -887,7 +887,7 @@ mod tests {
         );
 
         let (second_graph, second_chunks, second_module) = build("second");
-        let second = super::generate_code_cached(&second_graph, &second_chunks, &build_cache);
+        let second = super::generate_code_cached(&second_graph, &second_chunks, &cache);
         assert_eq!(
             second.results.results[&second_module]
                 .source()
@@ -896,7 +896,7 @@ mod tests {
             "second"
         );
         assert_eq!(
-            build_cache
+            cache
                 .work_counters()
                 .for_family(CacheItemFamily::CodeGeneration),
             CacheItemWork {
@@ -939,9 +939,9 @@ mod tests {
             module_render_ids: &module_render_ids,
         };
         let etag = super::code_generation_etag(&input);
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-        let cache = build_cache.code_generations();
-        cache.store(
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let code_generation_cache = cache.code_generations();
+        code_generation_cache.store(
             module_ref.identity().clone(),
             Some(etag.clone()),
             CodeGenerationRecord::new(CodeGenerationSource::OriginalWithReplacements {
@@ -959,7 +959,7 @@ mod tests {
             }),
         );
 
-        let outcome = super::generate_code_cached(&module_graph, &chunk_graph, &build_cache);
+        let outcome = super::generate_code_cached(&module_graph, &chunk_graph, &cache);
         assert_eq!(
             outcome.results.results[&module]
                 .source()
@@ -968,7 +968,7 @@ mod tests {
             "éx"
         );
         assert!(
-            cache
+            code_generation_cache
                 .get(module_ref.identity(), Some(&etag))
                 .expect("regenerated Code Generation Record should be stored")
                 .is_compatible_with(module_ref.source())
@@ -998,10 +998,10 @@ mod tests {
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
 
-        let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
+        let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
         for outcome in [
-            super::generate_code_cached(&module_graph, &chunk_graph, &build_cache),
-            super::generate_code_cached(&module_graph, &chunk_graph, &build_cache),
+            super::generate_code_cached(&module_graph, &chunk_graph, &cache),
+            super::generate_code_cached(&module_graph, &chunk_graph, &cache),
         ] {
             assert_eq!(
                 outcome.errors,
@@ -1022,7 +1022,7 @@ mod tests {
             );
         }
         assert_eq!(
-            build_cache
+            cache
                 .work_counters()
                 .for_family(CacheItemFamily::CodeGeneration),
             CacheItemWork {

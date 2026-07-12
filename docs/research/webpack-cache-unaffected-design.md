@@ -76,7 +76,7 @@ Source:
 
 ## Implication for Unpack
 
-Unpack may keep both under `BuildCache` as a composition root, but it should
+Unpack may keep both under `Cache` as a composition root, but it should
 introduce a distinct compiler-owned module-computation cache. A Rust-native
 shape could use stable module identities plus typed memo slots instead of
 copying webpack's `WeakTupleMap`, while preserving these boundaries:

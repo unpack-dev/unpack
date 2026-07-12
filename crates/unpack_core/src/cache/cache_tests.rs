@@ -51,8 +51,8 @@ fn shared_persistent_location_warns_without_locking_the_second_writer() {
     let temp = tempdir().expect("create shared cache location");
     let mut options = CacheOptions::filesystem();
     options.cache_location = Some(temp.path().join("cache"));
-    let first = BuildCache::new(options.clone(), SnapshotOptions::default());
-    let second = BuildCache::new(options, SnapshotOptions::default());
+    let first = Cache::new(options.clone(), SnapshotOptions::default());
+    let second = Cache::new(options, SnapshotOptions::default());
 
     let warnings = second.take_infrastructure_log_events();
     assert!(warnings.iter().any(|event| {
@@ -72,12 +72,12 @@ fn shared_persistent_location_warns_without_locking_the_second_writer() {
 
 #[test]
 fn cache_facades_scope_identical_identifiers_by_namespace_and_etag() {
-    let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-    let code_generation = build_cache.facade::<TestCacheKey, String>(
+    let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
+    let code_generation = cache.facade::<TestCacheKey, String>(
         CacheNamespace::new("unpack/code-generation"),
         CacheItemFamily::CodeGeneration,
     );
-    let asset_render = build_cache.facade::<TestCacheKey, String>(
+    let asset_render = cache.facade::<TestCacheKey, String>(
         CacheNamespace::new("unpack/asset-render"),
         CacheItemFamily::AssetRender,
     );
@@ -120,7 +120,7 @@ fn cache_facades_scope_identical_identifiers_by_namespace_and_etag() {
     );
     assert!(code_generation.get(&identifier, Some(&stale)).is_none());
 
-    let counters = build_cache.work_counters();
+    let counters = cache.work_counters();
     assert_eq!(
         counters.for_family(CacheItemFamily::CodeGeneration),
         CacheItemWork {
@@ -145,8 +145,8 @@ fn cache_facades_scope_identical_identifiers_by_namespace_and_etag() {
 
 #[test]
 fn cache_facade_accounts_for_memory_eviction_by_item_family() {
-    let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-    let code_generation = build_cache.facade::<TestCacheKey, String>(
+    let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
+    let code_generation = cache.facade::<TestCacheKey, String>(
         CacheNamespace::new("unpack/code-generation"),
         CacheItemFamily::CodeGeneration,
     );
@@ -157,7 +157,7 @@ fn cache_facade_accounts_for_memory_eviction_by_item_family() {
 
     assert!(code_generation.get(&identifier, None).is_none());
     assert_eq!(
-        build_cache
+        cache
             .work_counters()
             .for_family(CacheItemFamily::CodeGeneration),
         CacheItemWork {
@@ -172,8 +172,8 @@ fn cache_facade_accounts_for_memory_eviction_by_item_family() {
 
 #[test]
 fn lower_layer_hit_repopulates_the_earlier_memory_cache() {
-    let build_cache = BuildCache::new(CacheOptions::filesystem(), SnapshotOptions::default());
-    let code_generation = build_cache.facade::<TestCacheKey, String>(
+    let cache = Cache::new(CacheOptions::filesystem(), SnapshotOptions::default());
+    let code_generation = cache.facade::<TestCacheKey, String>(
         CacheNamespace::new("unpack/code-generation"),
         CacheItemFamily::CodeGeneration,
     );
@@ -197,7 +197,7 @@ fn lower_layer_hit_repopulates_the_earlier_memory_cache() {
         Some("generated source")
     );
     assert_eq!(
-        build_cache
+        cache
             .work_counters()
             .for_family(CacheItemFamily::CodeGeneration),
         CacheItemWork {
@@ -233,7 +233,7 @@ async fn slow_persistent_decode_does_not_block_memory_or_other_persistent_hits()
     let mut options = CacheOptions::filesystem();
     options.cache_location = Some(temp.path().join("cache"));
 
-    let first = BuildCache::new(options.clone(), SnapshotOptions::default());
+    let first = Cache::new(options.clone(), SnapshotOptions::default());
     first
         .normal_module_factory()
         .store(persistent_key.clone(), None, record.clone());
@@ -245,8 +245,7 @@ async fn slow_persistent_decode_does_not_block_memory_or_other_persistent_hits()
 
     options.readonly = true;
     let clock = Arc::new(ManualCacheClock::at_millis(1_000));
-    let second =
-        BuildCache::new_with_clock(options, SnapshotOptions::default(), Arc::clone(&clock));
+    let second = Cache::new_with_clock(options, SnapshotOptions::default(), Arc::clone(&clock));
     let facade = second.normal_module_factory();
     facade.store(memory_key.clone(), None, record);
     let restore_entered = Arc::new(std::sync::Barrier::new(2));
@@ -296,7 +295,7 @@ async fn slow_persistent_decode_does_not_block_memory_or_other_persistent_hits()
     assert_eq!(
         completed_before_restore_release,
         Some(true),
-        "persistent deserialization must not hold the global BuildCache lock"
+        "persistent deserialization must not hold the global Cache lock"
     );
     assert_eq!(
         other_completed_before_restore_release,
@@ -325,8 +324,8 @@ async fn slow_persistent_decode_does_not_block_memory_or_other_persistent_hits()
 fn finite_memory_generations_evict_only_entries_left_unused_for_the_limit() {
     let mut options = CacheOptions::memory();
     options.max_memory_generations = Some(1);
-    let build_cache = BuildCache::new(options, SnapshotOptions::default());
-    let code_generation = build_cache.facade::<TestCacheKey, String>(
+    let cache = Cache::new(options, SnapshotOptions::default());
+    let code_generation = cache.facade::<TestCacheKey, String>(
         CacheNamespace::new("unpack/code-generation"),
         CacheItemFamily::CodeGeneration,
     );
@@ -335,7 +334,7 @@ fn finite_memory_generations_evict_only_entries_left_unused_for_the_limit() {
 
     code_generation.store(unused.clone(), None, "unused source".to_string());
     code_generation.store(kept.clone(), None, "kept source".to_string());
-    build_cache.on_compilation_completed();
+    cache.on_compilation_completed();
 
     assert_eq!(
         code_generation
@@ -344,7 +343,7 @@ fn finite_memory_generations_evict_only_entries_left_unused_for_the_limit() {
             .map(String::as_str),
         Some("kept source")
     );
-    build_cache.on_compilation_completed();
+    cache.on_compilation_completed();
 
     assert!(code_generation.get(&unused, None).is_none());
     assert_eq!(
@@ -355,7 +354,7 @@ fn finite_memory_generations_evict_only_entries_left_unused_for_the_limit() {
         Some("kept source")
     );
     assert_eq!(
-        build_cache
+        cache
             .work_counters()
             .for_family(CacheItemFamily::CodeGeneration)
             .evictions,
@@ -367,16 +366,16 @@ fn finite_memory_generations_evict_only_entries_left_unused_for_the_limit() {
 fn finite_memory_generations_keep_entries_until_the_completed_generation_boundary() {
     let mut options = CacheOptions::memory();
     options.max_memory_generations = Some(2);
-    let build_cache = BuildCache::new(options, SnapshotOptions::default());
-    let code_generation = build_cache.facade::<TestCacheKey, String>(
+    let cache = Cache::new(options, SnapshotOptions::default());
+    let code_generation = cache.facade::<TestCacheKey, String>(
         CacheNamespace::new("unpack/code-generation"),
         CacheItemFamily::CodeGeneration,
     );
     let identifier = TestCacheKey("generation-boundary");
 
     code_generation.store(identifier.clone(), None, "source".to_string());
-    build_cache.on_compilation_completed();
-    build_cache.on_compilation_completed();
+    cache.on_compilation_completed();
+    cache.on_compilation_completed();
 
     assert_eq!(
         code_generation
@@ -385,13 +384,13 @@ fn finite_memory_generations_keep_entries_until_the_completed_generation_boundar
             .map(String::as_str),
         Some("source")
     );
-    build_cache.on_compilation_completed();
-    build_cache.on_compilation_completed();
-    build_cache.on_compilation_completed();
+    cache.on_compilation_completed();
+    cache.on_compilation_completed();
+    cache.on_compilation_completed();
 
     assert!(code_generation.get(&identifier, None).is_none());
     assert_eq!(
-        build_cache
+        cache
             .work_counters()
             .for_family(CacheItemFamily::CodeGeneration)
             .evictions,
@@ -403,8 +402,8 @@ fn finite_memory_generations_keep_entries_until_the_completed_generation_boundar
 fn etag_mismatch_does_not_refresh_an_entrys_generation() {
     let mut options = CacheOptions::memory();
     options.max_memory_generations = Some(2);
-    let build_cache = BuildCache::new(options, SnapshotOptions::default());
-    let code_generation = build_cache.facade::<TestCacheKey, String>(
+    let cache = Cache::new(options, SnapshotOptions::default());
+    let code_generation = cache.facade::<TestCacheKey, String>(
         CacheNamespace::new("unpack/code-generation"),
         CacheItemFamily::CodeGeneration,
     );
@@ -415,14 +414,14 @@ fn etag_mismatch_does_not_refresh_an_entrys_generation() {
         Some(CacheETag::new("expected")),
         "source".to_string(),
     );
-    build_cache.on_compilation_completed();
+    cache.on_compilation_completed();
     assert!(
         code_generation
             .get(&identifier, Some(&CacheETag::new("different")))
             .is_none()
     );
-    build_cache.on_compilation_completed();
-    build_cache.on_compilation_completed();
+    cache.on_compilation_completed();
+    cache.on_compilation_completed();
 
     assert!(
         code_generation
@@ -430,7 +429,7 @@ fn etag_mismatch_does_not_refresh_an_entrys_generation() {
             .is_none()
     );
     assert_eq!(
-        build_cache
+        cache
             .work_counters()
             .for_family(CacheItemFamily::CodeGeneration)
             .evictions,
@@ -440,8 +439,8 @@ fn etag_mismatch_does_not_refresh_an_entrys_generation() {
 
 #[test]
 fn unbounded_memory_generations_never_age_entries() {
-    let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
-    let code_generation = build_cache.facade::<TestCacheKey, String>(
+    let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
+    let code_generation = cache.facade::<TestCacheKey, String>(
         CacheNamespace::new("unpack/code-generation"),
         CacheItemFamily::CodeGeneration,
     );
@@ -449,7 +448,7 @@ fn unbounded_memory_generations_never_age_entries() {
 
     code_generation.store(identifier.clone(), None, "source".to_string());
     for _ in 0..100 {
-        build_cache.on_compilation_completed();
+        cache.on_compilation_completed();
     }
 
     assert_eq!(
@@ -460,7 +459,7 @@ fn unbounded_memory_generations_never_age_entries() {
         Some("source")
     );
     assert_eq!(
-        build_cache
+        cache
             .work_counters()
             .for_family(CacheItemFamily::CodeGeneration)
             .evictions,
@@ -472,8 +471,8 @@ fn unbounded_memory_generations_never_age_entries() {
 fn zero_filesystem_memory_generations_keep_no_memory_layer() {
     let mut options = CacheOptions::filesystem();
     options.max_memory_generations = Some(0);
-    let build_cache = BuildCache::new(options, SnapshotOptions::default());
-    let code_generation = build_cache.facade::<TestCacheKey, String>(
+    let cache = Cache::new(options, SnapshotOptions::default());
+    let code_generation = cache.facade::<TestCacheKey, String>(
         CacheNamespace::new("unpack/code-generation"),
         CacheItemFamily::CodeGeneration,
     );
@@ -482,7 +481,7 @@ fn zero_filesystem_memory_generations_keep_no_memory_layer() {
     code_generation.store(identifier.clone(), None, "source".to_string());
 
     assert_eq!(
-        build_cache
+        cache
             .inner
             .cache
             .lock()
@@ -498,7 +497,7 @@ fn zero_filesystem_memory_generations_keep_no_memory_layer() {
         Some("source")
     );
     assert_eq!(
-        build_cache
+        cache
             .work_counters()
             .for_family(CacheItemFamily::CodeGeneration),
         CacheItemWork {
@@ -567,8 +566,7 @@ async fn memory_hits_refresh_persistent_access_before_max_age_gc()
     options.cache_location = Some(temp.path().join("cache"));
     options.max_age = Duration::from_millis(100);
 
-    let first =
-        BuildCache::new_with_clock(options.clone(), SnapshotOptions::default(), clock.clone());
+    let first = Cache::new_with_clock(options.clone(), SnapshotOptions::default(), clock.clone());
     first
         .normal_module_factory()
         .store(first_key.clone(), None, record.clone());
@@ -576,8 +574,7 @@ async fn memory_hits_refresh_persistent_access_before_max_age_gc()
     assert_eq!(pack_revision(&options), 1);
 
     clock.set_millis(1_050);
-    let second =
-        BuildCache::new_with_clock(options.clone(), SnapshotOptions::default(), clock.clone());
+    let second = Cache::new_with_clock(options.clone(), SnapshotOptions::default(), clock.clone());
     let facade = second.normal_module_factory();
     assert!(facade.get(&first_key, None).is_some());
     second.flush_to_filesystem()?;
@@ -598,7 +595,7 @@ async fn memory_hits_refresh_persistent_access_before_max_age_gc()
     second.flush_to_filesystem()?;
     assert_eq!(pack_revision(&options), 5);
 
-    let third = BuildCache::new_with_clock(options, SnapshotOptions::default(), clock);
+    let third = Cache::new_with_clock(options, SnapshotOptions::default(), clock);
     let facade = third.normal_module_factory();
     assert!(facade.get(&first_key, None).is_none());
     assert!(facade.get(&recent_key, None).is_some());

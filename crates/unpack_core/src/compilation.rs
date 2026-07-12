@@ -8,7 +8,7 @@ use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleHandle, Result, UnpackResolver,
     build_chunk_graph::build_chunk_graph_with_cache,
-    cache::BuildCache,
+    cache::Cache,
     code_generation::{self, CodeGenerationResults, RenderManifest},
     id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
     make::{self, MakeState},
@@ -24,7 +24,7 @@ pub(crate) use hooks::CompilationHookSet;
 pub struct Compilation {
     options: CompilerOptions,
     resolver: UnpackResolver,
-    build_cache: BuildCache,
+    cache: Cache,
     module_computation_cache: Option<ModuleComputationCache>,
     module_graph: ModuleGraph,
     chunk_graph: ChunkGraph,
@@ -44,7 +44,7 @@ impl Compilation {
     pub(crate) fn new(
         options: CompilerOptions,
         resolver: UnpackResolver,
-        build_cache: BuildCache,
+        cache: Cache,
         module_computation_cache: Option<ModuleComputationCache>,
         hooks: CompilationHookSet,
     ) -> Self {
@@ -52,7 +52,7 @@ impl Compilation {
         Self {
             options,
             resolver,
-            build_cache,
+            cache,
             module_computation_cache,
             module_graph: ModuleGraph::default(),
             chunk_graph: ChunkGraph::default(),
@@ -131,7 +131,7 @@ impl Compilation {
             let result = make::run(
                 &self.options,
                 self.resolver.clone(),
-                self.build_cache.clone(),
+                self.cache.clone(),
                 self.file_system_info.clone(),
                 Arc::clone(&state),
             )
@@ -252,7 +252,7 @@ impl Compilation {
     pub fn render_assets(&mut self) {
         self.assets = code_generation::render_assets(
             &self.options,
-            &self.build_cache,
+            &self.cache,
             self.asset_render_manifest
                 .as_ref()
                 .expect("render manifest should exist before Asset rendering"),
@@ -272,7 +272,7 @@ impl Compilation {
         let outcome = code_generation::generate_code_cached(
             &self.module_graph,
             &self.chunk_graph,
-            &self.build_cache,
+            &self.cache,
         );
         self.errors.extend(outcome.errors);
         self.code_generation_results = Some(outcome.results);

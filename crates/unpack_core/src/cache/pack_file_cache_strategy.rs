@@ -29,11 +29,11 @@ use crate::{
 };
 
 #[cfg(test)]
-use super::build_cache::RestoreBarrier;
+use super::RestoreBarrier;
 use super::{
-    CacheEntry, CacheItemFamily, CacheLayer, CacheLayerLookup,
-    build_cache::CacheDiagnostics,
+    CacheDiagnostics, CacheItemFamily,
     cache_items::{ModuleBuildRecord, ResolveRecord},
+    cache_layers::{CacheEntry, CacheLayer, CacheLayerLookup},
     options::CacheOptions,
 };
 use crate::cache_facade::{
@@ -72,7 +72,7 @@ pub(crate) struct PersistentRestore {
 }
 
 impl PersistentRestore {
-    pub(crate) fn restore(&self) -> Option<CacheEntry> {
+    pub(super) fn restore(&self) -> Option<CacheEntry> {
         let started = Instant::now();
         let prepared = {
             let mut pack_file = self

@@ -29,7 +29,7 @@ pub struct NormalModuleFactory {
     side_effects: bool,
 }
 
-// Per-compilation singleflight cache; separate from BuildCache so cache:false
+// Per-compilation singleflight cache; separate from Cache so cache:false
 // still coalesces duplicate factory work within one make run.
 type RuntimeFactorizeCache = Arc<DashMap<ResolveRequest, Arc<OnceCell<Result<FactorizedModule>>>>>;
 
@@ -273,8 +273,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        CacheOptions, Dependency, HarmonyImportSideEffectDependency, UnpackResolver,
-        cache::BuildCache, resolver::ResolveOptions,
+        CacheOptions, Dependency, HarmonyImportSideEffectDependency, UnpackResolver, cache::Cache,
+        resolver::ResolveOptions,
     };
 
     #[tokio::test]
@@ -285,11 +285,10 @@ mod tests {
 
         let mut resolve_options = ResolveOptions::default();
         resolve_options.extensions = vec![".js".to_string()];
-        let build_cache =
-            BuildCache::new(CacheOptions::disabled(), crate::SnapshotOptions::default());
+        let cache = Cache::new(CacheOptions::disabled(), crate::SnapshotOptions::default());
         let factory = NormalModuleFactory::new(
             UnpackResolver::new(resolve_options),
-            build_cache.normal_module_factory(),
+            cache.normal_module_factory(),
             FileSystemInfo::new(),
             SnapshotStrategy::timestamp(),
             SnapshotCache::default(),
@@ -302,7 +301,7 @@ mod tests {
         let second = factory.factorize(temp.path(), &dependency).await?;
 
         assert_eq!(first, second);
-        assert_eq!(build_cache.stats().resolve_entries, 0);
+        assert_eq!(cache.stats().resolve_entries, 0);
         assert_eq!(factory.runtime_factorize_cache.len(), 1);
 
         Ok(())

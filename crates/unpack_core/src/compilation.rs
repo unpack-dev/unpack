@@ -102,12 +102,27 @@ impl Compilation {
         (self.module_graph, self.chunk_graph)
     }
 
+    pub fn into_parts(self) -> (ModuleGraph, ChunkGraph, Vec<Asset>) {
+        (self.module_graph, self.chunk_graph, self.assets)
+    }
+
     pub fn chunk_graph(&self) -> &ChunkGraph {
         &self.chunk_graph
     }
 
     pub fn assets(&self) -> &[Asset] {
         &self.assets
+    }
+
+    /// Temporarily detaches generated assets for an awaited host hook. The
+    /// caller must restore them before the compilation is emitted.
+    pub fn take_assets(&mut self) -> Vec<Asset> {
+        std::mem::take(&mut self.assets)
+    }
+
+    pub fn restore_assets(&mut self, assets: Vec<Asset>) {
+        debug_assert!(self.assets.is_empty());
+        self.assets = assets;
     }
 
     pub fn entries(&self) -> &[ModuleHandle] {

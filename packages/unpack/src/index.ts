@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { statSync, watch as watchFileSystem } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Source } from "webpack-sources";
 
 export interface UnpackOptions {
   name?: string;
@@ -173,6 +174,15 @@ export interface Compilation {
   readonly moduleGraph: ModuleGraph;
   readonly chunkGraph: ChunkGraph;
   readonly modules: ReadonlySet<Module>;
+  readonly assets: Record<string, Source>;
+  emitAsset(name: string, source: Source): void;
+  updateAsset(name: string, source: Source | ((source: Source) => Source)): void;
+  getAsset(name: string): CompilationAsset | undefined;
+}
+
+export interface CompilationAsset {
+  readonly name: string;
+  readonly source: Source;
 }
 
 export interface Chunk {
@@ -319,8 +329,32 @@ export interface FinishModulesHook {
   promise(modules: ReadonlySet<Module>): Promise<void>;
 }
 
+export interface ProcessAssetsHook {
+  tap(
+    options: string | TapOptions,
+    callback: (assets: Record<string, Source>) => void
+  ): void;
+  tapAsync(
+    options: string | TapOptions,
+    callback: (
+      assets: Record<string, Source>,
+      done: (error?: Error | null) => void
+    ) => void
+  ): void;
+  tapPromise(
+    options: string | TapOptions,
+    callback: (assets: Record<string, Source>) => PromiseLike<void>
+  ): void;
+  callAsync(
+    assets: Record<string, Source>,
+    callback: (error?: Error | null) => void
+  ): void;
+  promise(assets: Record<string, Source>): Promise<void>;
+}
+
 export interface CompilationHooks {
   readonly finishModules: FinishModulesHook;
+  readonly processAssets: ProcessAssetsHook;
 }
 
 export interface CompilationHook {
@@ -328,6 +362,7 @@ export interface CompilationHook {
 }
 
 export interface CompilerHooks {
+  readonly thisCompilation: CompilationHook;
   readonly compilation: CompilationHook;
   readonly done: DoneHook;
 }
@@ -494,6 +529,8 @@ interface NativeStatsJson {
 
 interface NativeCompilation {
   modules(): NativeModule[];
+  takeAssetSources(): NativeAssetSource[];
+  clearAssetSources(): void;
   outgoingConnections(moduleHandle: number): NativeModuleGraphConnection[];
   incomingConnections(moduleHandle: number): NativeModuleGraphConnection[];
   connectionsByHandle(connectionHandles: number[]): NativeModuleGraphConnection[];
@@ -502,6 +539,17 @@ interface NativeCompilation {
   moduleChunks(moduleHandle: number): number[];
   moduleId(moduleHandle: number): string | number | null;
   returnModuleGraphLease(): void;
+}
+
+interface NativeAssetSource {
+  name: string;
+  source: Uint8Array;
+}
+
+interface NativeAssets {
+  takeAssetSources(): NativeAssetSource[];
+  replaceAssetSources(assets: NativeAssetSource[]): void;
+  returnAssetsLease(): void;
 }
 
 interface NativeModule {
@@ -568,12 +616,14 @@ interface NativeBinding {
       options: string
     ) => Promise<string>,
     compilation?: (compilation: NativeCompilation) => Promise<void>,
-    finishModules?: (compilation: NativeCompilation) => Promise<void>
+    finishModules?: (compilation: NativeCompilation) => Promise<void>,
+    processAssets?: (assets: NativeAssets) => Promise<void>
   ): NativeCompiler;
 }
 
 const require = createRequire(import.meta.url);
 const native = require("./unpack_node.node") as NativeBinding;
+const { RawSource } = require("webpack-sources") as typeof import("webpack-sources");
 const unpackJavaScriptPath = fileURLToPath(import.meta.url);
 // The native addon is the compiled closure of the Rust compiler, parser, and
 // resolver; together with the JS entry and package metadata it is the runtime toolchain.
@@ -847,6 +897,79 @@ class FinishModulesHookImpl implements FinishModulesHook {
   }
 }
 
+interface ProcessAssetsTap {
+  name: string;
+  stage: number;
+  before: Set<string>;
+  run(assets: Record<string, Source>): Promise<void>;
+}
+
+class ProcessAssetsHookImpl implements ProcessAssetsHook {
+  readonly #taps: ProcessAssetsTap[] = [];
+
+  tap(
+    options: string | TapOptions,
+    callback: (assets: Record<string, Source>) => void
+  ): void {
+    assertFunction(callback, "callback");
+    this.#insert(options, async (assets) => { callback(assets); });
+  }
+
+  tapAsync(
+    options: string | TapOptions,
+    callback: (
+      assets: Record<string, Source>,
+      done: (error?: Error | null) => void
+    ) => void
+  ): void {
+    assertFunction(callback, "callback");
+    this.#insert(options, (assets) => new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const done = (error?: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        error == null ? resolve() : reject(error);
+      };
+      try { callback(assets, done); } catch (error) { done(toError(error, "HookError")); }
+    }));
+  }
+
+  tapPromise(
+    options: string | TapOptions,
+    callback: (assets: Record<string, Source>) => PromiseLike<void>
+  ): void {
+    assertFunction(callback, "callback");
+    this.#insert(options, async (assets) => { await callback(assets); });
+  }
+
+  callAsync(
+    assets: Record<string, Source>,
+    callback: (error?: Error | null) => void
+  ): void {
+    assertFunction(callback, "callback");
+    void this.promise(assets).then(
+      () => callback(),
+      (error) => callback(toError(error, "HookError"))
+    );
+  }
+
+  async promise(assets: Record<string, Source>): Promise<void> {
+    for (const tap of this.#taps) await tap.run(assets);
+  }
+
+  isUsed(): boolean {
+    return this.#taps.length > 0;
+  }
+
+  #insert(
+    options: string | TapOptions,
+    run: (assets: Record<string, Source>) => Promise<void>
+  ): void {
+    const tap = { ...normalizeTapOptions(options), run };
+    insertOrderedTap(this.#taps, tap);
+  }
+}
+
 class CompilationHookImpl implements CompilationHook {
   readonly #taps: Array<{
     name: string;
@@ -894,6 +1017,7 @@ type CompilerLifecycle =
 
 class CompilerImpl implements Compiler {
   readonly hooks: CompilerHooks = {
+    thisCompilation: new CompilationHookImpl(),
     compilation: new CompilationHookImpl(),
     done: new DoneHookImpl()
   };
@@ -926,6 +1050,7 @@ class CompilerImpl implements Compiler {
         try {
           const compilation = new CompilationImpl(nativeCompilation);
           this.#activeCompilation = compilation;
+          (this.hooks.thisCompilation as CompilationHookImpl).call(compilation);
           (this.hooks.compilation as CompilationHookImpl).call(compilation);
         } catch (error) {
           this.#nativeHookError = toError(error, "HookError");
@@ -945,6 +1070,31 @@ class CompilerImpl implements Compiler {
             nativeCompilation.returnModuleGraphLease();
           } finally {
             compilation.releaseNativeCompilation();
+          }
+        }
+      },
+      async (nativeAssets) => {
+        const compilation = this.#activeCompilation;
+        let assetPhaseStarted = false;
+        try {
+          if (!compilation) {
+            throw new Error("processAssets ran without an active Compilation");
+          }
+          const hook = compilation.hooks.processAssets as ProcessAssetsHookImpl;
+          if (hook.isUsed() || compilation.hasPendingAssetMutations()) {
+            compilation.beginProcessAssets(nativeAssets.takeAssetSources());
+            assetPhaseStarted = true;
+            await hook.promise(compilation.assets);
+            nativeAssets.replaceAssetSources(compilation.serializeAssets());
+          }
+        } catch (error) {
+          this.#nativeHookError = toError(error, "HookError");
+          throw this.#nativeHookError;
+        } finally {
+          try {
+            nativeAssets.returnAssetsLease();
+          } finally {
+            if (assetPhaseStarted) compilation?.endProcessAssets();
           }
         }
       }
@@ -2198,13 +2348,36 @@ class ChunkGraphImpl implements ChunkGraph {
 }
 
 class CompilationImpl implements Compilation {
-  readonly hooks: CompilationHooks = { finishModules: new FinishModulesHookImpl() };
+  readonly hooks: CompilationHooks = {
+    finishModules: new FinishModulesHookImpl(),
+    processAssets: new ProcessAssetsHookImpl()
+  };
   readonly moduleGraph: ModuleGraphImpl;
   readonly chunkGraph: ChunkGraphImpl;
   readonly modules: ReadonlySet<Module>;
   readonly #modulesByHandle = new Map<number, ModuleImpl>();
   readonly #chunksByHandle = new Map<number, ChunkImpl>();
   readonly #moduleSet = new Set<Module>();
+  readonly #assetValues = Object.create(null) as Record<string, Source>;
+  readonly assets: Record<string, Source> = new Proxy(this.#assetValues, {
+    set: (target, property, value) => {
+      Reflect.set(target, property, value);
+      if (typeof property === "string" && !this.#assetMutationActive) {
+        this.#assetMutationPending = true;
+      }
+      return true;
+    },
+    deleteProperty: (target, property) => {
+      const deleted = Reflect.deleteProperty(target, property);
+      if (deleted && typeof property === "string" && !this.#assetMutationActive) {
+        this.#assetMutationPending = true;
+      }
+      return deleted;
+    }
+  });
+  #assetMutationActive = false;
+  #assetMutationPending = false;
+  #assetsMaterialized = false;
 
   constructor(compilation: NativeCompilation | null | undefined) {
     this.moduleGraph = new ModuleGraphImpl(this.#modulesByHandle);
@@ -2253,6 +2426,15 @@ class CompilationImpl implements Compilation {
         );
       }
     }
+    if (!this.#assetsMaterialized) {
+      const assetSources = compilation?.takeAssetSources() ?? [];
+      if (assetSources.length > 0) {
+        this.#replaceAssets(assetSources);
+        this.#assetsMaterialized = true;
+      }
+    } else {
+      compilation?.clearAssetSources();
+    }
     this.moduleGraph.updateNativeCompilation(compilation ?? undefined);
     this.chunkGraph.updateNativeCompilation(compilation ?? undefined);
   }
@@ -2260,6 +2442,72 @@ class CompilationImpl implements Compilation {
   releaseNativeCompilation(): void {
     this.moduleGraph.releaseNativeCompilation();
     this.chunkGraph.updateNativeCompilation(undefined);
+  }
+
+  beginProcessAssets(assets: NativeAssetSource[]): void {
+    const pendingAssets = this.#assetMutationPending
+      ? Object.entries(this.assets)
+      : [];
+    this.#replaceAssets(assets);
+    this.#assetMutationActive = true;
+    for (const [name, source] of pendingAssets) this.assets[name] = source;
+    this.#assetsMaterialized = true;
+    this.#assetMutationPending = false;
+  }
+
+  endProcessAssets(): void {
+    this.#assetMutationActive = false;
+  }
+
+  hasPendingAssetMutations(): boolean {
+    return this.#assetMutationPending;
+  }
+
+  serializeAssets(): NativeAssetSource[] {
+    return Object.entries(this.assets).map(([name, source]) => {
+      assertSource(source, `assets[${JSON.stringify(name)}]`);
+      const buffer = source.buffer();
+      return { name, source: Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer) };
+    });
+  }
+
+  emitAsset(name: string, source: Source): void {
+    assertNonEmptyString(name, "name");
+    assertSource(source, "source");
+    this.assets[name] = source;
+  }
+
+  updateAsset(name: string, source: Source | ((source: Source) => Source)): void {
+    assertNonEmptyString(name, "name");
+    const current = this.assets[name];
+    if (!current) throw new Error(`asset ${JSON.stringify(name)} does not exist`);
+    const updated = typeof source === "function" ? source(current) : source;
+    assertSource(updated, "source");
+    this.assets[name] = updated;
+  }
+
+  getAsset(name: string): CompilationAsset | undefined {
+    const source = this.assets[name];
+    return source ? { name, source } : undefined;
+  }
+
+  #replaceAssets(assets: NativeAssetSource[]): void {
+    for (const name of Object.keys(this.#assetValues)) delete this.#assetValues[name];
+    for (const asset of assets) {
+      const source = Buffer.isBuffer(asset.source)
+        ? asset.source
+        : Buffer.from(asset.source);
+      this.#assetValues[asset.name] = new RawSource(source);
+    }
+  }
+
+}
+
+function assertSource(value: unknown, name: string): asserts value is Source {
+  if (typeof value !== "object" || value === null ||
+      typeof (value as { source?: unknown }).source !== "function" ||
+      typeof (value as { buffer?: unknown }).buffer !== "function") {
+    throw new TypeError(`${name} must be a webpack Source`);
   }
 }
 

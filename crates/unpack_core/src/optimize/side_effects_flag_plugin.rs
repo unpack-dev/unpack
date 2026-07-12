@@ -23,11 +23,25 @@ impl SideEffectsFlagPlugin {
             "SideEffectsFlagPlugin",
             move |compilation_hooks: &mut CompilationHookSet| {
                 if analyse_source {
-                    compilation_hooks
-                        .finish_modules
-                        .tap("SideEffectsFlagPlugin", |compilation| {
-                            Box::pin(async move { flag_source_side_effects(compilation) })
-                        });
+                    compilation_hooks.javascript_parser.program.tap(
+                        "SideEffectsFlagPlugin",
+                        b"side-effects-program/1",
+                        |_parser, _program, result| {
+                            result.build_meta.side_effect_free = Some(true);
+                        },
+                    );
+                    compilation_hooks.javascript_parser.statement.tap(
+                        "SideEffectsFlagPlugin",
+                        b"side-effects-statement/1",
+                        |statement, result| {
+                            if result.build_meta.side_effect_free == Some(true)
+                                && !statement.is_pure()
+                            {
+                                result.build_meta.side_effect_free = Some(false);
+                            }
+                        },
+                    );
+                    compilation_hooks.javascript_parser.require_pure_analysis();
                 }
                 compilation_hooks
                     .optimize_dependencies
@@ -44,28 +58,6 @@ impl SideEffectsFlagPlugin {
                 .iter()
                 .any(|pattern| Self::module_has_side_effects(module_name, pattern)),
             _ => true,
-        }
-    }
-}
-
-fn flag_source_side_effects(compilation: &mut Compilation) {
-    let handles = compilation
-        .module_graph()
-        .modules()
-        .iter()
-        .map(|module| module.handle())
-        .collect::<Vec<_>>();
-    for handle in handles {
-        if let Some(module) = compilation.module_graph_mut().module_mut(handle) {
-            if module.build_error().is_some() {
-                continue;
-            }
-            if crate::parser::source_is_side_effect_free(
-                module.identity().resource.as_path(),
-                module.source(),
-            ) {
-                module.set_build_side_effect_free(true);
-            }
         }
     }
 }

@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import unpack from "@unpack-js/core";
+import webpack from "webpack";
 import type { Stats } from "@unpack-js/core";
 
 test("emits assets through the ESM default API", async () => {
@@ -98,6 +99,42 @@ test("optimization.sideEffects distinguishes source analysis from flag-only mode
   }
 });
 
+test("filesystem module cache isolates parser analysis plans", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { used } from './barrel'; export const result = used;",
+    "src/barrel.js": "export { used } from './used'; export { unused } from './unused';",
+    "src/used.js": "export const used = 42;",
+    "src/unused.js": [
+      "const deferred = () => globalThis.DEFERRED_CACHE_MARKER;",
+      "export const unused = deferred;"
+    ].join("\n")
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/parser-plans");
+
+  try {
+    for (const [sideEffects, markerExpected] of [["flag", true], [true, false]] as const) {
+      const compiler = unpack({
+        context: fixture,
+        mode: "none",
+        entry: "./src/index.js",
+        output: { path: join(fixture, `dist-cache-${sideEffects}`) },
+        cache: { type: "filesystem", cacheLocation },
+        sourcemap: false,
+        optimization: { usedExports: true, sideEffects }
+      });
+      const { err, stats } = await runExistingCompiler(compiler);
+      await closeCompiler(compiler);
+
+      assert.equal(err, null);
+      assert.equal(stats?.hasErrors(), false);
+      const source = await readFile(join(fixture, `dist-cache-${sideEffects}/main.js`), "utf8");
+      assert.equal(source.includes("DEFERRED_CACHE_MARKER"), markerExpected);
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 // Ported from webpack 5.108.1:
 // test/configCases/side-effects/side-effects-values
 test("package sideEffects patterns retain matching modules and skip other unused modules", async () => {
@@ -163,6 +200,96 @@ test("NO_SIDE_EFFECTS annotations make calls to annotated functions removable", 
       await readFile(join(outputPath, "main.js"), "utf8"),
       /ANNOTATED_PURE_MODULE_MARKER/
     );
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+// Compared with webpack 5.108.1's lib/javascript/JavascriptParser.js `isPure`
+// behavior as consumed by lib/optimize/SideEffectsFlagPlugin.js.
+test("PURE analysis skips definition-time-pure modules and retains impure arguments", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { used } from './barrel'; export const result = used;",
+    "src/barrel.js": [
+      "export { used } from './used';",
+      "export { pure } from './pure';",
+      "export { impure } from './impure';"
+    ].join("\n"),
+    "src/used.js": "export const used = 42;",
+    "src/pure.js": [
+      "function factory(value) { return value; }",
+      "const value = /*#__PURE__*/ factory(1);",
+      "class Deferred { field = sideEffect(); method() { sideEffect(); } }",
+      "export const PURE_ANALYSIS_DROP_MARKER = [value, Deferred];",
+      "export const pure = 1;"
+    ].join("\n"),
+    "src/impure.js": [
+      "function factory(value) { return value; }",
+      "function sideEffect() { return 1; }",
+      "const value = /*#__PURE__*/ factory(sideEffect());",
+      "export const PURE_ANALYSIS_KEEP_MARKER = value;",
+      "export const impure = 1;"
+    ].join("\n")
+  });
+  const unpackOutputPath = join(fixture, "dist-unpack");
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      mode: "none",
+      entry: "./src/index.js",
+      output: { path: unpackOutputPath },
+      sourcemap: false,
+      optimization: { usedExports: true, sideEffects: true }
+    });
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+    const unpackSource = await readFile(join(unpackOutputPath, "main.js"), "utf8");
+    const unpackObservation = {
+      droppedPureModule: !unpackSource.includes("PURE_ANALYSIS_DROP_MARKER"),
+      retainedImpureModule: unpackSource.includes("PURE_ANALYSIS_KEEP_MARKER")
+    };
+
+    const webpackOutputPath = join(fixture, "dist-webpack");
+    const webpackCompiler = webpack({
+      context: fixture,
+      mode: "none",
+      entry: "./src/index.js",
+      output: { path: webpackOutputPath },
+      devtool: false,
+      optimization: {
+        concatenateModules: false,
+        innerGraph: false,
+        minimize: false,
+        providedExports: true,
+        usedExports: true,
+        sideEffects: true
+      }
+    });
+    try {
+      const webpackStats = await new Promise<import("webpack").Stats>((resolve, reject) => {
+        webpackCompiler.run((error, completedStats) => {
+          if (error) reject(error);
+          else if (!completedStats) reject(new Error("webpack completed without Stats"));
+          else resolve(completedStats);
+        });
+      });
+      assert.equal(webpackStats.hasErrors(), false, webpackStats.toString());
+      const webpackSource = await readFile(join(webpackOutputPath, "main.js"), "utf8");
+      const webpackObservation = {
+        droppedPureModule: !webpackSource.includes("PURE_ANALYSIS_DROP_MARKER"),
+        retainedImpureModule: webpackSource.includes("PURE_ANALYSIS_KEEP_MARKER")
+      };
+      assert.deepEqual(unpackObservation, webpackObservation);
+      assert.deepEqual(unpackObservation, {
+        droppedPureModule: true,
+        retainedImpureModule: true
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        webpackCompiler.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

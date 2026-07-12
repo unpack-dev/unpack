@@ -84,10 +84,6 @@ impl ExportsInfo {
         self.all_exports_used = true;
     }
 
-    pub(crate) fn clear_provided_exports(&mut self) {
-        self.provided_exports = None;
-    }
-
     fn add_provided_export(&mut self, name: impl Into<String>) {
         if let Some(exports) = &mut self.provided_exports {
             exports.insert(name.into());

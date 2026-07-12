@@ -178,7 +178,7 @@ impl Module {
     }
 
     pub(crate) fn finish_build_content(&mut self, content: Arc<BuiltModuleContent>) {
-        self.exports_info = ExportsInfo::from_dependencies(&content.parsed.dependencies);
+        self.exports_info = ExportsInfo::default();
         self.harmony = content
             .parsed
             .dependencies
@@ -187,6 +187,10 @@ impl Module {
             .any(Dependency::is_harmony_dependency);
         self.built_content = content;
         self.build_error = None;
+    }
+
+    pub(crate) fn analyze_provided_exports(&mut self) {
+        self.exports_info = ExportsInfo::from_dependencies(&self.built_content.parsed.dependencies);
     }
 
     pub(crate) fn fail_build(&mut self, error: Error, source: String) {

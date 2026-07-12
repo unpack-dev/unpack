@@ -6,7 +6,10 @@ use std::{
 
 use crate::{
     CacheOptions, Compilation, InfrastructureLoggingOptions, LoaderRunner, ModuleRule,
-    ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+    ResolveOptions, Result, SnapshotOptions, UnpackResolver,
+    build_cache::BuildCache,
+    export_analysis::{FlagDependencyExportsPlugin, FlagDependencyUsagePlugin},
+    hooks::{CompilationHooks, CompilerHooks},
 };
 use tracing::Instrument;
 
@@ -67,6 +70,7 @@ pub struct Compiler {
     options: CompilerOptions,
     build_cache: BuildCache,
     cache_lifecycle: Arc<CacheLifecycle>,
+    hooks: CompilerHooks,
 }
 
 #[derive(Debug)]
@@ -643,10 +647,18 @@ impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
         let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
         let cache_lifecycle = CacheLifecycle::new(build_cache.clone(), &options.cache);
+        let mut hooks = CompilerHooks::default();
+        if options.provided_exports {
+            FlagDependencyExportsPlugin.apply(&mut hooks);
+        }
+        if options.used_exports {
+            FlagDependencyUsagePlugin.apply(&mut hooks);
+        }
         Self {
             options,
             build_cache,
             cache_lifecycle,
+            hooks,
         }
     }
 
@@ -655,10 +667,13 @@ impl Compiler {
     }
 
     pub fn create_compilation(&self) -> Compilation {
+        let mut compilation_hooks = CompilationHooks::default();
+        self.hooks.compilation.call(&mut compilation_hooks);
         Compilation::new(
             self.options.clone(),
             UnpackResolver::new(self.options.resolve.clone()),
             self.build_cache.clone(),
+            compilation_hooks,
         )
     }
 

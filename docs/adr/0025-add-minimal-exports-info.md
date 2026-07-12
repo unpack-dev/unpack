@@ -12,3 +12,12 @@ modules, dynamic namespace imports use the all-used state, and unused harmony
 export getters are omitted. Star re-exports still use runtime enumeration when
 their complete provided-export set cannot be determined, while named usage is
 propagated through them.
+
+The analyses follow webpack's plugin phase boundaries: the Rust
+`FlagDependencyExportsPlugin` taps `finish_modules`, while
+`FlagDependencyUsagePlugin` taps `optimize_dependencies`. The compiler installs
+these built-in plugins conditionally through its `compilation` hook, producing
+a fresh hook set for every `Compilation`. `Compilation` only invokes the
+corresponding hooks after a successful make and at the beginning of seal;
+`finish_modules` is an asynchronous series hook and `optimize_dependencies` is
+synchronous.

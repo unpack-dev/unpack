@@ -84,8 +84,10 @@ export function toSummaryMarkdown(report, baselineReport) {
   const comparisonNote = baselineReport
     ? "\n\n> Delta vs main: `+` means slower or larger; `−` means faster or smaller. Calculated as `(current - main) / main`."
     : "";
+  const watchMeasurementNote =
+    "\n\n> `watch_build_ms` measures a development-mode rebuild with memory cache enabled and persistent cache disabled. The initial watch compilation is excluded; timing covers the same fixture mutation used by the warm build through completion of the resulting rebuild.";
 
-  return `${summary}${comparisonNote}\n`;
+  return `${summary}${comparisonNote}${watchMeasurementNote}\n`;
 }
 
 function toSummaryTable(results, baselines) {

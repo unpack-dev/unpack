@@ -37,6 +37,10 @@ test("summary renders loader results before a separate non-loader table", () => 
   assert.doesNotMatch(summary.slice(loaderHeading, nonLoaderHeading), /\| large \|/);
   assert.match(summary.slice(nonLoaderHeading), /\| large \| webpack \|/);
   assert.doesNotMatch(summary.slice(nonLoaderHeading), /\| loader \|/);
+  assert.match(
+    summary,
+    /watch_build_ms.*development-mode rebuild with memory cache enabled and persistent cache disabled/
+  );
 });
 
 test("summary compares measurements with matching latest main results", () => {

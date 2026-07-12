@@ -6,13 +6,18 @@ import test from "node:test";
 
 import webpack from "webpack";
 import type {
+  Compilation as WebpackCompilation,
   Compiler as WebpackCompiler,
   Configuration as WebpackOptions,
   Stats as WebpackStats
 } from "webpack";
 
 import unpack from "@unpack-js/core";
-import type { Compiler as UnpackCompiler, Stats as UnpackStats } from "@unpack-js/core";
+import type {
+  Compilation as UnpackCompilation,
+  Compiler as UnpackCompiler,
+  Stats as UnpackStats
+} from "@unpack-js/core";
 
 test("observes top-level callback validation error timing", async () => {
   const webpackFixture = await createFixture("webpack-validation-lifecycle-", {
@@ -172,6 +177,55 @@ test("aligns compiler.run callback timing and baseline Stats semantics", async (
       join(unpackFixture, "dist"),
       1
     );
+  } finally {
+    await closeWebpackCompiler(webpackCompiler);
+    await closeUnpackCompiler(unpackCompiler);
+    await rm(webpackFixture, { recursive: true, force: true });
+    await rm(unpackFixture, { recursive: true, force: true });
+  }
+});
+
+test("keeps the previous Compilation and Stats valid without sharing ModuleGraph across runs", async () => {
+  const files = {
+    "src/index.js": "import { value } from './old'; export { value };",
+    "src/old.js": "export const value = 'old';",
+    "src/new.js": "export const value = 'new';"
+  };
+  const webpackFixture = await createFixture("webpack-compilation-lifetime-", files);
+  const unpackFixture = await createFixture("unpack-compilation-lifetime-", files);
+  const webpackCompiler = webpack(webpackOptions(webpackFixture)) as WebpackCompiler;
+  const unpackCompiler = unpack(unpackOptions(unpackFixture));
+
+  try {
+    const webpackObservation = await observeCompilationLifetime<
+      WebpackCompilation,
+      WebpackStats
+    >({
+      fixture: webpackFixture,
+      tapCompilation: (callback) =>
+        webpackCompiler.hooks.compilation.tap("observe compilation lifetime", callback),
+      run: () => requireSuccessfulStats(runWebpackCompiler(webpackCompiler)),
+      compilationOf: (stats) => stats.compilation,
+      moduleGraphOf: (compilation) => compilation.moduleGraph,
+      snapshotCompilation: snapshotWebpackCompilation,
+      snapshotStats: snapshotWebpackStats
+    });
+    assertCompilationLifetime(webpackObservation, "/src/old.js", "/src/new.js");
+
+    const unpackObservation = await observeCompilationLifetime<
+      UnpackCompilation,
+      UnpackStats
+    >({
+      fixture: unpackFixture,
+      tapCompilation: (callback) =>
+        unpackCompiler.hooks.compilation.tap("observe compilation lifetime", callback),
+      run: () => requireSuccessfulStats(runUnpackCompiler(unpackCompiler)),
+      compilationOf: (stats) => stats.compilation,
+      moduleGraphOf: (compilation) => compilation.moduleGraph,
+      snapshotCompilation: snapshotUnpackCompilation,
+      snapshotStats: snapshotUnpackStats
+    });
+    assertCompilationLifetime(unpackObservation, "/src/old.js", "/src/new.js");
   } finally {
     await closeWebpackCompiler(webpackCompiler);
     await closeUnpackCompiler(unpackCompiler);
@@ -474,6 +528,202 @@ function unpackOptions(context: string): Parameters<typeof unpack>[0] {
       path: join(context, "dist")
     }
   };
+}
+
+interface CompilationSnapshot {
+  moduleIdentifiers: string[];
+  outgoingConnectionCount: number;
+}
+
+interface StatsSnapshot {
+  hasErrors: boolean;
+  errorCount: number;
+  assets: { name: string | undefined; size: number | undefined }[];
+  outputPath: string | undefined;
+}
+
+interface CompilationLifetimeObservation {
+  distinctCompilations: boolean;
+  distinctModuleGraphs: boolean;
+  firstStatsReferencesFirstCompilation: boolean;
+  secondStatsReferencesSecondCompilation: boolean;
+  oldCompilationBeforeSecond: CompilationSnapshot;
+  oldCompilationDuringSecond: CompilationSnapshot;
+  oldCompilationAfterSecond: CompilationSnapshot;
+  newCompilationAfterSecond: CompilationSnapshot;
+  oldStatsBeforeSecond: StatsSnapshot;
+  oldStatsDuringSecond: StatsSnapshot;
+  oldStatsAfterSecond: StatsSnapshot;
+}
+
+async function observeCompilationLifetime<TCompilation, TStats>({
+  fixture,
+  tapCompilation,
+  run,
+  compilationOf,
+  moduleGraphOf,
+  snapshotCompilation,
+  snapshotStats
+}: {
+  fixture: string;
+  tapCompilation(callback: (compilation: TCompilation) => void): void;
+  run(): Promise<TStats>;
+  compilationOf(stats: TStats): TCompilation;
+  moduleGraphOf(compilation: TCompilation): object;
+  snapshotCompilation(compilation: TCompilation): CompilationSnapshot;
+  snapshotStats(stats: TStats): StatsSnapshot;
+}): Promise<CompilationLifetimeObservation> {
+  const compilations: TCompilation[] = [];
+  let firstStats: TStats | undefined;
+  let oldCompilationDuringSecond: CompilationSnapshot | undefined;
+  let oldStatsDuringSecond: StatsSnapshot | undefined;
+  tapCompilation((compilation) => {
+    if (compilations.length === 1 && firstStats) {
+      oldCompilationDuringSecond = snapshotCompilation(compilationOf(firstStats));
+      oldStatsDuringSecond = snapshotStats(firstStats);
+    }
+    compilations.push(compilation);
+  });
+
+  firstStats = await run();
+  const firstCompilation = compilationOf(firstStats);
+  const oldCompilationBeforeSecond = snapshotCompilation(firstCompilation);
+  const oldStatsBeforeSecond = snapshotStats(firstStats);
+
+  await writeFile(
+    join(fixture, "src/index.js"),
+    "import { value } from './new'; export { value };",
+    "utf8"
+  );
+
+  const secondStats = await run();
+  assert.ok(oldCompilationDuringSecond);
+  assert.ok(oldStatsDuringSecond);
+  const secondCompilation = compilationOf(secondStats);
+
+  return {
+    distinctCompilations: firstCompilation !== secondCompilation,
+    distinctModuleGraphs:
+      moduleGraphOf(firstCompilation) !== moduleGraphOf(secondCompilation),
+    firstStatsReferencesFirstCompilation: compilationOf(firstStats) === firstCompilation,
+    secondStatsReferencesSecondCompilation:
+      compilationOf(secondStats) === secondCompilation,
+    oldCompilationBeforeSecond,
+    oldCompilationDuringSecond,
+    oldCompilationAfterSecond: snapshotCompilation(firstCompilation),
+    newCompilationAfterSecond: snapshotCompilation(secondCompilation),
+    oldStatsBeforeSecond,
+    oldStatsDuringSecond,
+    oldStatsAfterSecond: snapshotStats(firstStats)
+  };
+}
+
+async function requireSuccessfulStats<TStats>(
+  observation: Promise<RunObservation>
+): Promise<TStats> {
+  const result = await observation;
+  assert.equal(result.err, null);
+  assert.ok(result.stats);
+  return result.stats as TStats;
+}
+
+function snapshotWebpackCompilation(compilation: WebpackCompilation): CompilationSnapshot {
+  const modules = [...compilation.modules];
+  return {
+    moduleIdentifiers: modules.map(normalizeModuleIdentifier).sort(),
+    outgoingConnectionCount: modules.reduce(
+      (count, module) =>
+        count + [...compilation.moduleGraph.getOutgoingConnections(module)].length,
+      0
+    )
+  };
+}
+
+function snapshotUnpackCompilation(compilation: UnpackCompilation): CompilationSnapshot {
+  const modules = [...compilation.modules];
+  return {
+    moduleIdentifiers: modules.map(normalizeModuleIdentifier).sort(),
+    outgoingConnectionCount: modules.reduce(
+      (count, module) =>
+        count + compilation.moduleGraph.getOutgoingConnections(module).size,
+      0
+    )
+  };
+}
+
+function normalizeModuleIdentifier(module: { identifier(): string }): string {
+  return module.identifier().replaceAll("\\", "/");
+}
+
+function snapshotWebpackStats(stats: WebpackStats): StatsSnapshot {
+  const json = stats.toJson({
+    all: false,
+    assets: true,
+    errors: true,
+    outputPath: true
+  });
+  return normalizeStatsSnapshot(stats.hasErrors(), json);
+}
+
+function snapshotUnpackStats(stats: UnpackStats): StatsSnapshot {
+  return normalizeStatsSnapshot(stats.hasErrors(), stats.toJson());
+}
+
+function normalizeStatsSnapshot(
+  hasErrors: boolean,
+  json: {
+    assets?: readonly { name?: string; size?: number }[];
+    errors?: readonly unknown[];
+    outputPath?: string;
+  }
+): StatsSnapshot {
+  return {
+    hasErrors,
+    errorCount: json.errors?.length ?? 0,
+    assets: (json.assets ?? [])
+      .map(({ name, size }) => ({ name, size }))
+      .sort((left, right) => (left.name ?? "").localeCompare(right.name ?? "")),
+    outputPath: json.outputPath
+  };
+}
+
+function assertCompilationLifetime(
+  observation: CompilationLifetimeObservation,
+  oldModuleSuffix: string,
+  newModuleSuffix: string
+): void {
+  assert.equal(observation.distinctCompilations, true);
+  assert.equal(observation.distinctModuleGraphs, true);
+  assert.equal(observation.firstStatsReferencesFirstCompilation, true);
+  assert.equal(observation.secondStatsReferencesSecondCompilation, true);
+  assert.deepEqual(
+    observation.oldCompilationDuringSecond,
+    observation.oldCompilationBeforeSecond
+  );
+  assert.deepEqual(
+    observation.oldCompilationAfterSecond,
+    observation.oldCompilationBeforeSecond
+  );
+  assert.deepEqual(observation.oldStatsDuringSecond, observation.oldStatsBeforeSecond);
+  assert.deepEqual(observation.oldStatsAfterSecond, observation.oldStatsBeforeSecond);
+  assert.equal(
+    observation.oldCompilationAfterSecond.moduleIdentifiers.some((identifier) =>
+      identifier.endsWith(oldModuleSuffix)
+    ),
+    true
+  );
+  assert.equal(
+    observation.oldCompilationAfterSecond.moduleIdentifiers.some((identifier) =>
+      identifier.endsWith(newModuleSuffix)
+    ),
+    false
+  );
+  assert.equal(
+    observation.newCompilationAfterSecond.moduleIdentifiers.some((identifier) =>
+      identifier.endsWith(newModuleSuffix)
+    ),
+    true
+  );
 }
 
 async function observeWebpackTopLevelCallback(context: string) {

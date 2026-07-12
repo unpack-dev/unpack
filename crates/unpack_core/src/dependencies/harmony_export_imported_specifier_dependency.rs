@@ -3,7 +3,15 @@
 use serde::{Deserialize, Serialize};
 
 use super::ModuleDependency;
-use crate::SourceRange;
+use crate::{
+    SourceRange,
+    dependency_template::{
+        DependencyTemplate, DependencyTemplateContext, export_access_expression, import_var,
+        property_name,
+    },
+    init_fragment::InitFragmentStage,
+    runtime::RuntimeRequirement,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarmonyExportImportedSpecifierDependency {
@@ -29,6 +37,62 @@ impl HarmonyExportImportedSpecifierDependency {
             ids,
             name,
             is_star,
+        }
+    }
+}
+
+pub(crate) struct HarmonyExportImportedSpecifierDependencyTemplate;
+
+impl DependencyTemplate<HarmonyExportImportedSpecifierDependency>
+    for HarmonyExportImportedSpecifierDependencyTemplate
+{
+    fn source_ranges(
+        &self,
+        dependency: &HarmonyExportImportedSpecifierDependency,
+    ) -> Vec<SourceRange> {
+        dependency.module.range.into_iter().collect()
+    }
+
+    fn apply(
+        &self,
+        dependency: &HarmonyExportImportedSpecifierDependency,
+        _source: &mut rspack_sources::ReplaceSource,
+        context: &mut DependencyTemplateContext<'_>,
+    ) {
+        context.add_runtime_requirement(RuntimeRequirement::DefinePropertyGetters);
+        let dependency_index = context
+            .dependency_index
+            .expect("Harmony re-export must have a Dependency Index");
+        let target = context
+            .module_graph
+            .module_for_dependency(context.module, None, dependency_index)
+            .expect("Harmony re-export must have a Module Graph connection");
+        if !context.module_render_ids.contains_key(&target) {
+            return;
+        }
+        let import_var = import_var(
+            &dependency.module.request,
+            dependency.module.source_order.unwrap_or(0),
+        );
+        if dependency.is_star {
+            context.add_init_fragment(
+                InitFragmentStage::StarReexport,
+                format!(
+                    "/* harmony reexport (unknown) */ for(const __WEBPACK_IMPORT_KEY__ in {import_var}) if(__WEBPACK_IMPORT_KEY__ !== \"default\" && __WEBPACK_IMPORT_KEY__ !== \"__esModule\") __webpack_require__.d(__webpack_exports__, {{ [__WEBPACK_IMPORT_KEY__]: () => ({import_var}[__WEBPACK_IMPORT_KEY__]) }});\n"
+                ),
+            );
+        } else if let Some(name) = &dependency.name {
+            let Some(used_name) = context.exports_info.get_used_name(name) else {
+                return;
+            };
+            let expression = export_access_expression(&import_var, &dependency.ids);
+            context.add_init_fragment(
+                InitFragmentStage::Export,
+                format!(
+                    "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({expression}) }});\n",
+                    property_name(used_name),
+                ),
+            );
         }
     }
 }

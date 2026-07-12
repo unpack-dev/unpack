@@ -17,7 +17,7 @@ use tokio::{
 };
 
 use crate::{
-    AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, DependencyKind,
+    AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, EntryDependency,
     Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleHandle,
     ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     cache::{BuildCache, ModuleBuildRecord},
@@ -223,7 +223,7 @@ pub(crate) async fn run(
                     entry_index: Some(entry_index),
                     origin_block: None,
                     origin_dependency_index: None,
-                    dependency: Dependency::new(DependencyKind::Entry, entry.request.clone()),
+                    dependency: Dependency::Entry(EntryDependency::new(entry.request.clone())),
                 }],
             }),
             services.clone(),

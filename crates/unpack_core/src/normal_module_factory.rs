@@ -273,8 +273,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        CacheOptions, Dependency, DependencyKind, UnpackResolver, cache::BuildCache,
-        resolver::ResolveOptions,
+        CacheOptions, Dependency, HarmonyImportSideEffectDependency, UnpackResolver,
+        cache::BuildCache, resolver::ResolveOptions,
     };
 
     #[tokio::test]
@@ -294,7 +294,9 @@ mod tests {
             SnapshotStrategy::timestamp(),
             SnapshotCache::default(),
         );
-        let dependency = Dependency::new(DependencyKind::StaticImport, "./dep");
+        let dependency = Dependency::HarmonyImportSideEffect(
+            HarmonyImportSideEffectDependency::new("./dep", 0, None),
+        );
 
         let first = factory.factorize(temp.path(), &dependency).await?;
         let second = factory.factorize(temp.path(), &dependency).await?;

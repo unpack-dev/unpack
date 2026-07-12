@@ -92,8 +92,13 @@ test("finishModules taps run after make and before done", async () => {
       assert.equal(modules, capturedModules);
       assert.equal(compilation.moduleGraph, capturedModuleGraph);
       finishedModule = modules.values().next().value;
+      const entry = findModule(modules, "/src/index.js");
       events.push(`finishModules:${modules.size}:start`);
       setTimeout(() => {
+        assert.equal(
+          compilation.moduleGraph.getOutgoingConnections(entry).size > 0,
+          true
+        );
         events.push("finishModules:end");
         done();
       }, 5);
@@ -197,6 +202,57 @@ test("finishModules exposes a live webpack-shaped ModuleGraph", async () => {
     await new Promise<void>((resolve, reject) => {
       webpackCompiler.close((error) => (error ? reject(error) : resolve()));
     });
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("done refreshes connections materialized before seal", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-module-graph-rewrite-"));
+  await writeFixtureFile(join(fixture, "package.json"), JSON.stringify({ sideEffects: false }));
+  await writeFixtureFile(
+    join(fixture, "src/index.js"),
+    'import { value } from "./barrel.js"; export const result = value;\n'
+  );
+  await writeFixtureFile(
+    join(fixture, "src/barrel.js"),
+    'export { value } from "./leaf.js";\n'
+  );
+  await writeFixtureFile(join(fixture, "src/leaf.js"), "export const value = 42;\n");
+  const compiler = unpack({
+    context: fixture,
+    mode: "production",
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist") },
+    sourcemap: false,
+    optimization: { sideEffects: true, usedExports: true }
+  });
+  assert.ok(compiler);
+  let connection: ModuleGraphConnection | undefined;
+  let resolvedModule: Module | undefined;
+
+  compiler.hooks.compilation.tap("capture pre-seal connection", (compilation) => {
+    compilation.hooks.finishModules.tap("capture pre-seal connection", (modules) => {
+      const entry = findModule(modules, "/src/index.js");
+      const barrel = findModule(modules, "/src/barrel.js");
+      connection = [...compilation.moduleGraph.getOutgoingConnections(entry)].find(
+        (candidate) => candidate.module === barrel
+      );
+      assert.ok(connection);
+      resolvedModule = connection.resolvedModule;
+    });
+  });
+  compiler.hooks.done.tap("inspect rewritten connection", (stats) => {
+    assert.ok(connection);
+    const leaf = findModule(stats.compilation.modules, "/src/leaf.js");
+    assert.equal(connection.module, leaf);
+    assert.equal(connection.resolvedModule, resolvedModule);
+    assert.equal(stats.compilation.moduleGraph.getConnection(connection.dependency), connection);
+  });
+
+  try {
+    await runCompiler(compiler);
+  } finally {
+    await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
   }
 });

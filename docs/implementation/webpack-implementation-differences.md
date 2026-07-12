@@ -33,6 +33,15 @@ Necessity:
   results deliberately belong to one `Compilation`; they are not a persistent
   cache boundary.
 
+The Node adapter moves the completed Module Graph into the awaited
+`finishModules` callback and requires the callback wrapper to return that graph
+before Rust continues into `seal`. This avoids cloning the full graph at the
+native seam. Before returning ownership, the JavaScript wrapper materializes
+the lightweight module and connection view used by its webpack-shaped graph,
+so a retained `Compilation` remains queryable while Rust seals the graph. The
+final native graph is then rebound to the same JavaScript `Compilation`, and
+connection targets plus phase-dependent caches are refreshed in place.
+
 ## Cache layout
 
 Unpack's top-level `cache` and `cache_facade` modules map to webpack's root

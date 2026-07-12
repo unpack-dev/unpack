@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 
 import unpack from "@unpack-js/core";
 import webpack from "webpack";
-import type { Stats } from "@unpack-js/core";
+import type { Compiler, Stats } from "@unpack-js/core";
 
 test("emits assets through the ESM default API", async () => {
   const fixture = await createFixture({
@@ -562,6 +562,81 @@ test("can disable sourcemap emission", async () => {
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
+});
+
+test("plugins apply once in configuration order and run on every compilation", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export const value = 1;"
+  });
+  const events: string[] = [];
+  const objectPlugin = {
+    apply(compiler: Compiler) {
+      events.push("object:apply");
+      compiler.hooks.done.tap("object plugin", () => events.push("object:done"));
+    }
+  };
+  function functionPlugin(this: Compiler, compiler: Compiler): void {
+    assert.equal(this, compiler);
+    events.push("function:apply");
+    compiler.hooks.done.tap("function plugin", () => events.push("function:done"));
+  }
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    sourcemap: false,
+    plugins: [false, objectPlugin, null, functionPlugin, 0, "", undefined]
+  });
+
+  try {
+    assert.deepEqual(events, ["object:apply", "function:apply"]);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    assert.deepEqual(events, [
+      "object:apply",
+      "function:apply",
+      "object:done",
+      "function:done",
+      "object:done",
+      "function:done"
+    ]);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("plugin application failures follow top-level initialization error timing", async () => {
+  const synchronousFailure = new Error("synchronous plugin failure");
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        plugins: [{ apply: () => { throw synchronousFailure; } }]
+      }),
+    (error) => error === synchronousFailure
+  );
+
+  const asynchronousFailure = new Error("callback plugin failure");
+  let calledSynchronously = true;
+  const observation = new Promise<{ calledSynchronously: boolean; error: Error | null }>(
+    (resolve) => {
+      const returnedCompiler = unpack(
+        {
+          entry: "./src/index.js",
+          plugins: [{ apply: () => { throw asynchronousFailure; } }]
+        },
+        (error) => resolve({ calledSynchronously, error })
+      );
+      assert.equal(returnedCompiler, null);
+      calledSynchronously = false;
+    }
+  );
+
+  assert.deepEqual(await observation, {
+    calledSynchronously: false,
+    error: asynchronousFailure
+  });
+  assert.equal(asynchronousFailure.name, "InfrastructureError");
 });
 
 test("unpack options callback returns a reusable compiler", async () => {
@@ -1796,9 +1871,18 @@ test("top-level option validation throws synchronously", () => {
       unpack({
         entry: "./src/index.js",
         // @ts-expect-error intentionally testing runtime validation
-        plugins: []
+        plugins: {}
       }),
-    /unknown option 'plugins'/
+    /options.plugins must be an array/
+  );
+  assert.throws(
+    () =>
+      unpack({
+        entry: "./src/index.js",
+        // @ts-expect-error intentionally testing runtime validation
+        plugins: [{}]
+      }),
+    /options.plugins\[0\] must be a function, a plugin with an apply method, or falsy/
   );
   assert.throws(
     () =>

@@ -27,6 +27,16 @@ impl ModuleHandle {
     }
 }
 
+impl crate::index_vec::Idx for ModuleHandle {
+    fn from_usize(index: usize) -> Self {
+        Self(index)
+    }
+
+    fn index(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     handle: ModuleHandle,

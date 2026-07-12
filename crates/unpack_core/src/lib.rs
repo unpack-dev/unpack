@@ -22,6 +22,7 @@ mod flag_dependency_exports_plugin;
 mod flag_dependency_usage_plugin;
 mod hooks;
 mod id_assignment;
+mod index_vec;
 mod init_fragment;
 mod loader;
 mod logging;

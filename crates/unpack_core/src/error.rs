@@ -37,6 +37,9 @@ pub enum Error {
     #[error("loader rules failed for {path}: {message}")]
     LoaderRules { path: PathBuf, message: String },
 
+    #[error("module type registry error: {message}")]
+    ModuleTypeRegistry { message: String },
+
     #[error("unsupported dynamic import in {path}: {message}")]
     UnsupportedDynamicImport { path: PathBuf, message: String },
 

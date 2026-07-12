@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,8 +11,8 @@ use crate::{
     AsyncDependenciesBlock, ConstDependency, DependenciesBlock, Dependency, Error,
     HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
     HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
-    HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Result,
-    SourceRange,
+    HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency,
+    ModuleType, Result, SourceRange,
 };
 use serde::{Deserialize, Serialize};
 use swc_experimental_allocator::Allocator;
@@ -32,12 +33,41 @@ const UNSUPPORTED_DYNAMIC_IMPORT_MESSAGE: &str =
 pub(crate) struct ParsedModule {
     pub dependencies_block: DependenciesBlock,
     pub presentational_dependencies: Vec<Dependency>,
+    pub data: ParsedModuleData,
     pub build_meta: JavascriptBuildMeta,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct JavascriptBuildMeta {
     pub side_effect_free: Option<bool>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ParsedModuleData {
+    #[default]
+    JavaScript,
+    Json(serde_json::Value),
+    Asset {
+        module_type: ModuleType,
+    },
+}
+
+impl Hash for ParsedModuleData {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::JavaScript => 0_u8.hash(state),
+            Self::Json(value) => {
+                1_u8.hash(state);
+                serde_json::to_string(value)
+                    .expect("parsed JSON values must serialize")
+                    .hash(state);
+            }
+            Self::Asset { module_type } => {
+                2_u8.hash(state);
+                module_type.hash(state);
+            }
+        }
+    }
 }
 
 type ProgramTap = Arc<

@@ -1,5 +1,6 @@
 // Webpack source: https://github.com/webpack/webpack/tree/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib
 
+mod asset;
 mod async_dependencies_block;
 mod build_chunk_graph;
 mod cache;
@@ -24,6 +25,8 @@ mod hooks;
 mod id_assignment;
 mod index_vec;
 mod init_fragment;
+mod javascript;
+mod json;
 mod loader;
 mod logging;
 mod make;

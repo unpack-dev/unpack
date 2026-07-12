@@ -1,0 +1,4 @@
+{
+  "runtimeExpression": "entry.result",
+  "expected": [42, true, "json"]
+}

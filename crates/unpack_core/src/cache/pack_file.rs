@@ -249,27 +249,45 @@ mod tests {
     fn module_build_records_round_trip_every_parsed_module_variant()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let address = PackFileAddress::new("unpack/module-build", b"module-identity");
-        let record = module_build_record();
+        let mut json_record = module_build_record();
+        json_record.parsed.data = ParsedModuleDataDto::Json(
+            r#"{"default":"property","__proto__":{"safe":true}}"#.to_string(),
+        );
+        let mut asset_record = module_build_record();
+        asset_record.parsed.data = ParsedModuleDataDto::Asset {
+            module_type: ModuleTypeDto::AssetInline,
+        };
+        let records = [module_build_record(), json_record, asset_record]
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| {
+                (
+                    PackFileAddress::new(
+                        "unpack/module-build",
+                        format!("module-{index}").into_bytes(),
+                    ),
+                    None,
+                    record,
+                )
+            })
+            .collect::<Vec<_>>();
         let serializer = Serializer::new()
             .with_codec::<ModuleBuildRecordDto, _>(ModuleBuildRecordCodec::current());
 
-        PackFile::publish_module_build_records(
-            temp.path(),
-            &serializer,
-            [(address.clone(), None, record.clone())],
-        )?;
+        PackFile::publish_module_build_records(temp.path(), &serializer, records.clone())?;
 
         assert_eq!(MODULE_BUILD_RECORD_TYPE_ID.as_bytes(), b"unpack.moduleb.1");
         assert_eq!(
             ModuleBuildRecordCodec::current().codec_id(),
-            StableCodecId::new(*b"unpack.modb.c002")
+            StableCodecId::new(*b"unpack.modb.c003")
         );
         let mut pack_file = PackFile::open(temp.path(), serializer);
-        assert_eq!(
-            pack_file.get_module_build_record(&address, None).as_deref(),
-            Some(&record)
-        );
+        for (address, _, record) in records {
+            assert_eq!(
+                pack_file.get_module_build_record(&address, None).as_deref(),
+                Some(&record)
+            );
+        }
         Ok(())
     }
 
@@ -1807,10 +1825,12 @@ mod tests {
                     }],
                 }],
                 presentational_dependencies: dependencies,
+                data: ParsedModuleDataDto::JavaScript,
                 build_side_effect_free: Some(true),
             },
             source_hash: stable_hash(&source),
             source,
+            binary_source: None,
             snapshot: resolve_record("module.js").snapshot,
         }
     }
@@ -1923,7 +1943,7 @@ const BROTLI_QUALITY: u32 = 5;
 const BROTLI_WINDOW_BITS: u32 = 22;
 const GZIP_LEVEL: u32 = 6;
 const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
-const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c002");
+const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c003");
 const CODE_GENERATION_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.cgen.c003");
 const ASSET_RENDER_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.astr.c001");
 pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.resolve.1");
@@ -2124,6 +2144,11 @@ pub(crate) struct ModuleIdentityDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModuleTypeDto {
     JavaScriptAuto,
+    Json,
+    Asset,
+    AssetResource,
+    AssetInline,
+    AssetSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2175,6 +2200,7 @@ pub(crate) enum ManagedItemStateDto {
 pub(crate) struct ModuleBuildRecordDto {
     pub(crate) parsed: ParsedModuleDto,
     pub(crate) source: String,
+    pub(crate) binary_source: Option<Vec<u8>>,
     pub(crate) source_hash: u64,
     pub(crate) snapshot: SnapshotDto,
 }
@@ -2226,7 +2252,15 @@ pub(crate) struct ParsedModuleDto {
     pub(crate) dependencies: Vec<DependencyDto>,
     pub(crate) blocks: Vec<AsyncDependenciesBlockDto>,
     pub(crate) presentational_dependencies: Vec<DependencyDto>,
+    pub(crate) data: ParsedModuleDataDto,
     pub(crate) build_side_effect_free: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParsedModuleDataDto {
+    JavaScript,
+    Json(String),
+    Asset { module_type: ModuleTypeDto },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2366,6 +2400,11 @@ impl From<&ModuleIdentity> for ModuleIdentityDto {
         Self {
             module_type: match identity.module_type {
                 ModuleType::JavaScriptAuto => ModuleTypeDto::JavaScriptAuto,
+                ModuleType::Json => ModuleTypeDto::Json,
+                ModuleType::Asset => ModuleTypeDto::Asset,
+                ModuleType::AssetResource => ModuleTypeDto::AssetResource,
+                ModuleType::AssetInline => ModuleTypeDto::AssetInline,
+                ModuleType::AssetSource => ModuleTypeDto::AssetSource,
             },
             resource: PathBytes::from_path(&identity.resource),
             query: identity.query.clone(),
@@ -2383,6 +2422,11 @@ impl TryFrom<ModuleIdentityDto> for ModuleIdentity {
         Ok(Self {
             module_type: match identity.module_type {
                 ModuleTypeDto::JavaScriptAuto => ModuleType::JavaScriptAuto,
+                ModuleTypeDto::Json => ModuleType::Json,
+                ModuleTypeDto::Asset => ModuleType::Asset,
+                ModuleTypeDto::AssetResource => ModuleType::AssetResource,
+                ModuleTypeDto::AssetInline => ModuleType::AssetInline,
+                ModuleTypeDto::AssetSource => ModuleType::AssetSource,
             },
             resource: path_from_bytes(identity.resource)?,
             query: identity.query,
@@ -2574,7 +2618,7 @@ impl TryFrom<&ModuleBuildRecord> for ModuleBuildRecordDto {
     type Error = io::Error;
 
     fn try_from(record: &ModuleBuildRecord) -> io::Result<Self> {
-        let (parsed, source, source_hash) = record.persistent_parts();
+        let (parsed, source, binary_source, source_hash) = record.persistent_parts();
         let source_hash = source_hash.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2584,6 +2628,7 @@ impl TryFrom<&ModuleBuildRecord> for ModuleBuildRecordDto {
         let dto = Self {
             parsed: ParsedModuleDto::try_from(parsed)?,
             source: source.to_string(),
+            binary_source: binary_source.map(<[u8]>::to_vec),
             source_hash,
             snapshot: SnapshotDto::try_from(record.snapshot())?,
         };
@@ -2599,12 +2644,14 @@ impl TryFrom<ModuleBuildRecordDto> for ModuleBuildRecord {
         let ModuleBuildRecordDto {
             parsed,
             source,
+            binary_source,
             source_hash,
             snapshot,
         } = record;
         Ok(ModuleBuildRecord::from_persistent_parts(
             ParsedModule::try_from(parsed)?,
             source,
+            binary_source,
             source_hash,
             Snapshot::try_from(snapshot)?,
         ))
@@ -2726,7 +2773,12 @@ impl TryFrom<AssetRenderRecordDto> for RenderedSource {
 }
 
 fn validate_module_build_record(record: &ModuleBuildRecordDto) -> io::Result<()> {
-    if record.source_hash != stable_hash(&record.source) {
+    let source_hash = record
+        .binary_source
+        .as_ref()
+        .map(stable_hash)
+        .unwrap_or_else(|| stable_hash(&record.source));
+    if record.source_hash != source_hash {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Module Build Record source hash does not match its source",
@@ -2879,6 +2931,24 @@ impl TryFrom<&ParsedModule> for ParsedModuleDto {
                 .iter()
                 .map(dependency_to_dto)
                 .collect::<io::Result<_>>()?,
+            data: match &parsed.data {
+                crate::parser::ParsedModuleData::JavaScript => ParsedModuleDataDto::JavaScript,
+                crate::parser::ParsedModuleData::Json(value) => ParsedModuleDataDto::Json(
+                    serde_json::to_string(value).map_err(io::Error::other)?,
+                ),
+                crate::parser::ParsedModuleData::Asset { module_type } => {
+                    ParsedModuleDataDto::Asset {
+                        module_type: match module_type {
+                            ModuleType::JavaScriptAuto => ModuleTypeDto::JavaScriptAuto,
+                            ModuleType::Json => ModuleTypeDto::Json,
+                            ModuleType::Asset => ModuleTypeDto::Asset,
+                            ModuleType::AssetResource => ModuleTypeDto::AssetResource,
+                            ModuleType::AssetInline => ModuleTypeDto::AssetInline,
+                            ModuleType::AssetSource => ModuleTypeDto::AssetSource,
+                        },
+                    }
+                }
+            },
             build_side_effect_free: parsed.build_meta.side_effect_free,
         })
     }
@@ -2892,6 +2962,7 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
             dependencies,
             blocks,
             presentational_dependencies,
+            data,
             build_side_effect_free,
         } = parsed;
         let dependencies = dependencies
@@ -2916,6 +2987,27 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
                 .into_iter()
                 .map(dependency_from_dto)
                 .collect::<io::Result<_>>()?,
+            data: match data {
+                ParsedModuleDataDto::JavaScript => crate::parser::ParsedModuleData::JavaScript,
+                ParsedModuleDataDto::Json(value) => crate::parser::ParsedModuleData::Json(
+                    serde_json::from_str(&value).map_err(io::Error::other)?,
+                ),
+                ParsedModuleDataDto::Asset { module_type } => {
+                    let module_type = match module_type {
+                        ModuleTypeDto::Asset => ModuleType::Asset,
+                        ModuleTypeDto::AssetResource => ModuleType::AssetResource,
+                        ModuleTypeDto::AssetInline => ModuleType::AssetInline,
+                        ModuleTypeDto::AssetSource => ModuleType::AssetSource,
+                        ModuleTypeDto::JavaScriptAuto | ModuleTypeDto::Json => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Asset Parser data contains a non-asset module type",
+                            ));
+                        }
+                    };
+                    crate::parser::ParsedModuleData::Asset { module_type }
+                }
+            },
             build_meta: crate::parser::JavascriptBuildMeta {
                 side_effect_free: build_side_effect_free,
             },
@@ -3346,6 +3438,7 @@ fn encode_module_build_record(record: &ModuleBuildRecordDto) -> io::Result<Vec<u
 
     let mut encoder = Encoder::default();
     encoder.write_string(&record.source)?;
+    encoder.write_optional_bytes(record.binary_source.as_deref())?;
     encoder.write_u64(record.source_hash);
     encode_parsed_module(&mut encoder, &record.parsed)?;
     encode_snapshot(&mut encoder, &record.snapshot)?;
@@ -3360,6 +3453,7 @@ fn encode_module_build_record(record: &ModuleBuildRecordDto) -> io::Result<Vec<u
 fn decode_module_build_record(bytes: &[u8]) -> Option<ModuleBuildRecordDto> {
     let mut decoder = Decoder::new(bytes);
     let source = decoder.read_string()?;
+    let binary_source = decoder.read_optional_bytes()?;
     let source_hash = decoder.read_u64()?;
     let mut parsed = decode_parsed_module(&mut decoder)?;
     let snapshot = decode_snapshot(&mut decoder)?;
@@ -3373,6 +3467,7 @@ fn decode_module_build_record(bytes: &[u8]) -> Option<ModuleBuildRecordDto> {
     let record = ModuleBuildRecordDto {
         parsed,
         source,
+        binary_source,
         source_hash,
         snapshot,
     };
@@ -3386,7 +3481,26 @@ fn encode_parsed_module(encoder: &mut Encoder, parsed: &ParsedModuleDto) -> io::
     for block in &parsed.blocks {
         encode_dependencies(encoder, &block.dependencies)?;
     }
-    encode_dependencies(encoder, &parsed.presentational_dependencies)
+    encode_dependencies(encoder, &parsed.presentational_dependencies)?;
+    match &parsed.data {
+        ParsedModuleDataDto::JavaScript => encoder.write_u8(0),
+        ParsedModuleDataDto::Json(value) => {
+            encoder.write_u8(1);
+            encoder.write_record_string(value)?;
+        }
+        ParsedModuleDataDto::Asset { module_type } => {
+            encoder.write_u8(2);
+            encoder.write_u8(match module_type {
+                ModuleTypeDto::JavaScriptAuto => 0,
+                ModuleTypeDto::Json => 1,
+                ModuleTypeDto::Asset => 2,
+                ModuleTypeDto::AssetResource => 3,
+                ModuleTypeDto::AssetInline => 4,
+                ModuleTypeDto::AssetSource => 5,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn decode_parsed_module(decoder: &mut Decoder<'_>) -> Option<ParsedModuleDto> {
@@ -3398,10 +3512,26 @@ fn decode_parsed_module(decoder: &mut Decoder<'_>) -> Option<ParsedModuleDto> {
             dependencies: decode_dependencies(decoder)?,
         });
     }
+    let presentational_dependencies = decode_dependencies(decoder)?;
+    let data = match decoder.read_u8()? {
+        0 => ParsedModuleDataDto::JavaScript,
+        1 => ParsedModuleDataDto::Json(decoder.read_record_string()?),
+        2 => ParsedModuleDataDto::Asset {
+            module_type: match decoder.read_u8()? {
+                2 => ModuleTypeDto::Asset,
+                3 => ModuleTypeDto::AssetResource,
+                4 => ModuleTypeDto::AssetInline,
+                5 => ModuleTypeDto::AssetSource,
+                _ => return None,
+            },
+        },
+        _ => return None,
+    };
     Some(ParsedModuleDto {
         dependencies,
         blocks,
-        presentational_dependencies: decode_dependencies(decoder)?,
+        presentational_dependencies,
+        data,
         build_side_effect_free: None,
     })
 }
@@ -3674,6 +3804,11 @@ fn encode_resolve_record(record: &ResolveRecordDto) -> io::Result<Vec<u8>> {
     let mut encoder = Encoder::default();
     encoder.write_u8(match record.identity.module_type {
         ModuleTypeDto::JavaScriptAuto => 0,
+        ModuleTypeDto::Json => 1,
+        ModuleTypeDto::Asset => 2,
+        ModuleTypeDto::AssetResource => 3,
+        ModuleTypeDto::AssetInline => 4,
+        ModuleTypeDto::AssetSource => 5,
     });
     encoder.write_path(&record.identity.resource)?;
     encoder.write_optional_string(record.identity.query.as_deref())?;
@@ -3747,6 +3882,11 @@ fn decode_resolve_record(bytes: &[u8]) -> Option<ResolveRecordDto> {
     let mut decoder = Decoder::new(bytes);
     let module_type = match decoder.read_u8()? {
         0 => ModuleTypeDto::JavaScriptAuto,
+        1 => ModuleTypeDto::Json,
+        2 => ModuleTypeDto::Asset,
+        3 => ModuleTypeDto::AssetResource,
+        4 => ModuleTypeDto::AssetInline,
+        5 => ModuleTypeDto::AssetSource,
         _ => return None,
     };
     let identity = ModuleIdentityDto {

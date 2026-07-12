@@ -175,6 +175,15 @@ impl FileSystemInfo {
         Snapshot::create_file(path, source, strategy, self).await
     }
 
+    pub(crate) async fn create_file_snapshot_bytes(
+        &self,
+        path: &Path,
+        source: &[u8],
+        strategy: SnapshotStrategy,
+    ) -> Result<Snapshot> {
+        Snapshot::create_file_bytes(path, source, strategy, self).await
+    }
+
     #[cfg(test)]
     pub(crate) async fn create_resolve_snapshot(
         &self,
@@ -486,6 +495,19 @@ impl Snapshot {
         })
     }
 
+    async fn create_file_bytes(
+        path: &Path,
+        source: &[u8],
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> Result<Self> {
+        Ok(Self {
+            entries: vec![
+                SnapshotEntry::create_file_bytes(path, source, strategy, file_system_info).await?,
+            ],
+        })
+    }
+
     async fn create_resolve(
         files: impl IntoIterator<Item = PathBuf>,
         contexts: impl IntoIterator<Item = PathBuf>,
@@ -650,6 +672,22 @@ impl SnapshotEntry {
             Some(source) => FileSnapshot::create(path, source, strategy).await?,
             None => FileSnapshot::create_from_path(path, strategy).await?,
         };
+        Ok(Self::File(SnapshottedFile {
+            path: path.to_path_buf(),
+            snapshot,
+        }))
+    }
+
+    async fn create_file_bytes(
+        path: &Path,
+        source: &[u8],
+        strategy: SnapshotStrategy,
+        file_system_info: &FileSystemInfo,
+    ) -> Result<Self> {
+        if let Some(entry) = Self::classified_path_entry(path, file_system_info) {
+            return Ok(entry);
+        }
+        let snapshot = FileSnapshot::create_bytes(path, source, strategy).await?;
         Ok(Self::File(SnapshottedFile {
             path: path.to_path_buf(),
             snapshot,
@@ -943,6 +981,30 @@ impl FileSnapshot {
             exists: true,
             modified,
             source_hash,
+        })
+    }
+
+    pub(crate) async fn create_bytes(
+        path: &Path,
+        source: &[u8],
+        strategy: SnapshotStrategy,
+    ) -> Result<Self> {
+        let modified = if strategy.timestamp {
+            let metadata = tokio::fs::metadata(path)
+                .await
+                .map_err(|error| Error::read(path, error))?;
+            Some(
+                metadata
+                    .modified()
+                    .map_err(|error| Error::read(path, error))?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            exists: true,
+            modified,
+            source_hash: strategy.hash.then(|| hash_bytes(source)),
         })
     }
 

@@ -45,6 +45,11 @@ impl CacheKey for ModuleIdentity {
     fn cache_identifier(&self) -> CacheIdentifier {
         let module_type: &[u8] = match self.module_type {
             crate::ModuleType::JavaScriptAuto => b"javascript/auto",
+            crate::ModuleType::Json => b"json",
+            crate::ModuleType::Asset => b"asset",
+            crate::ModuleType::AssetResource => b"asset/resource",
+            crate::ModuleType::AssetInline => b"asset/inline",
+            crate::ModuleType::AssetSource => b"asset/source",
         };
         let query = optional_identifier_part(self.query.as_deref());
         let fragment = optional_identifier_part(self.fragment.as_deref());
@@ -88,25 +93,41 @@ mod cache_key_tests {
         identity.fragment = Some("#value".to_string());
         identity.layer = Some("client".to_string());
         identity.loaders = vec!["/loader.js?options".to_string()];
-        let mut legacy_parts = vec![
-            b"javascript/auto".to_vec(),
-            identity.resource.as_os_str().as_encoded_bytes().to_vec(),
-            optional_identifier_part(identity.query.as_deref()),
-            optional_identifier_part(identity.fragment.as_deref()),
-            optional_identifier_part(identity.layer.as_deref()),
-            (identity.loaders.len() as u64).to_le_bytes().to_vec(),
-        ];
-        legacy_parts.extend(
-            identity
-                .loaders
-                .iter()
-                .map(|loader| loader.as_bytes().to_vec()),
-        );
+        for (module_type, type_key) in [
+            (
+                crate::ModuleType::JavaScriptAuto,
+                b"javascript/auto".as_slice(),
+            ),
+            (crate::ModuleType::Json, b"json".as_slice()),
+            (crate::ModuleType::Asset, b"asset".as_slice()),
+            (
+                crate::ModuleType::AssetResource,
+                b"asset/resource".as_slice(),
+            ),
+            (crate::ModuleType::AssetInline, b"asset/inline".as_slice()),
+            (crate::ModuleType::AssetSource, b"asset/source".as_slice()),
+        ] {
+            identity.module_type = module_type;
+            let mut legacy_parts = vec![
+                type_key.to_vec(),
+                identity.resource.as_os_str().as_encoded_bytes().to_vec(),
+                optional_identifier_part(identity.query.as_deref()),
+                optional_identifier_part(identity.fragment.as_deref()),
+                optional_identifier_part(identity.layer.as_deref()),
+                (identity.loaders.len() as u64).to_le_bytes().to_vec(),
+            ];
+            legacy_parts.extend(
+                identity
+                    .loaders
+                    .iter()
+                    .map(|loader| loader.as_bytes().to_vec()),
+            );
 
-        assert_eq!(
-            identity.cache_identifier(),
-            CacheIdentifier::from_parts(legacy_parts)
-        );
+            assert_eq!(
+                identity.cache_identifier(),
+                CacheIdentifier::from_parts(legacy_parts)
+            );
+        }
     }
 }
 
@@ -274,10 +295,11 @@ impl ModuleBuildRecord {
         &self.built_content
     }
 
-    pub(crate) fn persistent_parts(&self) -> (&ParsedModule, &str, Option<u64>) {
+    pub(crate) fn persistent_parts(&self) -> (&ParsedModule, &str, Option<&[u8]>, Option<u64>) {
         (
             self.built_content.parsed(),
             self.built_content.source(),
+            self.built_content.binary_source(),
             Some(self.built_content.source_hash()),
         )
     }
@@ -285,13 +307,15 @@ impl ModuleBuildRecord {
     pub(crate) fn from_persistent_parts(
         parsed: ParsedModule,
         source: String,
+        binary_source: Option<Vec<u8>>,
         source_hash: u64,
         snapshot: Snapshot,
     ) -> Self {
         Self {
-            built_content: Arc::new(BuiltModuleContent::from_persistent_parts(
+            built_content: Arc::new(BuiltModuleContent::from_persistent_parts_with_binary(
                 parsed,
                 source,
+                binary_source,
                 source_hash,
             )),
             snapshot,

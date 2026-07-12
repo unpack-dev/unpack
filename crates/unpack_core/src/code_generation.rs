@@ -5,30 +5,36 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use rspack_sources::{ConcatSource, OriginalSource, RawStringSource, ReplaceSource, SourceMap};
+use rspack_sources::{ConcatSource, RawStringSource, SourceMap};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AsyncBlockOrigin, AsyncDependenciesBlockIndex, Chunk, ChunkGraph, ChunkGroupKind,
-    CompilerOptions, Dependency, DependencyIndex, Error, Module, ModuleGraph, ModuleHandle,
+    AsyncBlockOrigin, AsyncDependenciesBlockIndex, Chunk, ChunkGraph, CompilerOptions,
+    DependencyIndex, Error, Module, ModuleGraph, ModuleHandle,
     cache::Cache,
     cache_facade::{CacheETag, CacheIdentifier, CacheKey},
     cache_hash::StableHasher,
-    code_generation_record::{
-        CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
-    },
-    dependency_template::{DependencyTemplateContext, json_render_id, json_string},
+    code_generation_record::{CodeGenerationRecord, CodeGenerationResult, CodeGenerationSource},
+    dependency_template::{json_render_id, json_string},
     id_assignment::RenderId,
-    init_fragment::{InitFragment, InitFragmentStage},
-    output_filename::resolve_chunk_filename,
+    normal_module_factory::{ModuleGeneratorContext, ModuleTypeRegistry},
     rendered_source::RenderedSource,
-    runtime::{RuntimeModule, RuntimeModuleContext, RuntimeRequirement, RuntimeRequirements},
+    runtime::{RuntimeModule, RuntimeRequirements},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Asset {
     pub filename: String,
     pub source: String,
+    pub binary_source: Option<Vec<u8>>,
+}
+
+impl Asset {
+    pub fn source_bytes(&self) -> &[u8] {
+        self.binary_source
+            .as_deref()
+            .unwrap_or(self.source.as_bytes())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -50,17 +56,14 @@ impl CodeGenerationResults {
             .iter()
             .map(|(module, result)| (*module, result.runtime_requirements()))
     }
+
+    pub(crate) fn module_render_id(&self, module: ModuleHandle) -> Option<&RenderId> {
+        self.module_render_ids.get(&module)
+    }
 }
 
-struct CodeGenerationInput<'a> {
-    module: &'a Module,
-    module_graph: &'a ModuleGraph,
-    chunk_graph: &'a ChunkGraph,
-    module_render_ids: &'a HashMap<ModuleHandle, RenderId>,
-}
-
-fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
-    let CodeGenerationInput {
+fn code_generation_etag(input: &ModuleGeneratorContext<'_>) -> CacheETag {
+    let ModuleGeneratorContext {
         module,
         module_graph,
         chunk_graph,
@@ -143,14 +146,28 @@ pub(crate) struct RenderManifest {
     entries: Vec<RenderManifestEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RenderManifestEntry {
-    filename: String,
-    render: AssetRenderManifest,
+#[derive(Clone, Copy)]
+pub(crate) struct RenderManifestContext<'a> {
+    pub module_graph: &'a ModuleGraph,
+    pub chunk_graph: &'a ChunkGraph,
+    pub entries: &'a [ModuleHandle],
+    pub code_generation_results: &'a CodeGenerationResults,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum AssetRenderManifest {
+pub(crate) struct RenderManifestEntry {
+    pub filename: String,
+    pub render: RenderManifestContent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RenderManifestContent {
+    JavaScript(JavascriptRenderManifest),
+    Asset(Asset),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JavascriptRenderManifest {
     InitialChunk {
         modules: Vec<ModuleRenderManifest>,
         runtime_modules: Vec<RenderedRuntimeModule>,
@@ -164,15 +181,15 @@ enum AssetRenderManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ModuleRenderManifest {
-    module: ModuleHandle,
-    render_id: RenderId,
+pub(crate) struct ModuleRenderManifest {
+    pub module: ModuleHandle,
+    pub render_id: RenderId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RenderedRuntimeModule {
-    module: RuntimeModule,
-    source: String,
+pub(crate) struct RenderedRuntimeModule {
+    pub module: RuntimeModule,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,13 +221,17 @@ pub(crate) fn generate_code(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
 ) -> CodeGenerationOutcome {
-    generate_code_with(module_graph, chunk_graph, generate_module_code)
+    let module_types = crate::compiler::test_compilation_hooks().normal_module_factory_hooks;
+    generate_code_with(module_graph, chunk_graph, |input| {
+        generate_registered_module(&module_types, input)
+    })
 }
 
 pub(crate) fn generate_code_cached(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     cache: &Cache,
+    module_types: &ModuleTypeRegistry,
 ) -> CodeGenerationOutcome {
     let cache = cache.code_generations();
     generate_code_with(module_graph, chunk_graph, |input| {
@@ -222,17 +243,29 @@ pub(crate) fn generate_code_cached(
             }
         }
 
-        let record = generate_module_code(input)?;
+        let record = generate_registered_module(module_types, input)?;
         cache.store(key.clone(), Some(etag), record.clone());
         Ok(record)
     })
+}
+
+fn generate_registered_module(
+    module_types: &ModuleTypeRegistry,
+    input: ModuleGeneratorContext<'_>,
+) -> Result<CodeGenerationRecord, Error> {
+    if let Some(error) = input.module.build_error() {
+        return Ok(CodeGenerationRecord::new(CodeGenerationSource::Raw {
+            source: render_failed_module_content(error),
+        }));
+    }
+    module_types.generate(input)
 }
 
 fn generate_code_with(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     mut generate_module: impl FnMut(
-        CodeGenerationInput<'_>,
+        ModuleGeneratorContext<'_>,
     ) -> std::result::Result<CodeGenerationRecord, Error>,
 ) -> CodeGenerationOutcome {
     let module_render_ids = module_graph
@@ -259,7 +292,7 @@ fn generate_code_with(
         .iter()
         .filter(|module| !chunk_graph.module_chunks(module.handle()).is_empty())
     {
-        let input = CodeGenerationInput {
+        let input = ModuleGeneratorContext {
             module,
             module_graph,
             chunk_graph,
@@ -292,76 +325,10 @@ fn generate_code_with(
 }
 
 pub(crate) fn create_render_manifest(
-    chunk_graph: &ChunkGraph,
-    entries: &[ModuleHandle],
-    code_generation_results: &CodeGenerationResults,
+    context: RenderManifestContext<'_>,
+    render_manifest: &crate::compilation::RenderManifestHook,
 ) -> RenderManifest {
-    let mut manifest_entries = Vec::new();
-
-    for (entry_index, group_handle) in chunk_graph.entrypoints().iter().copied().enumerate() {
-        let group = &chunk_graph.chunk_groups()[group_handle.index()];
-        let chunk_handle = group
-            .chunks()
-            .first()
-            .copied()
-            .expect("Entrypoint must contain a Chunk before manifest creation");
-        let chunk = chunk_graph
-            .chunk(chunk_handle)
-            .expect("Entrypoint Chunk must exist before manifest creation");
-        let entry_module = entries
-            .get(entry_index)
-            .copied()
-            .expect("Entrypoint must have an Entry Module before manifest creation");
-        let modules = module_render_manifest(chunk_graph, chunk, code_generation_results);
-        chunk_graph
-            .runtime_tree_requirements(group_handle)
-            .expect("Runtime Requirements must be processed before manifest creation");
-        let runtime_context = RuntimeModuleContext {
-            chunk_graph,
-            runtime_chunk: chunk_handle,
-        };
-        let runtime_modules = chunk_graph
-            .runtime_modules(chunk_handle)
-            .iter()
-            .map(|module| RenderedRuntimeModule {
-                module: *module,
-                source: module.generate(&runtime_context),
-            })
-            .collect();
-        manifest_entries.push(RenderManifestEntry {
-            filename: resolve_chunk_filename(chunk),
-            render: AssetRenderManifest::InitialChunk {
-                modules,
-                runtime_modules,
-                entry_id: code_generation_results
-                    .module_render_ids
-                    .get(&entry_module)
-                    .expect("Entry Module must have a Render ID before manifest creation")
-                    .clone(),
-                chunk_id: chunk.render_id().clone(),
-            },
-        });
-    }
-
-    for chunk in chunk_graph.chunks() {
-        let is_initial = chunk.groups().iter().any(|group_handle| {
-            matches!(
-                chunk_graph.chunk_groups()[group_handle.index()].kind(),
-                ChunkGroupKind::Entrypoint { .. }
-            )
-        });
-        if is_initial {
-            continue;
-        }
-        manifest_entries.push(RenderManifestEntry {
-            filename: resolve_chunk_filename(chunk),
-            render: AssetRenderManifest::AsyncChunk {
-                modules: module_render_manifest(chunk_graph, chunk, code_generation_results),
-                chunk_id: chunk.render_id().clone(),
-            },
-        });
-    }
-
+    let mut manifest_entries = render_manifest.call(context);
     manifest_entries.sort_by(|left, right| left.filename.cmp(&right.filename));
     RenderManifest {
         entries: manifest_entries,
@@ -378,18 +345,25 @@ pub(crate) fn render_assets(
     let cache = cache.asset_renders::<AssetRenderKey>();
     let cache_enabled = options.cache.kind == crate::CacheKind::Filesystem;
     for entry in &manifest.entries {
-        let key = entry.render.cache_key();
+        let RenderManifestContent::JavaScript(render) = &entry.render else {
+            let RenderManifestContent::Asset(asset) = &entry.render else {
+                unreachable!()
+            };
+            assets.push(asset.clone());
+            continue;
+        };
+        let key = render.cache_key();
         let rendered_source = if cache_enabled {
-            let etag = entry.render.cache_etag(code_generation_results);
+            let etag = render.cache_etag(code_generation_results);
             if let Some(rendered_source) = cache.get(&key, Some(&etag)) {
                 rendered_source.as_ref().clone()
             } else {
-                let rendered_source = render_asset(&entry.render, code_generation_results);
+                let rendered_source = render_asset(render, code_generation_results);
                 cache.store(key, Some(etag), rendered_source.clone());
                 rendered_source
             }
         } else {
-            render_asset(&entry.render, code_generation_results)
+            render_asset(render, code_generation_results)
         };
         assets.extend(emit_asset(
             entry.filename.clone(),
@@ -400,7 +374,7 @@ pub(crate) fn render_assets(
     assets
 }
 
-impl AssetRenderManifest {
+impl JavascriptRenderManifest {
     fn cache_key(&self) -> AssetRenderKey {
         match self {
             Self::InitialChunk { chunk_id, .. } => AssetRenderKey {
@@ -463,7 +437,7 @@ fn hash_module_render_inputs(
     }
 }
 
-fn module_render_manifest(
+pub(crate) fn module_render_manifest(
     chunk_graph: &ChunkGraph,
     chunk: &Chunk,
     code_generation_results: &CodeGenerationResults,
@@ -493,17 +467,17 @@ fn module_render_manifest(
 }
 
 fn render_asset(
-    manifest: &AssetRenderManifest,
+    manifest: &JavascriptRenderManifest,
     code_generation_results: &CodeGenerationResults,
 ) -> RenderedSource {
     let source = match manifest {
-        AssetRenderManifest::InitialChunk {
+        JavascriptRenderManifest::InitialChunk {
             modules,
             runtime_modules,
             entry_id,
             chunk_id: _,
         } => render_initial_asset(modules, runtime_modules, entry_id, code_generation_results),
-        AssetRenderManifest::AsyncChunk { modules, chunk_id } => {
+        JavascriptRenderManifest::AsyncChunk { modules, chunk_id } => {
             render_async_chunk_asset(modules, chunk_id, code_generation_results)
         }
     };
@@ -529,12 +503,17 @@ fn emit_asset(filename: String, rendered: &RenderedSource, sourcemap: bool) -> V
         map.set_file(Some(filename.clone().into()));
     }
 
-    assets.push(Asset { filename, source });
+    assets.push(Asset {
+        filename,
+        source,
+        binary_source: None,
+    });
 
     if let Some(map) = source_map {
         assets.push(Asset {
             filename: map_filename,
             source: map.to_json(),
+            binary_source: None,
         });
     }
 
@@ -637,106 +616,8 @@ fn render_module_table(
     source
 }
 
-fn generate_module_code(
-    input: CodeGenerationInput<'_>,
-) -> std::result::Result<CodeGenerationRecord, Error> {
-    let CodeGenerationInput {
-        module,
-        module_graph,
-        chunk_graph,
-        module_render_ids,
-    } = input;
-    if let Some(error) = module.build_error() {
-        return Ok(CodeGenerationRecord::new(CodeGenerationSource::Raw {
-            source: render_failed_module_content(error),
-        }));
-    }
-
-    let module_handle = module.handle();
-    let module_render_id = &module_render_ids[&module_handle];
-    let module_render_name = module_render_id.to_string();
-    let mut source = ReplaceSource::new(OriginalSource::new(
-        module.source(),
-        module_render_name.as_str(),
-    ));
-    let mut init_fragments = Vec::new();
-    let mut runtime_requirements = RuntimeRequirements::default();
-    if module.is_harmony() {
-        apply_harmony_compatibility_template(&mut runtime_requirements, &mut init_fragments);
-    }
-
-    {
-        let mut apply_template =
-            |dependency: &Dependency,
-             origin_block: Option<AsyncDependenciesBlockIndex>,
-             dependency_index: Option<DependencyIndex>| {
-                let mut context = DependencyTemplateContext {
-                    module: module_handle,
-                    origin_block,
-                    dependency_index,
-                    module_graph,
-                    chunk_graph,
-                    exports_info: module.exports_info(),
-                    module_render_ids,
-                    runtime_requirements: &mut runtime_requirements,
-                    init_fragments: &mut init_fragments,
-                };
-                dependency.apply_template(&mut source, &mut context)
-            };
-
-        for dependency in module.presentational_dependencies() {
-            apply_template(dependency, None, None)?;
-        }
-        for (dependency_index, dependency) in module.dependencies().iter().enumerate() {
-            apply_template(
-                dependency,
-                None,
-                Some(DependencyIndex::new(dependency_index)),
-            )?;
-        }
-        for (block_index, block) in module.blocks().iter().enumerate() {
-            for (dependency_index, dependency) in block.dependencies().iter().enumerate() {
-                apply_template(
-                    dependency,
-                    Some(AsyncDependenciesBlockIndex::new(block_index)),
-                    Some(DependencyIndex::new(dependency_index)),
-                )?;
-            }
-        }
-    }
-
-    let init = InitFragment::render(init_fragments);
-    Ok(
-        CodeGenerationRecord::new(CodeGenerationSource::OriginalWithReplacements {
-            prefix: init,
-            original_source_len: u32::try_from(module.source_len())
-                .expect("Module source length must fit the Code Generation cache format"),
-            original_name: module_render_name,
-            replacements: source
-                .replacements()
-                .iter()
-                .map(CodeGenerationReplacement::from)
-                .collect(),
-            suffix: String::new(),
-        })
-        .with_runtime_requirements(runtime_requirements),
-    )
-}
-
 fn render_failed_module_content(error: &Error) -> String {
     format!("throw new Error({});", json_string(&error.to_string()))
-}
-
-fn apply_harmony_compatibility_template(
-    runtime_requirements: &mut RuntimeRequirements,
-    init_fragments: &mut Vec<InitFragment>,
-) {
-    runtime_requirements.insert(RuntimeRequirement::MakeNamespaceObject);
-    init_fragments.push(InitFragment::new(
-        InitFragmentStage::Compatibility,
-        init_fragments.len(),
-        "__webpack_require__.r(__webpack_exports__);\n".to_string(),
-    ));
 }
 
 #[cfg(test)]
@@ -751,13 +632,13 @@ mod tests {
         cache::{Cache, CacheItemFamily, CacheItemWork},
         cache_facade::{CacheIdentifier, CacheKey, CacheNamespace},
         id_assignment::{RenderId, assign_chunk_render_ids, assign_module_render_ids},
-        runtime::RuntimeModule,
+        runtime::{RuntimeModule, RuntimeRequirement},
     };
 
     use super::{
-        AssetRenderKey, AssetRenderKind, AssetRenderManifest, CodeGenerationResult,
-        CodeGenerationResults, CodeGenerationSource, ModuleRenderManifest, RenderedRuntimeModule,
-        RenderedSource, RuntimeRequirement, emit_asset,
+        AssetRenderKey, AssetRenderKind, CodeGenerationResult, CodeGenerationResults,
+        CodeGenerationSource, JavascriptRenderManifest, ModuleRenderManifest,
+        RenderedRuntimeModule, RenderedSource, emit_asset,
     };
     use crate::code_generation_record::{CodeGenerationRecord, CodeGenerationReplacement};
 
@@ -792,7 +673,7 @@ mod tests {
             module: module_handle,
             render_id: RenderId::String("./src/feature.js".to_string()),
         };
-        let render = AssetRenderManifest::AsyncChunk {
+        let render = JavascriptRenderManifest::AsyncChunk {
             modules: vec![module],
             chunk_id: RenderId::String("src_feature_js".to_string()),
         };
@@ -819,7 +700,7 @@ mod tests {
         );
         assert_ne!(without_requirement, render.cache_etag(&results));
 
-        let initial = AssetRenderManifest::InitialChunk {
+        let initial = JavascriptRenderManifest::InitialChunk {
             modules: Vec::new(),
             runtime_modules: vec![RenderedRuntimeModule {
                 module: RuntimeModule::GetChunkFilename,
@@ -828,7 +709,7 @@ mod tests {
             entry_id: RenderId::String("./src/index.js".to_string()),
             chunk_id: RenderId::String("main".to_string()),
         };
-        let changed_filename_map = AssetRenderManifest::InitialChunk {
+        let changed_filename_map = JavascriptRenderManifest::InitialChunk {
             modules: Vec::new(),
             runtime_modules: vec![RenderedRuntimeModule {
                 module: RuntimeModule::GetChunkFilename,
@@ -877,7 +758,8 @@ mod tests {
         let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
 
         let (first_graph, first_chunks, first_module) = build("first");
-        let first = super::generate_code_cached(&first_graph, &first_chunks, &cache);
+        let module_types = crate::compiler::test_compilation_hooks().normal_module_factory_hooks;
+        let first = super::generate_code_cached(&first_graph, &first_chunks, &cache, &module_types);
         assert_eq!(
             first.results.results[&first_module]
                 .source()
@@ -887,7 +769,8 @@ mod tests {
         );
 
         let (second_graph, second_chunks, second_module) = build("second");
-        let second = super::generate_code_cached(&second_graph, &second_chunks, &cache);
+        let second =
+            super::generate_code_cached(&second_graph, &second_chunks, &cache, &module_types);
         assert_eq!(
             second.results.results[&second_module]
                 .source()
@@ -932,7 +815,7 @@ mod tests {
         let module_ref = module_graph
             .module(module)
             .expect("fixture Module should exist");
-        let input = super::CodeGenerationInput {
+        let input = crate::normal_module_factory::ModuleGeneratorContext {
             module: module_ref,
             module_graph: &module_graph,
             chunk_graph: &chunk_graph,
@@ -959,7 +842,12 @@ mod tests {
             }),
         );
 
-        let outcome = super::generate_code_cached(&module_graph, &chunk_graph, &cache);
+        let outcome = super::generate_code_cached(
+            &module_graph,
+            &chunk_graph,
+            &cache,
+            &crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
+        );
         assert_eq!(
             outcome.results.results[&module]
                 .source()
@@ -1000,8 +888,18 @@ mod tests {
 
         let cache = Cache::new(CacheOptions::memory(), SnapshotOptions::default());
         for outcome in [
-            super::generate_code_cached(&module_graph, &chunk_graph, &cache),
-            super::generate_code_cached(&module_graph, &chunk_graph, &cache),
+            super::generate_code_cached(
+                &module_graph,
+                &chunk_graph,
+                &cache,
+                &crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
+            ),
+            super::generate_code_cached(
+                &module_graph,
+                &chunk_graph,
+                &cache,
+                &crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
+            ),
         ] {
             assert_eq!(
                 outcome.errors,
@@ -1096,7 +994,7 @@ mod tests {
             compilation.chunk_graph(),
             |input| {
                 generation_count += 1;
-                super::generate_module_code(input)
+                crate::javascript::javascript_generator::generate(input)
             },
         );
         assert!(outcome.errors.is_empty());
@@ -1149,7 +1047,7 @@ mod tests {
                         message: "fixture generation failure".to_string(),
                     })
                 } else {
-                    super::generate_module_code(input)
+                    crate::javascript::javascript_generator::generate(input)
                 }
             },
         );

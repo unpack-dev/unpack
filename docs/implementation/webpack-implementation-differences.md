@@ -39,11 +39,12 @@ before Rust continues into `seal`. This avoids cloning the full graph at the
 native seam. Before returning ownership, the JavaScript wrapper materializes
 the module wrappers required by the hook, while Module Graph connections cross
 the native boundary lazily in per-module batches. Once the awaited hook has
-settled, graph queries from detached JavaScript work fail with an expired-lease
-error while Rust seals instead of reading a raw pointer concurrently. The final
-native graph is then rebound to the same JavaScript `Compilation`; already
-materialized connection targets are refreshed by handle and phase-dependent
-caches are invalidated in place.
+settled, queries from detached JavaScript work that require another native
+graph read fail with an expired-lease error while Rust seals instead of reading
+a raw pointer concurrently. Purely materialized JavaScript records remain
+ordinary values. The final native graph is then rebound to the same JavaScript
+`Compilation`; already materialized connection targets are refreshed by handle
+and phase-dependent caches are invalidated in place.
 
 ## Cache layout
 

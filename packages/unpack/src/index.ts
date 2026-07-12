@@ -498,6 +498,7 @@ interface NativeModuleGraphConnection {
   handle: number;
   originModuleHandle?: number | null;
   moduleHandle: number;
+  resolvedModuleHandle: number;
   dependencyType?: string;
   dependency_type?: string;
   request?: string | null;
@@ -1833,6 +1834,10 @@ class ModuleGraphImpl implements ModuleGraph {
     const origin = originHandle == null
       ? null
       : this.#modulesByHandle.get(originHandle) ?? null;
+    const resolvedTarget = this.#modulesByHandle.get(
+      nativeConnection.resolvedModuleHandle
+    );
+    if (!resolvedTarget) return undefined;
     const dependency = new DependencyImpl(
       nativeConnection.dependencyType ?? nativeConnection.dependency_type ?? "unknown",
       nativeConnection.request ?? undefined,
@@ -1842,9 +1847,10 @@ class ModuleGraphImpl implements ModuleGraph {
     const connection = new ModuleGraphConnectionImpl(
       origin,
       dependency,
-      target,
+      resolvedTarget,
       nativeConnection.weak
     );
+    connection.updateModule(target);
     this.#connectionByHandle.set(nativeConnection.handle, connection);
     this.#connectionByDependency.set(dependency, connection);
     addToSetMap(this.#incoming, target, connection);

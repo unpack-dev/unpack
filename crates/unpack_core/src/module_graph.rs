@@ -76,6 +76,7 @@ impl ModuleGraph {
             origin_block,
             origin_dependency_index,
             dependency,
+            resolved_module: module,
             module,
             state: ModuleGraphConnectionState::Active,
         });

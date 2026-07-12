@@ -158,8 +158,7 @@ Sources:
 
 ## Implications for Unpack's ownership handoff
 
-The uncommitted Unpack design is more conservative than Rspack in the right
-place:
+The current Unpack design is more conservative than Rspack in the right place:
 
 1. Rust moves the `ModuleGraph` into a phase-scoped native lease before calling
    JS. The compiler cannot access the graph while JS owns it, so the awaited
@@ -169,10 +168,11 @@ place:
    `'static` graph reference.
 3. The TypeScript wrapper materializes the modules required by the hook, then
    requests incoming or outgoing connections in per-module batches only when a
-   graph API reads them. After the hook settles, detached graph queries fail
-   with an expired-lease error while Rust seals. Later `done` rebinds the final
-   native graph and refreshes already-materialized connections by stable handle
-   on the same JS object.
+   graph API reads them. After the hook settles, detached queries that need
+   another native graph read fail with an expired-lease error while Rust seals;
+   purely materialized JavaScript records remain readable. Later `done` rebinds
+   the final native graph and refreshes already-materialized connections by
+   stable handle on the same JS object.
 
 The cost profile differs:
 

@@ -214,6 +214,8 @@ pub struct NativeModuleGraphConnection {
     pub origin_module_handle: Option<u32>,
     #[napi(js_name = "moduleHandle")]
     pub module_handle: u32,
+    #[napi(js_name = "resolvedModuleHandle")]
+    pub resolved_module_handle: u32,
     #[napi(js_name = "dependencyType")]
     pub dependency_type: String,
     pub request: Option<String>,
@@ -990,6 +992,7 @@ fn native_module_graph_connection(
         handle: connection.handle.index().try_into().unwrap_or(u32::MAX),
         origin_module_handle: connection.origin_module.map(native_module_handle),
         module_handle: native_module_handle(connection.module),
+        resolved_module_handle: native_module_handle(connection.resolved_module),
         dependency_type: dependency_type(&connection.dependency).to_string(),
         request: connection.dependency.request().map(str::to_string),
         weak: dependency_is_weak(&connection.dependency),

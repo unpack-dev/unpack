@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/logging/Logger.js
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfrastructureLogLevel {
     Error,

@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Cache.js
+
 //! Compiler-owned Build Cache composition over the webpack-aligned Cache.
 //! It wires typed Cache Facades to Cache Layers and owns preparation and publication lifecycle.
 

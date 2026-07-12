@@ -370,6 +370,49 @@ test("done exposes webpack-shaped ChunkGraph membership queries", async () => {
   }
 });
 
+test("graph handles remain scoped to their compilation", async () => {
+  const fixture = await createChunkGraphFixture();
+  const firstCompiler = createCompiler(fixture);
+  const secondCompiler = createCompiler(fixture);
+
+  try {
+    const first = await runCompiler(firstCompiler);
+    const second = await runCompiler(secondCompiler);
+    const firstEntry = findModule(first.compilation.modules, "/src/index.js");
+    const secondEntry = findModule(second.compilation.modules, "/src/index.js");
+    const [firstChunk] = first.compilation.chunkGraph.getModuleChunks(firstEntry);
+    const [secondChunk] = second.compilation.chunkGraph.getModuleChunks(secondEntry);
+    assert.ok(firstChunk);
+    assert.ok(secondChunk);
+    assert.notEqual(firstEntry, secondEntry);
+    assert.notEqual(firstChunk, secondChunk);
+
+    assert.equal(
+      first.compilation.chunkGraph.getModuleId(firstEntry),
+      "./src/index.js"
+    );
+    assert.equal(first.compilation.chunkGraph.getModuleId(secondEntry), null);
+    assert.deepEqual(first.compilation.chunkGraph.getModuleChunks(secondEntry), []);
+    assert.deepEqual(first.compilation.chunkGraph.getChunkModules(secondChunk), []);
+    assert.equal(
+      first.compilation.chunkGraph.isModuleInChunk(secondEntry, firstChunk),
+      false
+    );
+    assert.equal(
+      first.compilation.moduleGraph.getIncomingConnections(secondEntry).size,
+      0
+    );
+    assert.equal(
+      first.compilation.moduleGraph.getOutgoingConnections(secondEntry).size,
+      0
+    );
+  } finally {
+    await closeCompiler(firstCompiler);
+    await closeCompiler(secondCompiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("ChunkGraph ordered iterables preserve webpack live identity", async () => {
   const fixture = await createChunkGraphFixture();
   const unpackCompiler = unpack({

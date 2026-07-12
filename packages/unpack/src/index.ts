@@ -627,7 +627,7 @@ interface NativeFlushResult {
 }
 
 interface NativeCompiler {
-  run(): Promise<NativeRunResult>;
+  run(idleReason?: string, isRebuild?: boolean): Promise<NativeRunResult>;
   settleCache(): Promise<NativeFlushResult>;
   shutdown(): Promise<NativeFlushResult>;
   close(): void;
@@ -1255,7 +1255,7 @@ class CompilerImpl implements Compiler {
     }
 
     const watching = new WatchingImpl(
-      (watchHandler) => this.#runWatchCompilation(watchHandler),
+      (watchHandler, isRebuild) => this.#runWatchCompilation(watchHandler, isRebuild),
       () => this.#flushCacheNow(),
       () => {
         if (this.#watching === watching) {
@@ -1359,11 +1359,11 @@ class CompilerImpl implements Compiler {
     return closeError;
   }
 
-  async #runWatchCompilation(handler: WatchHandler): Promise<void> {
+  async #runWatchCompilation(handler: WatchHandler, isRebuild: boolean): Promise<void> {
     let run: Promise<NativeRunResult>;
     try {
       this.#emitInfrastructureLog("info", "unpack.Watch", "watch compilation started");
-      run = this.#runNativeCompilation();
+      run = this.#runNativeCompilation(isRebuild);
     } catch (error) {
       const infrastructureError = toError(error, "InfrastructureError");
       this.#emitInfrastructureLog("error", "unpack.Watch", infrastructureError.message);
@@ -1408,11 +1408,11 @@ class CompilerImpl implements Compiler {
     }
   }
 
-  #runNativeCompilation(): Promise<NativeRunResult> {
+  #runNativeCompilation(isRebuild = false): Promise<NativeRunResult> {
     this.#nativeHookError = undefined;
     this.#activeCompilation = undefined;
     this.#loaderRuntime?.beginCompilation();
-    return this.#nativeCompiler.run();
+    return this.#nativeCompiler.run(undefined, isRebuild);
   }
 
   #takeActiveCompilation(
@@ -1504,17 +1504,21 @@ class WatchingImpl implements Watching {
   #closed = false;
   #running = false;
   #invalidated = false;
+  #hasCompletedCompilation = false;
   #handler: WatchHandler | undefined;
   #rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #watchers: WatchSubscription[] = [];
-  readonly #runCompilation: (handler: WatchHandler) => Promise<void> | void;
+  readonly #runCompilation: (
+    handler: WatchHandler,
+    isRebuild: boolean
+  ) => Promise<void> | void;
   readonly #flushCache: () => Promise<Error | null>;
   readonly #onClose: () => void;
   readonly #watchOptions: NormalizedWatchOptions;
   readonly #closeCallbacks: CloseCallback[] = [];
 
   constructor(
-    runCompilation: (handler: WatchHandler) => Promise<void> | void,
+    runCompilation: (handler: WatchHandler, isRebuild: boolean) => Promise<void> | void,
     flushCache: () => Promise<Error | null>,
     onClose: () => void,
     watchOptions: NormalizedWatchOptions
@@ -1578,8 +1582,12 @@ class WatchingImpl implements Watching {
         latestStats = stats;
       }
       this.#handler?.(err, stats);
-    });
+    }, this.#hasCompletedCompilation);
     this.#running = false;
+
+    if (latestStats) {
+      this.#hasCompletedCompilation = true;
+    }
 
     if (!this.#closed && latestStats) {
       const latestJson = latestStats.toJson();

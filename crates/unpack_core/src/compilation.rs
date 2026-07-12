@@ -148,7 +148,7 @@ impl Compilation {
         self.infrastructure_log_events.extend(events);
     }
 
-    pub async fn make(&mut self) -> Result<()> {
+    pub async fn make(&mut self, make_options: crate::MakeOptions) -> Result<()> {
         async {
             self.log_infrastructure(
                 InfrastructureLogLevel::Verbose,
@@ -164,6 +164,7 @@ impl Compilation {
                 self.hooks.normal_module_factory_hooks.clone(),
                 self.hooks.javascript_parser.clone(),
                 Arc::clone(&state),
+                make_options,
             )
             .await;
 

@@ -4,7 +4,30 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use unpack_core::{Compiler, CompilerOptions, DependencyKind, Entry, Error};
+use unpack_core::{Compiler, CompilerOptions, DependencyKind, Entry, Error, MakeOptions};
+
+#[tokio::test]
+async fn make_can_poll_background_tasks_without_spawning() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    write(temp.path().join("index.js"), "import './dependency';")?;
+    write(temp.path().join("dependency.js"), "export const value = 1;")?;
+    let compiler = Compiler::new(CompilerOptions::new(
+        temp.path(),
+        vec![Entry::new("main", "./index")],
+    ));
+    let mut compilation = compiler.create_compilation();
+
+    compilation
+        .make(MakeOptions {
+            spawn_background_tasks: false,
+        })
+        .await?;
+
+    assert_eq!(compilation.errors(), []);
+    assert_eq!(compilation.module_graph().modules().len(), 2);
+    Ok(())
+}
 
 #[tokio::test]
 async fn make_constructs_static_esm_module_graph() -> Result<(), Box<dyn std::error::Error>> {

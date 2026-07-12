@@ -68,6 +68,7 @@ pub use exports_info::ExportsInfo;
 pub use hooks::{CompilationHooks, HookFuture};
 pub use loader::{LoaderFuture, LoaderRequest, LoaderRunner, MatchedLoader, ModuleRule};
 pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions};
+pub use make::MakeOptions;
 pub use module::{Module, ModuleHandle, ModuleIdentity, ModuleType};
 pub use module_graph::{AsyncDependenciesBlockIndex, DependencyIndex, ModuleGraph};
 pub use module_graph_connection::{

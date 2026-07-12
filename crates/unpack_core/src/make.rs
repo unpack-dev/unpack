@@ -10,11 +10,8 @@ use std::{
     time::Instant,
 };
 
-use futures::{StreamExt, stream::FuturesUnordered};
-use tokio::{
-    sync::{Mutex, Semaphore},
-    task::JoinHandle,
-};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, EntryDependency,
@@ -186,7 +183,20 @@ struct FactorizeGroupKey {
     resource_identifier: String,
 }
 
-type BackgroundMakeTask = JoinHandle<Result<Vec<MakeTask>>>;
+type BackgroundMakeTask = BoxFuture<'static, Result<Vec<MakeTask>>>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct MakeOptions {
+    pub spawn_background_tasks: bool,
+}
+
+impl Default for MakeOptions {
+    fn default() -> Self {
+        Self {
+            spawn_background_tasks: true,
+        }
+    }
+}
 
 pub(crate) async fn run(
     options: &CompilerOptions,
@@ -196,6 +206,7 @@ pub(crate) async fn run(
     module_types: ModuleTypeRegistry,
     parser_hooks: JavascriptParserHookSet,
     state: Arc<Mutex<MakeState>>,
+    make_options: MakeOptions,
 ) -> Result<()> {
     let snapshot_cache = SnapshotCache::default();
     let services = MakeServices {
@@ -240,6 +251,7 @@ pub(crate) async fn run(
             Arc::clone(&state),
             &mut main_queue,
             &mut background_queue,
+            make_options,
         );
     }
 
@@ -254,6 +266,7 @@ pub(crate) async fn run(
                             Arc::clone(&state),
                             &mut main_queue,
                             &mut background_queue,
+                            make_options,
                         );
                     }
                 }
@@ -283,6 +296,7 @@ pub(crate) async fn run(
                 Arc::clone(&state),
                 &mut main_queue,
                 &mut background_queue,
+                make_options,
             );
         }
     }
@@ -294,20 +308,32 @@ fn schedule_make_task(
     state: Arc<Mutex<MakeState>>,
     main_queue: &mut VecDeque<MakeTask>,
     background_queue: &mut FuturesUnordered<BackgroundMakeTask>,
+    make_options: MakeOptions,
 ) {
     if task.is_background() {
-        background_queue.push(spawn_make_task(task, services, state));
+        background_queue.push(background_make_task(task, services, state, make_options));
     } else {
         main_queue.push_back(task);
     }
 }
 
-fn spawn_make_task(
+fn background_make_task(
     task: MakeTask,
     services: MakeServices,
     state: Arc<Mutex<MakeState>>,
+    make_options: MakeOptions,
 ) -> BackgroundMakeTask {
-    tokio::spawn(async move { task.run(services, state).await })
+    let task = async move { task.run(services, state).await };
+    if make_options.spawn_background_tasks {
+        async move {
+            tokio::spawn(task).await.map_err(|error| Error::MakeTask {
+                message: error.to_string(),
+            })?
+        }
+        .boxed()
+    } else {
+        task.boxed()
+    }
 }
 
 async fn next_background_make_task(
@@ -317,9 +343,6 @@ async fn next_background_make_task(
         .next()
         .await
         .expect("background queue should not be empty")
-        .map_err(|error| Error::MakeTask {
-            message: error.to_string(),
-        })?
 }
 
 impl MakeTask {
@@ -884,6 +907,7 @@ mod tests {
             crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
             JavascriptParserHookSet::default(),
             Arc::clone(&state),
+            MakeOptions::default(),
         )
         .await?;
 

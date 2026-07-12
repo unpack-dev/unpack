@@ -710,7 +710,7 @@ impl Compiler {
 
     pub async fn run(&self) -> Result<Compilation> {
         Ok(self
-            .run_until_finalize(CacheIdleReason::Ordinary)
+            .run_until_finalize(CacheIdleReason::Ordinary, false)
             .await?
             .finish())
     }
@@ -718,6 +718,7 @@ impl Compiler {
     pub async fn run_until_finalize(
         &self,
         idle_reason: CacheIdleReason,
+        is_rebuild: bool,
     ) -> Result<PendingCompilation> {
         self.cache
             .prepare_for_compilation(
@@ -731,7 +732,11 @@ impl Compiler {
             if let Some(hooks) = &self.options.compilation_hooks {
                 hooks.compilation(&compilation).await?;
             }
-            compilation.make().await?;
+            compilation
+                .make(crate::MakeOptions {
+                    spawn_background_tasks: !is_rebuild,
+                })
+                .await?;
             if let Some(hooks) = &self.options.compilation_hooks {
                 hooks.finish_modules(&mut compilation).await?;
             }
@@ -1321,7 +1326,7 @@ mod tests {
 
         let compiler = Compiler::new(options);
         let pending = compiler
-            .run_until_finalize(CacheIdleReason::Ordinary)
+            .run_until_finalize(CacheIdleReason::Ordinary, false)
             .await?;
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         assert!(!PackFile::index_path(&cache_location).exists());
@@ -1472,7 +1477,7 @@ mod tests {
 
         let compiler = Compiler::new(options.clone());
         let pending = compiler
-            .run_until_finalize(CacheIdleReason::Ordinary)
+            .run_until_finalize(CacheIdleReason::Ordinary, false)
             .await?;
         write(&config, "export default 'after';")?;
         pending.finish();

@@ -810,7 +810,11 @@ pub struct NativeCompiler {
 #[napi]
 impl NativeCompiler {
     #[napi]
-    pub async fn run(&self, idle_reason: Option<String>) -> NativeRunResult {
+    pub async fn run(
+        &self,
+        idle_reason: Option<String>,
+        is_rebuild: Option<bool>,
+    ) -> NativeRunResult {
         let compiler = self.compiler.clone();
         let output_path = self.output_path.clone();
         let idle_reason = match idle_reason.as_deref() {
@@ -818,7 +822,13 @@ impl NativeCompiler {
             _ => CacheIdleReason::Ordinary,
         };
 
-        run_compiler_inner(compiler, output_path, idle_reason).await
+        run_compiler_inner(
+            compiler,
+            output_path,
+            idle_reason,
+            is_rebuild.unwrap_or(false),
+        )
+        .await
     }
 
     #[napi(js_name = "settleCache")]
@@ -1161,12 +1171,13 @@ async fn run_compiler_inner(
     compiler: Option<Arc<Compiler>>,
     output_path: PathBuf,
     idle_reason: CacheIdleReason,
+    is_rebuild: bool,
 ) -> NativeRunResult {
     let Some(compiler) = compiler else {
         return infrastructure_error("CompilerClosedError", "compiler is closed");
     };
 
-    let pending = match compiler.run_until_finalize(idle_reason).await {
+    let pending = match compiler.run_until_finalize(idle_reason, is_rebuild).await {
         Ok(pending) => pending,
         Err(error) => {
             return infrastructure_error("InfrastructureError", error.to_string());

@@ -16,7 +16,7 @@ const casesRoot = join(
   "..",
   "..",
   "test",
-  "e2e-cases"
+  "defaultCases"
 );
 const defaultEntry = "./src/index.js";
 const defaultEntryAsset = "main.js";

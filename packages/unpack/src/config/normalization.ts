@@ -17,12 +17,17 @@ export interface UnpackOptions {
   };
   sourcemap?: boolean;
   cache?: CacheOptions;
+  resolve?: ResolveOptions;
   snapshot?: SnapshotOptions;
   infrastructureLogging?: InfrastructureLoggingOptions;
   module?: ModuleOptions;
   optimization?: OptimizationOptions;
   experiments?: ExperimentsOptions;
   plugins?: WebpackPlugin[];
+}
+
+export interface ResolveOptions {
+  cache?: boolean;
 }
 
 export interface ExperimentsOptions {
@@ -138,6 +143,7 @@ export interface NormalizedOptions {
   providedExports: boolean;
   usedExports: boolean;
   sideEffects: "disabled" | "flag" | "analyze";
+  resolveCache: boolean;
   serialRebuildMake: boolean;
   unsafeWatchCacheInvalidation: boolean;
 }
@@ -222,7 +228,7 @@ export function normalizeOptions(options: UnpackOptions): NormalizedOptions {
   assertKnownKeys(
     options,
     [
-      "context", "name", "mode", "entry", "output", "sourcemap", "cache",
+      "context", "name", "mode", "entry", "output", "sourcemap", "cache", "resolve",
       "snapshot", "infrastructureLogging", "module", "optimization",
       "experiments", "plugins"
     ],
@@ -255,28 +261,55 @@ export function normalizeOptions(options: UnpackOptions): NormalizedOptions {
   if (moduleRules.some((rule) => rule.loader !== undefined) && sourcemap) {
     throw new TypeError("options.sourcemap must be false when options.module.rules is configured");
   }
+  const normalizedCache = normalizeCacheOptions(
+    options.cache,
+    normalizedContext,
+    mode,
+    name,
+    cacheUnaffectedExperiment,
+    experiments.unsafeWatchCacheInvalidation
+  );
   return {
     context: normalizedContext,
     entries: normalizeEntry(options.entry),
     outputPath,
     sourcemap,
-    cache: normalizeCacheOptions(
-      options.cache,
-      normalizedContext,
-      mode,
-      name,
-      cacheUnaffectedExperiment,
-      experiments.unsafeWatchCacheInvalidation
-    ),
+    cache: normalizedCache,
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
     moduleRules,
     providedExports: optimization.providedExports,
     usedExports: optimization.usedExports,
     sideEffects: optimization.sideEffects,
+    resolveCache: normalizeResolveOptions(
+      options.resolve,
+      normalizedCache.type !== "disabled"
+    ),
     serialRebuildMake: experiments.serialRebuildMake,
     unsafeWatchCacheInvalidation: experiments.unsafeWatchCacheInvalidation
   };
+}
+
+export function normalizeResolveOptions(
+  resolveOptions: ResolveOptions | undefined,
+  cacheEnabled: boolean
+): boolean {
+  if (resolveOptions === undefined) {
+    return cacheEnabled;
+  }
+  assertPlainObject(resolveOptions, "options.resolve");
+  assertKnownKeys(resolveOptions, ["cache"], "options.resolve");
+  if (resolveOptions.cache === undefined) {
+    return cacheEnabled;
+  }
+  const resolveCache = assertBoolean(
+    resolveOptions.cache,
+    "options.resolve.cache"
+  );
+  if (resolveCache && !cacheEnabled) {
+    throw new TypeError("options.resolve.cache requires an enabled cache");
+  }
+  return resolveCache;
 }
 
 export function normalizeExperimentsOptions(

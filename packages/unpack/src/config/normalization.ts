@@ -36,7 +36,8 @@ export interface OptimizationOptions {
 }
 
 export interface ModuleOptions {
-  rules: ModuleRule[];
+  rules?: ModuleRule[];
+  unsafeCache?: boolean;
 }
 
 export interface ModuleRule {
@@ -133,6 +134,7 @@ export interface NormalizedOptions {
   snapshot: NormalizedSnapshotOptions;
   infrastructureLogging: NormalizedInfrastructureLoggingOptions;
   moduleRules: NormalizedModuleRule[];
+  moduleUnsafeCache: "disabled" | "node_modules" | "all";
   providedExports: boolean;
   usedExports: boolean;
   sideEffects: "disabled" | "flag" | "analyze";
@@ -245,7 +247,18 @@ export function normalizeOptions(options: UnpackOptions): NormalizedOptions {
   const sourcemap = options.sourcemap === undefined
     ? true
     : assertBoolean(options.sourcemap, "options.sourcemap");
-  const moduleRules = normalizeModuleOptions(options.module);
+  const cache = normalizeCacheOptions(
+    options.cache,
+    normalizedContext,
+    mode,
+    name,
+    cacheUnaffectedExperiment
+  );
+  const normalizedModule = normalizeModuleOptions(
+    options.module,
+    cache.type !== "disabled"
+  );
+  const moduleRules = normalizedModule.rules;
   const optimization = normalizeOptimizationOptions(options.optimization, mode);
   if (moduleRules.some((rule) => rule.loader !== undefined) && sourcemap) {
     throw new TypeError("options.sourcemap must be false when options.module.rules is configured");
@@ -255,16 +268,11 @@ export function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     entries: normalizeEntry(options.entry),
     outputPath,
     sourcemap,
-    cache: normalizeCacheOptions(
-      options.cache,
-      normalizedContext,
-      mode,
-      name,
-      cacheUnaffectedExperiment
-    ),
+    cache,
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
     moduleRules,
+    moduleUnsafeCache: normalizedModule.unsafeCache,
     providedExports: optimization.providedExports,
     usedExports: optimization.usedExports,
     sideEffects: optimization.sideEffects
@@ -317,14 +325,34 @@ export function normalizeOptimizationOptions(
   };
 }
 
-export function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedModuleRule[] {
-  if (module === undefined) return [];
+export function normalizeModuleOptions(
+  module: ModuleOptions | undefined,
+  cacheEnabled: boolean
+): {
+  rules: NormalizedModuleRule[];
+  unsafeCache: "disabled" | "node_modules" | "all";
+} {
+  if (module === undefined) {
+    return {
+      rules: [],
+      unsafeCache: cacheEnabled ? "node_modules" : "disabled"
+    };
+  }
   assertPlainObject(module, "options.module");
-  assertKnownKeys(module, ["rules"], "options.module");
-  if (!Array.isArray(module.rules)) {
+  assertKnownKeys(module, ["rules", "unsafeCache"], "options.module");
+  const rules = module.rules ?? [];
+  if (!Array.isArray(rules)) {
     throw new TypeError("options.module.rules must be an array");
   }
-  return module.rules.map((rule, index) => {
+  const requestedUnsafeCache = module.unsafeCache === undefined
+    ? undefined
+    : assertBoolean(module.unsafeCache, "options.module.unsafeCache");
+  const unsafeCache = !cacheEnabled
+    ? "disabled"
+    : requestedUnsafeCache === undefined
+      ? "node_modules"
+      : requestedUnsafeCache ? "all" : "disabled";
+  const normalizedRules = rules.map((rule, index) => {
     const name = `options.module.rules[${index}]`;
     assertPlainObject(rule, name);
     assertKnownKeys(rule, ["test", "loader", "type", "options", "sideEffects"], name);
@@ -356,6 +384,7 @@ export function normalizeModuleOptions(module: ModuleOptions | undefined): Norma
       : assertBoolean(rule.sideEffects, `${name}.sideEffects`);
     return { test: rule.test.source, loader, type, options: serializedOptions, sideEffects };
   });
+  return { rules: normalizedRules, unsafeCache };
 }
 
 export function assertModuleRuleType(value: unknown, name: string): ModuleRuleType {

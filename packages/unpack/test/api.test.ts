@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import unpack from "@unpack-js/core";
 import webpack from "webpack";
 import type { Compiler, Stats } from "@unpack-js/core";
+import type { Compiler as WebpackCompiler } from "webpack";
 
 test("emits assets through the ESM default API", async () => {
   const fixture = await createFixture({
@@ -750,6 +751,128 @@ test("cache false disables module build cache reuse", async () => {
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /after/);
   } finally {
     await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("module.unsafeCache reuses modules without repeating factorization", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export { value } from './dep';",
+    "src/dep.js": "export const value = 'js';"
+  });
+  const unpackOutputPath = join(fixture, "dist-unpack");
+  const webpackOutputPath = join(fixture, "dist-webpack");
+  const compiler = unpack({
+    context: fixture,
+    mode: "none",
+    entry: "./src/index.js",
+    output: { path: unpackOutputPath },
+    cache: true,
+    module: { unsafeCache: true }
+  });
+  const webpackCompiler = webpack({
+    context: fixture,
+    mode: "none",
+    entry: "./src/index.js",
+    output: { path: webpackOutputPath },
+    cache: { type: "memory" },
+    devtool: false,
+    module: { unsafeCache: true },
+    resolve: { extensions: [".ts", ".js"] },
+    optimization: { concatenateModules: false, minimize: false }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await runWebpack(webpackCompiler);
+    assert.match(await readFile(join(unpackOutputPath, "main.js"), "utf8"), /'js'/);
+    assert.match(await readFile(join(webpackOutputPath, "main.js"), "utf8"), /'js'/);
+
+    await writeFile(join(fixture, "src/dep.ts"), "export const value = 'ts';", {
+      encoding: "utf8"
+    });
+
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await runWebpack(webpackCompiler);
+    const unpackSource = await readFile(join(unpackOutputPath, "main.js"), "utf8");
+    const webpackSource = await readFile(join(webpackOutputPath, "main.js"), "utf8");
+    const observe = (source: string) => ({
+      retainedOriginalResolution: source.includes("'js'"),
+      skippedNewResolution: !source.includes("'ts'")
+    });
+    assert.deepEqual(observe(unpackSource), observe(webpackSource));
+    assert.deepEqual(observe(unpackSource), {
+      retainedOriginalResolution: true,
+      skippedNewResolution: true
+    });
+
+    await writeFile(join(fixture, "src/dep.js"), "export const value = 'js-updated';", {
+      encoding: "utf8"
+    });
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await runWebpack(webpackCompiler);
+    assert.match(await readFile(join(unpackOutputPath, "main.js"), "utf8"), /'js-updated'/);
+    assert.match(await readFile(join(webpackOutputPath, "main.js"), "utf8"), /'js-updated'/);
+  } finally {
+    await closeCompiler(compiler);
+    await closeWebpack(webpackCompiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("module.unsafeCache rejects unsupported predicates synchronously", () => {
+  assert.throws(
+    () => unpack({
+      entry: "./src/index.js",
+      module: { unsafeCache: (() => true) as unknown as boolean }
+    }),
+    /options\.module\.unsafeCache must be a boolean/
+  );
+});
+
+test("cache false disables module.unsafeCache reuse", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "export { value } from './dep';",
+    "src/dep.js": "export const value = 'js';"
+  });
+  const unpackOutputPath = join(fixture, "dist-unpack");
+  const webpackOutputPath = join(fixture, "dist-webpack");
+  const compiler = unpack({
+    context: fixture,
+    mode: "none",
+    entry: "./src/index.js",
+    output: { path: unpackOutputPath },
+    cache: false,
+    module: { unsafeCache: true }
+  });
+  const webpackCompiler = webpack({
+    context: fixture,
+    mode: "none",
+    entry: "./src/index.js",
+    output: { path: webpackOutputPath },
+    cache: false,
+    devtool: false,
+    module: { unsafeCache: true },
+    resolve: { extensions: [".ts", ".js"] },
+    optimization: { concatenateModules: false, minimize: false }
+  });
+
+  try {
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await runWebpack(webpackCompiler);
+    await writeFile(join(fixture, "src/dep.ts"), "export const value = 'ts';", {
+      encoding: "utf8"
+    });
+
+    assert.equal((await runExistingCompiler(compiler)).err, null);
+    await runWebpack(webpackCompiler);
+    const unpackSource = await readFile(join(unpackOutputPath, "main.js"), "utf8");
+    const webpackSource = await readFile(join(webpackOutputPath, "main.js"), "utf8");
+    assert.equal(unpackSource.includes("'ts'"), webpackSource.includes("'ts'"));
+    assert.match(unpackSource, /'ts'/);
+  } finally {
+    await closeCompiler(compiler);
+    await closeWebpack(webpackCompiler);
     await rm(fixture, { recursive: true, force: true });
   }
 });
@@ -2242,6 +2365,7 @@ async function assertSameTimestampPackageExportsEditEmits(
     context: fixture,
     entry: "./src/index.js",
     cache: true,
+    module: { unsafeCache: false },
     snapshot: {
       unmanagedPaths: [packageRoot]
     },
@@ -2350,6 +2474,23 @@ async function runExistingCompiler(compiler: ReturnType<typeof unpack>) {
       });
     }
   );
+}
+
+async function runWebpack(compiler: WebpackCompiler) {
+  return new Promise<import("webpack").Stats>((resolve, reject) => {
+    compiler.run((error, stats) => {
+      if (error) reject(error);
+      else if (!stats) reject(new Error("webpack completed without Stats"));
+      else if (stats.hasErrors()) reject(new Error(stats.toString()));
+      else resolve(stats);
+    });
+  });
+}
+
+async function closeWebpack(compiler: WebpackCompiler) {
+  await new Promise<void>((resolve, reject) => {
+    compiler.close((error) => (error ? reject(error) : resolve()));
+  });
 }
 
 async function closeCompiler(compiler: ReturnType<typeof unpack>) {

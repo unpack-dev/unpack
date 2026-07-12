@@ -53,7 +53,7 @@ pub use code_generation::Asset;
 pub use compilation::{Compilation, WatchDependencies};
 pub use compiler::{
     CacheIdleReason, CacheLifecycleOutcome, Compiler, CompilerOptions, DEFAULT_EXTENSIONS, Entry,
-    PendingCompilation, SideEffectsOption,
+    ModuleUnsafeCache, PendingCompilation, SideEffectsOption,
 };
 pub use dependencies::{
     ConstDependency, EntryDependency, HarmonyExportExpressionDependency,

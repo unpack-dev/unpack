@@ -11,7 +11,7 @@ use crate::{
     cache::Cache,
     code_generation::{self, CodeGenerationResults, RenderManifest},
     id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
-    make::{self, MakeState},
+    make::{self, MakeState, UnsafeModuleCache},
     module_computation_cache::ModuleComputationCache,
     snapshot::FileSystemInfo,
 };
@@ -26,6 +26,7 @@ pub struct Compilation {
     resolver: UnpackResolver,
     cache: Cache,
     module_computation_cache: Option<ModuleComputationCache>,
+    unsafe_module_cache: Option<UnsafeModuleCache>,
     module_graph: ModuleGraph,
     chunk_graph: ChunkGraph,
     render_ids_assigned: bool,
@@ -46,6 +47,7 @@ impl Compilation {
         resolver: UnpackResolver,
         cache: Cache,
         module_computation_cache: Option<ModuleComputationCache>,
+        unsafe_module_cache: Option<UnsafeModuleCache>,
         hooks: CompilationHookSet,
     ) -> Self {
         let file_system_info = FileSystemInfo::from_snapshot_options(&options.snapshot);
@@ -54,6 +56,7 @@ impl Compilation {
             resolver,
             cache,
             module_computation_cache,
+            unsafe_module_cache,
             module_graph: ModuleGraph::default(),
             chunk_graph: ChunkGraph::default(),
             render_ids_assigned: false,
@@ -160,6 +163,7 @@ impl Compilation {
                 &self.options,
                 self.resolver.clone(),
                 self.cache.clone(),
+                self.unsafe_module_cache.clone(),
                 self.file_system_info.clone(),
                 self.hooks.normal_module_factory_hooks.clone(),
                 self.hooks.javascript_parser.clone(),

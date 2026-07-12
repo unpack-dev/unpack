@@ -435,3 +435,7 @@ _Avoid_: Path joiner, import parser
 **Normal Module Factory**:
 The component that factorizes module dependencies into normal modules by resolving requests and creating module identities.
 _Avoid_: Module builder, resolver wrapper
+
+**Unsafe Module Cache**:
+A Compiler-owned cache that reuses a previously factorized Module in a fresh Compilation, skipping request resolution and factory work while still running the normal Build stage and its snapshot validation.
+_Avoid_: Resolve cache, Module Build Cache, shared Module Graph

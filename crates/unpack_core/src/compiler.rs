@@ -1,7 +1,7 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Compiler.js
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
@@ -13,7 +13,8 @@ use crate::{
     flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
     flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
     javascript::javascript_modules_plugin::JavascriptModulesPlugin,
-    json::json_modules_plugin::JsonModulesPlugin, module_computation_cache::ModuleComputationCache,
+    json::json_modules_plugin::JsonModulesPlugin, make::UnsafeModuleCache,
+    module_computation_cache::ModuleComputationCache,
     optimize::side_effects_flag_plugin::SideEffectsFlagPlugin,
 };
 use tracing::Instrument;
@@ -28,6 +29,25 @@ pub enum SideEffectsOption {
     Disabled,
     Flag,
     Analyze,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleUnsafeCache {
+    Disabled,
+    NodeModules,
+    All,
+}
+
+impl ModuleUnsafeCache {
+    pub(crate) fn allows(self, resource: &Path) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::All => true,
+            Self::NodeModules => resource
+                .components()
+                .any(|component| component.as_os_str() == "node_modules"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +81,7 @@ pub struct CompilerOptions {
     pub provided_exports: bool,
     pub used_exports: bool,
     pub side_effects: SideEffectsOption,
+    pub module_unsafe_cache: ModuleUnsafeCache,
 }
 
 impl CompilerOptions {
@@ -80,6 +101,7 @@ impl CompilerOptions {
             provided_exports: true,
             used_exports: true,
             side_effects: SideEffectsOption::Flag,
+            module_unsafe_cache: ModuleUnsafeCache::Disabled,
         }
     }
 }
@@ -90,6 +112,7 @@ pub struct Compiler {
     cache: Cache,
     cache_lifecycle: Arc<CacheLifecycle>,
     module_computation_cache: Option<ModuleComputationCache>,
+    unsafe_module_cache: Option<UnsafeModuleCache>,
     hooks: CompilerHookSet,
 }
 
@@ -669,6 +692,9 @@ impl Compiler {
             .cache
             .cache_unaffected
             .then(ModuleComputationCache::default);
+        let unsafe_module_cache = (options.cache.kind != crate::CacheKind::Disabled
+            && options.module_unsafe_cache != ModuleUnsafeCache::Disabled)
+            .then(UnsafeModuleCache::default);
         let mut hooks = CompilerHookSet::default();
         configure_default_module_types(&mut hooks);
         apply_builtin_module_plugins(&mut hooks);
@@ -688,6 +714,7 @@ impl Compiler {
             cache,
             cache_lifecycle,
             module_computation_cache,
+            unsafe_module_cache,
             hooks,
         }
     }
@@ -704,6 +731,7 @@ impl Compiler {
             UnpackResolver::new(self.options.resolve.clone()),
             self.cache.clone(),
             self.module_computation_cache.clone(),
+            self.unsafe_module_cache.clone(),
             compilation_hooks,
         )
     }
@@ -943,6 +971,58 @@ mod tests {
             first.chunk_graph().chunks().as_ptr(),
             second.chunk_graph().chunks().as_ptr()
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsafe_cache_reuses_modules_without_factorizing_or_sharing_compilation_graphs()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write(
+            temp.path().join("index.js"),
+            r#"
+                import "./dep";
+                export const result = "ok";
+            "#,
+        )?;
+        write(temp.path().join("dep.js"), "export const value = 1;")?;
+
+        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
+        options.module_unsafe_cache = crate::ModuleUnsafeCache::All;
+        let compiler = Compiler::new(options);
+
+        let first = compiler.run().await?;
+        let first_cache = compiler.cache.stats();
+        assert_eq!(first_cache.resolve_misses, 2);
+        assert_eq!(first_cache.module_misses, 2);
+
+        let second = compiler.run().await?;
+        let second_cache = compiler.cache.stats();
+        assert_eq!(second_cache.resolve_hits, 0);
+        assert_eq!(second_cache.module_hits, 2);
+        assert_eq!(second_cache.resolve_misses, 2);
+        assert_eq!(second_cache.module_misses, 2);
+
+        assert_eq!(first.errors(), []);
+        assert_eq!(second.errors(), []);
+        assert_eq!(asset_sources(&first), asset_sources(&second));
+        assert_eq!(first.module_graph(), second.module_graph());
+        assert_ne!(
+            first.module_graph().modules().as_ptr(),
+            second.module_graph().modules().as_ptr()
+        );
+        for (first_module, second_module) in first
+            .module_graph()
+            .modules()
+            .iter()
+            .zip(second.module_graph().modules())
+        {
+            assert!(Arc::ptr_eq(
+                first_module.built_content(),
+                second_module.built_content()
+            ));
+        }
 
         Ok(())
     }

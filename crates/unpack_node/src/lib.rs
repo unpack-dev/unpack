@@ -75,6 +75,8 @@ pub struct NativeCompilerOptions {
     pub side_effects: String,
     #[napi(js_name = "moduleRules")]
     pub module_rules: Vec<NativeModuleRule>,
+    #[napi(js_name = "moduleUnsafeCache")]
+    pub module_unsafe_cache: String,
 }
 
 #[napi(object)]
@@ -912,6 +914,16 @@ impl NativeCompiler {
             value => {
                 return Err(napi::Error::from_reason(format!(
                     "options.optimization.sideEffects: unknown normalized value {value:?}"
+                )));
+            }
+        };
+        compiler_options.module_unsafe_cache = match options.module_unsafe_cache.as_str() {
+            "disabled" => unpack_core::ModuleUnsafeCache::Disabled,
+            "node_modules" => unpack_core::ModuleUnsafeCache::NodeModules,
+            "all" => unpack_core::ModuleUnsafeCache::All,
+            value => {
+                return Err(napi::Error::from_reason(format!(
+                    "options.module.unsafeCache: unknown normalized value {value:?}"
                 )));
             }
         };

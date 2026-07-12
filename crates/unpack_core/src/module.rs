@@ -137,6 +137,12 @@ impl Module {
         }
     }
 
+    pub(crate) fn from_unsafe_cache(handle: ModuleHandle, cached: &Self) -> Self {
+        let mut module = cached.clone();
+        module.handle = handle;
+        module
+    }
+
     pub fn handle(&self) -> ModuleHandle {
         self.handle
     }

@@ -47,7 +47,18 @@ impl AsyncDependenciesBlockIndex {
 impl ModuleGraph {
     pub(crate) fn add_module(&mut self, identity: ModuleIdentity) -> ModuleHandle {
         let handle = ModuleHandle::new(self.modules.len());
-        self.modules.push(Module::new(handle, identity));
+        self.push_module(Module::new(handle, identity))
+    }
+
+    pub(crate) fn add_module_from_unsafe_cache(&mut self, cached: &Module) -> ModuleHandle {
+        let handle = ModuleHandle::new(self.modules.len());
+        self.push_module(Module::from_unsafe_cache(handle, cached))
+    }
+
+    fn push_module(&mut self, module: Module) -> ModuleHandle {
+        let handle = module.handle();
+        debug_assert_eq!(handle.index(), self.modules.len());
+        self.modules.push(module);
         let outgoing_handle = self.outgoing.push(Vec::new());
         let incoming_handle = self.incoming.push(Vec::new());
         let location_handle = self.outgoing_by_location.push(HashMap::new());

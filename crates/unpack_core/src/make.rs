@@ -10,6 +10,7 @@ use std::{
     time::Instant,
 };
 
+use dashmap::DashMap;
 use futures::{StreamExt, stream::FuturesUnordered};
 use tokio::{
     sync::{Mutex, Semaphore},
@@ -18,8 +19,9 @@ use tokio::{
 
 use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, EntryDependency,
-    Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleHandle,
-    ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
+    Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, Module, ModuleGraph,
+    ModuleHandle, ModuleIdentity, ModuleUnsafeCache, NormalModuleFactory, Result, SnapshotStrategy,
+    UnpackResolver,
     cache::{Cache, ModuleBuildRecord},
     cache_facade::{CacheETag, ModuleBuildCache},
     module::BuiltModuleContent,
@@ -37,6 +39,22 @@ pub(crate) struct MakeState {
     pub context_dependencies: HashSet<PathBuf>,
     pub missing_dependencies: HashSet<PathBuf>,
     modules_by_identity: HashMap<ModuleIdentity, ModuleHandle>,
+    unsafe_cache_candidates: Vec<UnsafeCacheCandidate>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UnsafeModuleCache {
+    entries: Arc<DashMap<UnsafeModuleCacheKey, UnsafeCachedModule>>,
+}
+
+impl UnsafeModuleCache {
+    fn get(&self, key: &UnsafeModuleCacheKey) -> Option<UnsafeCachedModule> {
+        self.entries.get(key).map(|entry| entry.clone())
+    }
+
+    fn store(&self, key: UnsafeModuleCacheKey, module: UnsafeCachedModule) {
+        self.entries.insert(key, module);
+    }
 }
 
 #[derive(Clone)]
@@ -52,6 +70,8 @@ struct MakeServices {
     metrics: Arc<MakeMetrics>,
     semaphore: Arc<Semaphore>,
     module_types: ModuleTypeRegistry,
+    unsafe_module_cache: Option<UnsafeModuleCache>,
+    module_unsafe_cache: ModuleUnsafeCache,
 }
 
 #[derive(Debug)]
@@ -113,6 +133,7 @@ impl MakeMetrics {
 #[derive(Debug, Clone)]
 enum MakeTask {
     Factorize(FactorizeTask),
+    ReuseModule(ReuseModuleTask),
     Add(AddTask),
     Build(BuildTask),
     ProcessDependencies(ProcessDependenciesTask),
@@ -127,11 +148,19 @@ struct FactorizeTask {
 }
 
 #[derive(Debug, Clone)]
+struct ReuseModuleTask {
+    origin_module: Option<ModuleHandle>,
+    dependencies: Vec<QueuedDependency>,
+    cached: UnsafeCachedModule,
+}
+
+#[derive(Debug, Clone)]
 struct AddTask {
     origin_module: Option<ModuleHandle>,
     context: PathBuf,
     dependencies: Vec<QueuedDependency>,
     result: FactorizeTaskResult,
+    unsafe_cache_candidate: Option<UnsafeCacheCandidate>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,12 +215,51 @@ struct FactorizeGroupKey {
     resource_identifier: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UnsafeModuleCacheKey {
+    context: PathBuf,
+    group: FactorizeGroupKey,
+}
+
+#[derive(Debug, Clone)]
+struct UnsafeCachedModule {
+    module: Module,
+    factory_metadata: UnsafeModuleFactoryMetadata,
+}
+
+#[derive(Debug, Clone)]
+struct UnsafeCacheCandidate {
+    key: UnsafeModuleCacheKey,
+    identity: ModuleIdentity,
+    factory_metadata: UnsafeModuleFactoryMetadata,
+}
+
+#[derive(Debug, Clone)]
+struct UnsafeModuleFactoryMetadata {
+    loader: Option<MatchedLoader>,
+    file_dependencies: HashSet<PathBuf>,
+    context_dependencies: HashSet<PathBuf>,
+    missing_dependencies: HashSet<PathBuf>,
+}
+
+impl UnsafeModuleFactoryMetadata {
+    fn from_factorized(module: &FactorizedModule) -> Self {
+        Self {
+            loader: module.loader.clone(),
+            file_dependencies: module.file_dependencies.clone(),
+            context_dependencies: module.context_dependencies.clone(),
+            missing_dependencies: module.missing_dependencies.clone(),
+        }
+    }
+}
+
 type BackgroundMakeTask = JoinHandle<Result<Vec<MakeTask>>>;
 
 pub(crate) async fn run(
     options: &CompilerOptions,
     resolver: UnpackResolver,
     cache: Cache,
+    unsafe_module_cache: Option<UnsafeModuleCache>,
     file_system_info: FileSystemInfo,
     module_types: ModuleTypeRegistry,
     parser_hooks: JavascriptParserHookSet,
@@ -219,6 +287,8 @@ pub(crate) async fn run(
         metrics: Arc::new(MakeMetrics::new()),
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
         module_types,
+        unsafe_module_cache,
+        module_unsafe_cache: options.module_unsafe_cache,
     };
 
     let mut main_queue = VecDeque::new();
@@ -265,6 +335,9 @@ pub(crate) async fn run(
         }
 
         if background_queue.is_empty() {
+            if let Some(cache) = &services.unsafe_module_cache {
+                state.lock().await.populate_unsafe_cache(cache);
+            }
             services.metrics.emit();
             return Ok(());
         }
@@ -289,12 +362,25 @@ pub(crate) async fn run(
 }
 
 fn schedule_make_task(
-    task: MakeTask,
+    mut task: MakeTask,
     services: MakeServices,
     state: Arc<Mutex<MakeState>>,
     main_queue: &mut VecDeque<MakeTask>,
     background_queue: &mut FuturesUnordered<BackgroundMakeTask>,
 ) {
+    // Webpack checks unsafeCache while processing dependencies, before work is
+    // admitted to the factorize queue.
+    if let MakeTask::Factorize(factorize) = &task
+        && let Some(cache) = &services.unsafe_module_cache
+        && let Some(key) = factorize.unsafe_cache_key()
+        && let Some(cached) = cache.get(&key)
+    {
+        task = MakeTask::ReuseModule(ReuseModuleTask {
+            origin_module: factorize.origin_module,
+            dependencies: factorize.dependencies.clone(),
+            cached,
+        });
+    }
     if task.is_background() {
         background_queue.push(spawn_make_task(task, services, state));
     } else {
@@ -336,11 +422,12 @@ impl MakeTask {
         let metric = match &self {
             Self::Factorize(_) => Some(MakeTaskMetric::Factorize),
             Self::Build(_) => Some(MakeTaskMetric::Build),
-            Self::Add(_) | Self::ProcessDependencies(_) => None,
+            Self::ReuseModule(_) | Self::Add(_) | Self::ProcessDependencies(_) => None,
         };
         let started = metric.and_then(|_| metrics.started());
         let result = match self {
             Self::Factorize(task) => task.run(services).await,
+            Self::ReuseModule(task) => task.run(state).await,
             Self::Add(task) => task.run(state).await,
             Self::Build(task) => task.run(services, state).await,
             Self::ProcessDependencies(task) => Ok(task.run()),
@@ -353,6 +440,14 @@ impl MakeTask {
 }
 
 impl FactorizeTask {
+    fn unsafe_cache_key(&self) -> Option<UnsafeModuleCacheKey> {
+        let dependency = self.dependencies.first()?;
+        Some(UnsafeModuleCacheKey {
+            context: self.context.clone(),
+            group: FactorizeGroupKey::for_dependency(&dependency.dependency)?,
+        })
+    }
+
     async fn run(self, services: MakeServices) -> Result<Vec<MakeTask>> {
         let _permit = services
             .semaphore
@@ -377,11 +472,60 @@ impl FactorizeTask {
             Err(error) => return Err(error),
         };
 
+        let unsafe_cache_candidate = match &result {
+            FactorizeTaskResult::Success(factorized)
+                if services.unsafe_module_cache.is_some()
+                    && services
+                        .module_unsafe_cache
+                        .allows(&factorized.identity.resource) =>
+            {
+                self.unsafe_cache_key().map(|key| UnsafeCacheCandidate {
+                    key,
+                    identity: factorized.identity.clone(),
+                    factory_metadata: UnsafeModuleFactoryMetadata::from_factorized(factorized),
+                })
+            }
+            _ => None,
+        };
+
         Ok(vec![MakeTask::Add(AddTask {
             origin_module: self.origin_module,
             context: self.context,
             dependencies: self.dependencies,
             result,
+            unsafe_cache_candidate,
+        })])
+    }
+}
+
+impl ReuseModuleTask {
+    async fn run(self, state: Arc<Mutex<MakeState>>) -> Result<Vec<MakeTask>> {
+        let UnsafeCachedModule {
+            module,
+            factory_metadata,
+        } = self.cached;
+        let mut state = state.lock().await;
+        state
+            .file_dependencies
+            .extend(factory_metadata.file_dependencies.iter().cloned());
+        state
+            .context_dependencies
+            .extend(factory_metadata.context_dependencies.iter().cloned());
+        state
+            .missing_dependencies
+            .extend(factory_metadata.missing_dependencies.iter().cloned());
+        let add_result =
+            state.add_cached_or_connect(self.origin_module, self.dependencies, &module);
+        if !add_result.is_new {
+            return Ok(Vec::new());
+        }
+        // unsafeCache skips factory work, but webpack still sends the restored
+        // Module through Build so its ordinary snapshot validation remains active.
+        Ok(vec![MakeTask::Build(BuildTask {
+            module_handle: add_result.module_handle,
+            identity: module.identity().clone(),
+            resource: module.identity().resource.clone(),
+            loader: factory_metadata.loader,
         })])
     }
 }
@@ -390,6 +534,9 @@ impl AddTask {
     async fn run(self, state: Arc<Mutex<MakeState>>) -> Result<Vec<MakeTask>> {
         match self.result {
             FactorizeTaskResult::Success(factorized) => {
+                if let Some(candidate) = self.unsafe_cache_candidate {
+                    state.lock().await.unsafe_cache_candidates.push(candidate);
+                }
                 let identity = factorized.identity;
                 let resource = factorized.resource;
                 let loader = factorized.loader;
@@ -783,6 +930,49 @@ fn normalize_missing_resource(path: PathBuf) -> PathBuf {
 }
 
 impl MakeState {
+    fn populate_unsafe_cache(&self, cache: &UnsafeModuleCache) {
+        for candidate in &self.unsafe_cache_candidates {
+            let Some(module_handle) = self.modules_by_identity.get(&candidate.identity) else {
+                continue;
+            };
+            let Some(module) = self.module_graph.module(*module_handle) else {
+                continue;
+            };
+            if module.build_error().is_some() {
+                continue;
+            }
+            cache.store(
+                candidate.key.clone(),
+                UnsafeCachedModule {
+                    module: module.clone(),
+                    factory_metadata: candidate.factory_metadata.clone(),
+                },
+            );
+        }
+    }
+
+    fn add_cached_or_connect(
+        &mut self,
+        origin_module: Option<ModuleHandle>,
+        dependencies: Vec<QueuedDependency>,
+        cached: &Module,
+    ) -> AddModuleResult {
+        let identity = cached.identity().clone();
+        let (module_handle, is_new) =
+            if let Some(module_handle) = self.modules_by_identity.get(&identity).copied() {
+                (module_handle, false)
+            } else {
+                let module_handle = self.module_graph.add_module_from_unsafe_cache(cached);
+                self.modules_by_identity.insert(identity, module_handle);
+                (module_handle, true)
+            };
+        self.connect_dependencies(origin_module, dependencies, module_handle);
+        AddModuleResult {
+            module_handle,
+            is_new,
+        }
+    }
+
     fn add_or_connect(
         &mut self,
         origin_module: Option<ModuleHandle>,
@@ -802,6 +992,20 @@ impl MakeState {
                 (module_handle, true)
             };
 
+        self.connect_dependencies(origin_module, dependencies, module_handle);
+
+        AddModuleResult {
+            module_handle,
+            is_new,
+        }
+    }
+
+    fn connect_dependencies(
+        &mut self,
+        origin_module: Option<ModuleHandle>,
+        dependencies: Vec<QueuedDependency>,
+        module_handle: ModuleHandle,
+    ) {
         for dependency in dependencies {
             if let Some(entry_index) = dependency.entry_index {
                 self.entries.insert(entry_index, module_handle);
@@ -813,11 +1017,6 @@ impl MakeState {
                 dependency.dependency,
                 module_handle,
             );
-        }
-
-        AddModuleResult {
-            module_handle,
-            is_new,
         }
     }
 
@@ -880,6 +1079,7 @@ mod tests {
             &options,
             resolver,
             cache.clone(),
+            None,
             FileSystemInfo::new(),
             crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
             JavascriptParserHookSet::default(),

@@ -87,6 +87,23 @@ documented deviations or staged webpack scope.
   `BuildCache`, whole-Compilation cache, or whole-project fingerprint during the
   refactor.
 
+### DEV-004: Unsafe Module Cache is process-local
+
+- **Status**: Confirmed deviation.
+- **Performance-driven**: No. This is staged `module.unsafeCache` scope.
+- **Webpack shape**: webpack combines dependency weak references with its
+  `Compilation/modules` Cache Facade, allowing serializable Modules to be
+  restored through the configured cache.
+- **Current shape**: Unpack keeps Compiler-owned in-memory entries keyed by
+  factorize grouping inputs. It restores Modules into fresh Compilation graphs
+  and still runs Build validation, but does not publish entries to PackFile.
+- **Confirmation**: ADR 0142 and
+  `docs/implementation/webpack-implementation-differences.md` document the
+  boundary.
+- **Refactor when**: predicate-function support or cross-process unsafe Module
+  reuse is implemented. Preserve the pre-factorize lookup and fresh Graph
+  Handle contract.
+
 ## Resolved violations and alignment gaps
 
 ### RES-001: Whole-Compilation warm cache shortcut

@@ -110,6 +110,20 @@ asynchronous callbacks. Matching modules remain
 `JavaScriptAuto`; the loader path participates in module identity, file
 dependencies, watch dependencies, and Module Build Record validation.
 
+The Compiler-owned Unsafe Module Cache follows webpack's `module.unsafeCache`
+boundary. A cache hit restores the previously factorized Module into the fresh
+Compilation Module Graph, reconnects the current dependency, and enters the
+normal Build stage without calling the Normal Module Factory. Build snapshot
+validation remains active, so this cache is unsafe specifically because request
+resolution and factory work are not repeated. Boolean `module.unsafeCache` is
+exposed; webpack's predicate-function form is rejected until the JavaScript
+Module predicate can be supported without moving Module ownership out of Rust.
+When the option is omitted, an enabled build cache applies the webpack default
+predicate to modules under `node_modules`. As in webpack, `cache: false`
+disables cross-Compilation module reuse even when `module.unsafeCache` is true.
+Unlike webpack's Cache-Facade-backed Module restoration, these entries are
+currently process-local and are not published to PackFile.
+
 The public TypeScript package keeps a small `LoaderRuntime` transport helper in
 `LoaderRuntime.ts`. Loader functions must execute on the JavaScript thread while
 the Normal Module Factory and compilation remain Rust-owned, so this helper
@@ -122,12 +136,14 @@ Webpack's `NormalModuleFactory` owns a large part of public configurability: hoo
 Necessity:
 
 - The minimal Unpack factory and loader rule schema are staged scope reductions.
+- Supporting boolean Unsafe Module Cache selection while rejecting predicate
+  functions is a staged public-option reduction.
 - The current `ModuleIdentity` shape is still useful because loaders, layers, module types, and query/fragment behavior can be added without redefining graph identity.
 - Webpack's factory hook surface should be introduced when plugin and loader API work starts, using webpack names and ordering as the reference.
 
 ## Make phase and errors
 
-Unpack uses `FuturesUnordered` plus a semaphore to factorize, read, parse, and connect modules. Module-attributable make errors are recorded in `Compilation::errors`; infrastructure failures still return `Err` and stop the run.
+Unpack uses `FuturesUnordered` plus a semaphore to factorize, read, parse, and connect modules. Unsafe Module Cache hits enter a foreground reuse task that adds the cached Module to the fresh graph before scheduling its Build task, so they consume neither factorize work nor a factorize concurrency permit. Module-attributable make errors are recorded in `Compilation::errors`; infrastructure failures still return `Err` and stop the run.
 
 Webpack uses separate async queues for factorize, add, build, rebuild, and
 process-dependencies. Unpack uses Rust-native tasks but now follows the same

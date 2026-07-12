@@ -653,7 +653,8 @@ fn process_dependencies_task(
 ) -> Option<MakeTask> {
     let issuer_context = issuer_context.to_path_buf();
     let mut dependencies = parsed
-        .dependencies
+        .dependencies_block
+        .dependencies()
         .iter()
         .cloned()
         .enumerate()
@@ -665,7 +666,7 @@ fn process_dependencies_task(
         })
         .collect::<Vec<_>>();
 
-    for (block_index, block) in parsed.blocks.iter().enumerate() {
+    for (block_index, block) in parsed.dependencies_block.blocks().iter().enumerate() {
         dependencies.extend(block.dependencies().iter().cloned().enumerate().map(
             |(dependency_index, dependency)| QueuedDependency {
                 entry_index: None,

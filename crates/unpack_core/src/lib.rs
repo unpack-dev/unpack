@@ -1,3 +1,4 @@
+mod async_dependencies_block;
 mod build_cache;
 mod build_chunk_graph;
 mod cache_hash;
@@ -8,6 +9,8 @@ mod code_generation;
 mod code_generation_record;
 mod compilation;
 mod compiler;
+mod dependencies;
+mod dependencies_block;
 mod dependency;
 mod error;
 mod exports_info;
@@ -20,6 +23,7 @@ mod logging;
 mod make;
 mod module;
 mod module_graph;
+mod module_graph_connection;
 mod normal_module_factory;
 mod optimize;
 mod output_filename;
@@ -30,6 +34,7 @@ mod resolver;
 mod runtime;
 mod snapshot;
 
+pub use async_dependencies_block::AsyncDependenciesBlock;
 pub use build_cache::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
 pub use chunk::{Chunk, ChunkHandle};
 pub use chunk_graph::ChunkGraph;
@@ -40,22 +45,23 @@ pub use compiler::{
     CacheIdleReason, CacheLifecycleOutcome, Compiler, CompilerOptions, DEFAULT_EXTENSIONS, Entry,
     PendingCompilation, SideEffectsOption,
 };
-pub use dependency::{
-    AsyncDependenciesBlock, ConstDependency, Dependency, DependencyKind, EntryDependency,
-    HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
-    HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
-    HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency,
-    ModuleDependency, NullDependency, SourceRange,
+pub use dependencies::{
+    ConstDependency, EntryDependency, HarmonyExportExpressionDependency,
+    HarmonyExportHeaderDependency, HarmonyExportImportedSpecifierDependency,
+    HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
+    HarmonyImportSpecifierDependency, ImportDependency, ModuleDependency, NullDependency,
 };
+pub use dependencies_block::DependenciesBlock;
+pub use dependency::{Dependency, DependencyKind, SourceRange};
 pub use error::{Error, Result};
 pub use exports_info::ExportsInfo;
 pub use hooks::{CompilationHooks, HookFuture};
 pub use loader::{LoaderFuture, LoaderRequest, LoaderRunner, MatchedLoader, ModuleRule};
 pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions};
 pub use module::{Module, ModuleHandle, ModuleIdentity, ModuleType};
-pub use module_graph::{
-    AsyncDependenciesBlockIndex, DependencyIndex, ModuleGraph, ModuleGraphConnection,
-    ModuleGraphConnectionHandle, ModuleGraphConnectionState,
+pub use module_graph::{AsyncDependenciesBlockIndex, DependencyIndex, ModuleGraph};
+pub use module_graph_connection::{
+    ModuleGraphConnection, ModuleGraphConnectionHandle, ModuleGraphConnectionState,
 };
 pub use normal_module_factory::{FactorizedModule, NormalModuleFactory};
 pub use resolver::{ResolveOptions, ResolvedResource, UnpackResolver};

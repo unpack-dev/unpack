@@ -1,6 +1,11 @@
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
+
+use crate::dependencies::{
+    ConstDependency, EntryDependency, HarmonyExportExpressionDependency,
+    HarmonyExportHeaderDependency, HarmonyExportImportedSpecifierDependency,
+    HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
+    HarmonyImportSpecifierDependency, ImportDependency, NullDependency,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SourceRange {
@@ -22,21 +27,6 @@ impl SourceRange {
 
     pub const fn is_empty(self) -> bool {
         self.start == self.end
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AsyncDependenciesBlock {
-    dependencies: Vec<Dependency>,
-}
-
-impl AsyncDependenciesBlock {
-    pub fn new(dependencies: Vec<Dependency>) -> Self {
-        Self { dependencies }
-    }
-
-    pub fn dependencies(&self) -> &[Dependency] {
-        &self.dependencies
     }
 }
 
@@ -178,9 +168,7 @@ impl Dependency {
         let mut ranges = Vec::new();
         match self {
             Self::Entry(_) | Self::HarmonyExportSpecifier(_) | Self::Null(_) => {}
-            Self::HarmonyImportSideEffect(dependency) => {
-                ranges.extend(dependency.module.range);
-            }
+            Self::HarmonyImportSideEffect(dependency) => ranges.extend(dependency.module.range),
             Self::HarmonyImportSpecifier(dependency) => {
                 ranges.extend(dependency.module.range);
                 ranges.push(dependency.usage_range);
@@ -200,223 +188,6 @@ impl Dependency {
             Self::Import(dependency) => ranges.extend(dependency.module.range),
         }
         ranges
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ModuleDependency {
-    pub request: String,
-    pub user_request: String,
-    pub source_order: Option<usize>,
-    pub range: Option<SourceRange>,
-    pub weak: bool,
-}
-
-impl ModuleDependency {
-    pub fn new(request: impl Into<String>, source_order: Option<usize>) -> Self {
-        let request = request.into();
-        Self {
-            user_request: request.clone(),
-            request,
-            source_order,
-            range: None,
-            weak: false,
-        }
-    }
-
-    pub fn resource_identifier(&self) -> String {
-        format!("context|module{}", self.request)
-    }
-}
-
-impl fmt::Debug for ModuleDependency {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ModuleDependency")
-            .field("request", &self.request)
-            .field("source_order", &self.source_order)
-            .field("range", &self.range)
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EntryDependency {
-    pub module: ModuleDependency,
-}
-
-impl EntryDependency {
-    pub fn new(request: impl Into<String>) -> Self {
-        Self {
-            module: ModuleDependency::new(request, None),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HarmonyImportSideEffectDependency {
-    pub module: ModuleDependency,
-    pub import_var: Option<String>,
-}
-
-impl HarmonyImportSideEffectDependency {
-    pub fn new(
-        request: impl Into<String>,
-        source_order: usize,
-        range: Option<SourceRange>,
-    ) -> Self {
-        let mut module = ModuleDependency::new(request, Some(source_order));
-        module.range = range;
-        Self {
-            module,
-            import_var: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HarmonyImportSpecifierDependency {
-    pub module: ModuleDependency,
-    pub ids: Vec<String>,
-    pub name: String,
-    pub usage_range: SourceRange,
-    pub shorthand: bool,
-}
-
-impl HarmonyImportSpecifierDependency {
-    pub fn new(
-        request: impl Into<String>,
-        source_order: usize,
-        ids: Vec<String>,
-        name: impl Into<String>,
-        usage_range: SourceRange,
-    ) -> Self {
-        Self {
-            module: ModuleDependency::new(request, Some(source_order)),
-            ids,
-            name: name.into(),
-            usage_range,
-            shorthand: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HarmonyExportHeaderDependency {
-    pub declaration_range: Option<SourceRange>,
-    pub statement_range: SourceRange,
-}
-
-impl HarmonyExportHeaderDependency {
-    pub fn new(declaration_range: Option<SourceRange>, statement_range: SourceRange) -> Self {
-        Self {
-            declaration_range,
-            statement_range,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HarmonyExportSpecifierDependency {
-    pub id: String,
-    pub name: String,
-}
-
-impl HarmonyExportSpecifierDependency {
-    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HarmonyExportExpressionDependency {
-    pub range: SourceRange,
-    pub statement_range: SourceRange,
-    pub declaration_id: Option<String>,
-}
-
-impl HarmonyExportExpressionDependency {
-    pub fn new(
-        range: SourceRange,
-        statement_range: SourceRange,
-        declaration_id: Option<String>,
-    ) -> Self {
-        Self {
-            range,
-            statement_range,
-            declaration_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HarmonyExportImportedSpecifierDependency {
-    pub module: ModuleDependency,
-    pub ids: Vec<String>,
-    pub name: Option<String>,
-    pub is_star: bool,
-}
-
-impl HarmonyExportImportedSpecifierDependency {
-    pub fn new(
-        request: impl Into<String>,
-        source_order: usize,
-        ids: Vec<String>,
-        name: Option<String>,
-        is_star: bool,
-        range: Option<SourceRange>,
-    ) -> Self {
-        let mut module = ModuleDependency::new(request, Some(source_order));
-        module.range = range;
-        Self {
-            module,
-            ids,
-            name,
-            is_star,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ConstDependency {
-    pub expression: String,
-    pub range: SourceRange,
-}
-
-impl ConstDependency {
-    pub fn new(expression: impl Into<String>, range: SourceRange) -> Self {
-        Self {
-            expression: expression.into(),
-            range,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NullDependency;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ImportDependency {
-    pub module: ModuleDependency,
-}
-
-impl ImportDependency {
-    pub fn new(
-        request: impl Into<String>,
-        range: SourceRange,
-        source_order: Option<usize>,
-    ) -> Self {
-        let mut module = ModuleDependency::new(request, source_order);
-        module.range = Some(range);
-        Self { module }
-    }
-
-    pub fn range(&self) -> SourceRange {
-        self.module
-            .range
-            .expect("import dependency should have range")
     }
 }
 

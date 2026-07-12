@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::{Dependency, Module, ModuleHandle, ModuleIdentity};
+use crate::{
+    Dependency, Module, ModuleGraphConnection, ModuleGraphConnectionHandle,
+    ModuleGraphConnectionState, ModuleHandle, ModuleIdentity,
+};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ModuleGraph {
@@ -9,19 +12,6 @@ pub struct ModuleGraph {
     outgoing: Vec<Vec<ModuleGraphConnectionHandle>>,
     incoming: Vec<Vec<ModuleGraphConnectionHandle>>,
     outgoing_by_location: Vec<HashMap<DependencyLocation, ModuleGraphConnectionHandle>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ModuleGraphConnectionHandle(usize);
-
-impl ModuleGraphConnectionHandle {
-    pub const fn new(index: usize) -> Self {
-        Self(index)
-    }
-
-    pub const fn index(self) -> usize {
-        self.0
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -173,36 +163,4 @@ impl ModuleGraph {
 struct DependencyLocation {
     block: Option<AsyncDependenciesBlockIndex>,
     dependency_index: DependencyIndex,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleGraphConnection {
-    pub handle: ModuleGraphConnectionHandle,
-    pub origin_module: Option<ModuleHandle>,
-    pub origin_block: Option<AsyncDependenciesBlockIndex>,
-    pub origin_dependency_index: Option<DependencyIndex>,
-    pub dependency: Dependency,
-    pub module: ModuleHandle,
-    state: ModuleGraphConnectionState,
-}
-
-impl ModuleGraphConnection {
-    pub fn state(&self) -> ModuleGraphConnectionState {
-        self.state
-    }
-
-    pub fn is_active(&self) -> bool {
-        self.state != ModuleGraphConnectionState::Inactive
-    }
-
-    pub(crate) fn set_state(&mut self, state: ModuleGraphConnectionState) {
-        self.state = state;
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModuleGraphConnectionState {
-    Active,
-    Inactive,
-    Circular,
 }

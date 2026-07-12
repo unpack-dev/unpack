@@ -1,0 +1,1 @@
+{"skip":{"upstream":"https://github.com/web-infra-dev/rspack/tree/main/tests/rspack-test/configCases/plugins/child-compiler-jsonp-template","issue":"https://github.com/unpack-dev/unpack/issues/246","reason":"make and child compiler lifecycle APIs are not exposed"}}

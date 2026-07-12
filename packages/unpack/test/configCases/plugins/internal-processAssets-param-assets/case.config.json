@@ -1,0 +1,1 @@
+{"skip":{"upstream":"https://github.com/web-infra-dev/rspack/tree/main/tests/rspack-test/configCases/plugins/internal-processAssets-param-assets","issue":"https://github.com/unpack-dev/unpack/issues/243","reason":"the processAssets assets facade is not exposed"}}

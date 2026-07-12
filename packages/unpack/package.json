@@ -21,6 +21,7 @@
     "@types/node": "26.0.1",
     "typescript": "6.0.3",
     "webpack": "5.108.1",
-    "webpack-bundle-analyzer": "5.3.0"
+    "webpack-bundle-analyzer": "5.3.0",
+    "webpack-sources": "3.3.3"
   }
 }

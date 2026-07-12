@@ -6,12 +6,14 @@ use std::{
 
 use crate::{
     CacheOptions, Compilation, InfrastructureLoggingOptions, LoaderRunner, ModuleRule,
-    ResolveOptions, Result, SnapshotOptions, UnpackResolver,
-    build_cache::BuildCache,
-    export_analysis::{FlagDependencyExportsPlugin, FlagDependencyUsagePlugin},
-    hooks::{CompilationHooks, CompilerHooks},
+    ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+    compilation::CompilationHooks, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
+    flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
 };
 use tracing::Instrument;
+
+mod hooks;
+pub(crate) use hooks::CompilerHooks;
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx"];
 

@@ -8,12 +8,14 @@ use crate::{
     build_cache::BuildCache,
     build_chunk_graph::build_chunk_graph,
     code_generation::{self, CodeGenerationResults, RenderManifest},
-    hooks::CompilationHooks,
     id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
     make::{self, MakeState},
     snapshot::FileSystemInfo,
 };
 use tracing::Instrument;
+
+mod hooks;
+pub(crate) use hooks::CompilationHooks;
 
 #[derive(Debug, Clone)]
 pub struct Compilation {

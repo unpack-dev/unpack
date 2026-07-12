@@ -15,7 +15,7 @@ use crate::{
 use tracing::Instrument;
 
 mod hooks;
-pub(crate) use hooks::CompilationHooks;
+pub(crate) use hooks::CompilationHookSet;
 
 #[derive(Debug, Clone)]
 pub struct Compilation {
@@ -33,7 +33,7 @@ pub struct Compilation {
     watch_dependencies: WatchDependencies,
     infrastructure_log_events: Vec<InfrastructureLogEvent>,
     file_system_info: FileSystemInfo,
-    hooks: CompilationHooks,
+    hooks: CompilationHookSet,
 }
 
 impl Compilation {
@@ -41,7 +41,7 @@ impl Compilation {
         options: CompilerOptions,
         resolver: UnpackResolver,
         build_cache: BuildCache,
-        hooks: CompilationHooks,
+        hooks: CompilationHookSet,
     ) -> Self {
         let file_system_info = FileSystemInfo::from_snapshot_options(&options.snapshot);
         Self {

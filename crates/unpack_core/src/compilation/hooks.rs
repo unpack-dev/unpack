@@ -55,15 +55,15 @@ impl SyncCompilationHook {
 }
 
 #[derive(Default, Clone)]
-pub(crate) struct CompilationHooks {
+pub(crate) struct CompilationHookSet {
     pub finish_modules: AsyncCompilationHook,
     pub optimize_dependencies: SyncCompilationHook,
 }
 
-impl std::fmt::Debug for CompilationHooks {
+impl std::fmt::Debug for CompilationHookSet {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("CompilationHooks")
+            .debug_struct("CompilationHookSet")
             .field("finish_modules_taps", &self.finish_modules.taps.len())
             .field(
                 "optimize_dependencies_taps",

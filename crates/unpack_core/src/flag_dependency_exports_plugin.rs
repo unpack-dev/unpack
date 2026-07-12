@@ -1,12 +1,12 @@
-use crate::{Compilation, compilation::CompilationHooks, compiler::CompilerHooks};
+use crate::{Compilation, compilation::CompilationHookSet, compiler::CompilerHookSet};
 
 pub(crate) struct FlagDependencyExportsPlugin;
 
 impl FlagDependencyExportsPlugin {
-    pub fn apply(&self, hooks: &mut CompilerHooks) {
+    pub fn apply(&self, hooks: &mut CompilerHookSet) {
         hooks.compilation.tap(
             "FlagDependencyExportsPlugin",
-            |compilation_hooks: &mut CompilationHooks| {
+            |compilation_hooks: &mut CompilationHookSet| {
                 compilation_hooks
                     .finish_modules
                     .tap("FlagDependencyExportsPlugin", |compilation| {

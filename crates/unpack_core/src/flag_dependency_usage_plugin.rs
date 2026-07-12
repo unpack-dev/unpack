@@ -1,16 +1,17 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::{
-    Compilation, Dependency, ModuleHandle, compilation::CompilationHooks, compiler::CompilerHooks,
+    Compilation, Dependency, ModuleHandle, compilation::CompilationHookSet,
+    compiler::CompilerHookSet,
 };
 
 pub(crate) struct FlagDependencyUsagePlugin;
 
 impl FlagDependencyUsagePlugin {
-    pub fn apply(&self, hooks: &mut CompilerHooks) {
+    pub fn apply(&self, hooks: &mut CompilerHookSet) {
         hooks.compilation.tap(
             "FlagDependencyUsagePlugin",
-            |compilation_hooks: &mut CompilationHooks| {
+            |compilation_hooks: &mut CompilationHookSet| {
                 compilation_hooks
                     .optimize_dependencies
                     .tap("FlagDependencyUsagePlugin", flag_dependency_usage);

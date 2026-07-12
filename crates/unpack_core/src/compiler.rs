@@ -5,15 +5,15 @@ use std::{
 };
 
 use crate::{
-    CacheOptions, Compilation, InfrastructureLoggingOptions, LoaderRunner, ModuleRule,
-    ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
-    compilation::CompilationHooks, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
+    CacheOptions, Compilation, CompilationHooks, InfrastructureLoggingOptions, LoaderRunner,
+    ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+    compilation::CompilationHookSet, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
     flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
 };
 use tracing::Instrument;
 
 mod hooks;
-pub(crate) use hooks::CompilerHooks;
+pub(crate) use hooks::CompilerHookSet;
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx"];
 
@@ -42,6 +42,7 @@ pub struct CompilerOptions {
     pub infrastructure_logging: InfrastructureLoggingOptions,
     pub module_rules: Vec<ModuleRule>,
     pub loader_runner: Option<Arc<dyn LoaderRunner>>,
+    pub compilation_hooks: Option<Arc<dyn CompilationHooks>>,
     pub parallelism: usize,
     pub sourcemap: bool,
     pub provided_exports: bool,
@@ -59,6 +60,7 @@ impl CompilerOptions {
             infrastructure_logging: InfrastructureLoggingOptions::disabled(),
             module_rules: Vec::new(),
             loader_runner: None,
+            compilation_hooks: None,
             parallelism: 100,
             sourcemap: true,
             provided_exports: true,
@@ -72,7 +74,7 @@ pub struct Compiler {
     options: CompilerOptions,
     build_cache: BuildCache,
     cache_lifecycle: Arc<CacheLifecycle>,
-    hooks: CompilerHooks,
+    hooks: CompilerHookSet,
 }
 
 #[derive(Debug)]
@@ -649,7 +651,7 @@ impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
         let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
         let cache_lifecycle = CacheLifecycle::new(build_cache.clone(), &options.cache);
-        let mut hooks = CompilerHooks::default();
+        let mut hooks = CompilerHookSet::default();
         if options.provided_exports {
             FlagDependencyExportsPlugin.apply(&mut hooks);
         }
@@ -669,7 +671,7 @@ impl Compiler {
     }
 
     pub fn create_compilation(&self) -> Compilation {
-        let mut compilation_hooks = CompilationHooks::default();
+        let mut compilation_hooks = CompilationHookSet::default();
         self.hooks.compilation.call(&mut compilation_hooks);
         Compilation::new(
             self.options.clone(),
@@ -699,7 +701,13 @@ impl Compiler {
         let cache_activity = self.cache_lifecycle.end_idle(idle_reason)?;
         let result = async {
             let mut compilation = self.create_compilation();
+            if let Some(hooks) = &self.options.compilation_hooks {
+                hooks.compilation(&compilation).await?;
+            }
             compilation.make().await?;
+            if let Some(hooks) = &self.options.compilation_hooks {
+                hooks.finish_modules(&compilation).await?;
+            }
             compilation.seal();
             Ok(compilation)
         }

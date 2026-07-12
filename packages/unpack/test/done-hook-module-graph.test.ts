@@ -67,6 +67,89 @@ test("done taps run serially before the run callback", async () => {
   }
 });
 
+test("finishModules taps run after make and before done", async () => {
+  const fixture = await createGraphFixture();
+  const compiler = createCompiler(fixture);
+  const events: string[] = [];
+  let finishModulesCompilation: import("@unpack-js/core").Compilation | undefined;
+  let finishedModule: Module | undefined;
+  let capturedModules: ReadonlySet<Module> | undefined;
+  let capturedModuleGraph: import("@unpack-js/core").ModuleGraph | undefined;
+
+  compiler.hooks.compilation.tap("observe compilation", (compilation) => {
+    finishModulesCompilation = compilation;
+    capturedModules = compilation.modules;
+    capturedModuleGraph = compilation.moduleGraph;
+    events.push("compilation");
+    assert.equal(compilation.modules.size, 0);
+    compilation.hooks.finishModules.tap("early", () => events.push("early"));
+    compilation.hooks.finishModules.tap("target", () => events.push("target"));
+    compilation.hooks.finishModules.tap(
+      { name: "before target", before: "target" },
+      () => events.push("before target")
+    );
+    compilation.hooks.finishModules.tapAsync("async modules", (modules, done) => {
+      assert.equal(modules, capturedModules);
+      assert.equal(compilation.moduleGraph, capturedModuleGraph);
+      finishedModule = modules.values().next().value;
+      events.push(`finishModules:${modules.size}:start`);
+      setTimeout(() => {
+        events.push("finishModules:end");
+        done();
+      }, 5);
+    });
+  });
+  compiler.hooks.done.tap("done", (stats) => {
+    events.push("done");
+    assert.equal(stats.compilation, finishModulesCompilation);
+    assert.equal(stats.compilation.modules, capturedModules);
+    assert.equal(stats.compilation.moduleGraph, capturedModuleGraph);
+    assert.equal(stats.compilation.modules.has(finishedModule!), true);
+    assert.equal(stats.compilation.modules.size, finishModulesCompilation?.modules.size);
+  });
+
+  try {
+    await runCompiler(compiler, () => events.push("run:callback"));
+    assert.deepEqual(events, [
+      "compilation",
+      "early",
+      "before target",
+      "target",
+      "finishModules:4:start",
+      "finishModules:end",
+      "done",
+      "run:callback"
+    ]);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("finishModules failures abort sealing and preserve the hook error", async () => {
+  const fixture = await createGraphFixture();
+  const compiler = createCompiler(fixture);
+  const expected = new Error("finishModules failed");
+  let doneCalled = false;
+
+  compiler.hooks.compilation.tap("register failure", (compilation) => {
+    compilation.hooks.finishModules.tapPromise("failure", async () => {
+      throw expected;
+    });
+  });
+  compiler.hooks.done.tap("must not run", () => { doneCalled = true; });
+
+  try {
+    const observation = await observeCompilerRun(compiler);
+    assert.equal(observation.error, expected);
+    assert.equal(observation.stats, undefined);
+    assert.equal(doneCalled, false);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 // Ported from webpack's Compiler.run behavior: errors from done abort the
 // successful callback path and do not provide Stats to the final callback.
 test("done errors are delivered as run errors without Stats", async () => {

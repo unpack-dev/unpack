@@ -1389,6 +1389,7 @@ dependencies = [
  "rspack_resolver",
  "rspack_sources",
  "serde",
+ "serde_json",
  "simd-json",
  "swc_experimental_allocator",
  "swc_experimental_ecma_ast",

@@ -733,6 +733,9 @@ impl MakeState {
                 (module_handle, false)
             } else {
                 let module_handle = self.module_graph.add_module(identity.clone());
+                if let Some(module) = self.module_graph.module_mut(module_handle) {
+                    module.set_side_effect_free(package_marks_side_effect_free(&identity.resource));
+                }
                 self.modules_by_identity.insert(identity, module_handle);
                 (module_handle, true)
             };
@@ -783,6 +786,22 @@ impl MakeState {
         self.errors.push(error);
         Ok(())
     }
+}
+
+fn package_marks_side_effect_free(resource: &Path) -> bool {
+    let mut directory = resource.parent();
+    while let Some(current) = directory {
+        let package_json = current.join("package.json");
+        if package_json.is_file() {
+            return std::fs::read_to_string(package_json)
+                .ok()
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                .and_then(|json| json.get("sideEffects").and_then(serde_json::Value::as_bool))
+                == Some(false);
+        }
+        directory = current.parent();
+    }
+    false
 }
 
 #[cfg(test)]

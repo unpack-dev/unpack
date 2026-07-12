@@ -34,6 +34,35 @@ test("emits assets through the ESM default API", async () => {
   }
 });
 
+// Ported from webpack 5.108.1's optimization side-effects cases: disabling
+// optimization.sideEffects must preserve evaluation of unused package modules.
+test("optimization.sideEffects false preserves unused side-effect-free modules", async () => {
+  const fixture = await createFixture({
+    "package.json": JSON.stringify({ sideEffects: false }),
+    "src/index.js": "import { used } from './barrel'; export const result = used;",
+    "src/barrel.js": "export { used } from './used'; export { unused } from './unused';",
+    "src/used.js": "export const used = 42;",
+    "src/unused.js": "globalThis.__unused_module_evaluated__ = true; export const unused = 0;"
+  });
+  const outputPath = join(fixture, "dist");
+
+  try {
+    const { err, stats } = await runCompiler({
+      context: fixture,
+      entry: "./src/index.js",
+      output: { path: outputPath },
+      sourcemap: false,
+      optimization: { sideEffects: false }
+    });
+
+    assert.equal(err, null);
+    assert.equal(stats?.hasErrors(), false);
+    assert.match(await readFile(join(outputPath, "main.js"), "utf8"), /__unused_module_evaluated__/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("Stats.toJson returns an isolated baseline snapshot", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const value = 42;"

@@ -22,6 +22,7 @@ export interface UnpackOptions {
 export interface OptimizationOptions {
   providedExports?: boolean;
   usedExports?: boolean | "global";
+  sideEffects?: boolean | "flag";
 }
 
 export interface ModuleOptions {
@@ -333,6 +334,7 @@ interface NormalizedOptions {
   moduleRules: NormalizedModuleRule[];
   providedExports: boolean;
   usedExports: boolean;
+  sideEffects: boolean;
 }
 
 interface NormalizedModuleRule {
@@ -2269,19 +2271,20 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
     moduleRules,
     providedExports: optimization.providedExports,
-    usedExports: optimization.usedExports
+    usedExports: optimization.usedExports,
+    sideEffects: optimization.sideEffects
   };
 }
 
 function normalizeOptimizationOptions(
   optimization: OptimizationOptions | undefined,
   mode: Mode
-): { providedExports: boolean; usedExports: boolean } {
+): { providedExports: boolean; usedExports: boolean; sideEffects: boolean } {
   if (optimization === undefined) {
-    return { providedExports: true, usedExports: mode === "production" };
+    return { providedExports: true, usedExports: mode === "production", sideEffects: true };
   }
   assertPlainObject(optimization, "options.optimization");
-  assertKnownKeys(optimization, ["providedExports", "usedExports"], "options.optimization");
+  assertKnownKeys(optimization, ["providedExports", "usedExports", "sideEffects"], "options.optimization");
   return {
     providedExports: optimization.providedExports === undefined
       ? true
@@ -2290,7 +2293,12 @@ function normalizeOptimizationOptions(
       ? mode === "production"
       : optimization.usedExports === "global"
         ? true
-        : assertBoolean(optimization.usedExports, "options.optimization.usedExports")
+        : assertBoolean(optimization.usedExports, "options.optimization.usedExports"),
+    sideEffects: optimization.sideEffects === undefined
+      ? true
+      : optimization.sideEffects === "flag"
+        ? true
+        : assertBoolean(optimization.sideEffects, "options.optimization.sideEffects")
   };
 }
 

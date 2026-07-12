@@ -69,6 +69,8 @@ pub struct NativeCompilerOptions {
     pub provided_exports: bool,
     #[napi(js_name = "usedExports")]
     pub used_exports: bool,
+    #[napi(js_name = "sideEffects")]
+    pub side_effects: bool,
     #[napi(js_name = "moduleRules")]
     pub module_rules: Vec<NativeModuleRule>,
 }
@@ -558,6 +560,7 @@ impl NativeCompiler {
         compiler_options.sourcemap = options.sourcemap;
         compiler_options.provided_exports = options.provided_exports;
         compiler_options.used_exports = options.used_exports;
+        compiler_options.side_effects = options.side_effects;
         compiler_options.module_rules = options
             .module_rules
             .into_iter()

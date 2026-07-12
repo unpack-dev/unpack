@@ -47,6 +47,7 @@ pub struct CompilerOptions {
     pub sourcemap: bool,
     pub provided_exports: bool,
     pub used_exports: bool,
+    pub side_effects: bool,
 }
 
 impl CompilerOptions {
@@ -65,6 +66,7 @@ impl CompilerOptions {
             sourcemap: true,
             provided_exports: true,
             used_exports: true,
+            side_effects: true,
         }
     }
 }

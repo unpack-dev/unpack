@@ -102,6 +102,15 @@ Ordinary runs, Persistent Cache restore, later Compiler processes, manual
 invalidations, and rebuilds without a usable Watch Change Set retain Snapshot
 validation.
 
+The implemented `resolve.cache` boolean follows webpack's Resolver Cache
+responsibility: it controls successful Resolve Record lookup, storage, and
+Snapshot revalidation, while leaving resolver-internal filesystem and package
+metadata memoization intact. Its default follows whether the top-level Cache is
+enabled, matching webpack's resolve defaults. Other webpack Resolve Options
+remain unsupported and are rejected by JavaScript option validation. Because
+Unpack does not accept configured no-op options, explicit `resolve.cache: true`
+is rejected when the top-level Cache is disabled.
+
 The Unpack-only `experiments.serialRebuildMake` diagnostic option controls
 whether rebuild Factorize and Build futures are polled directly by Make or
 wrapped in Tokio tasks. It defaults to `true`, affects rebuild scheduling only,

@@ -4,16 +4,18 @@ use std::{collections::BTreeMap, path::Path};
 
 use crate::{
     ChunkGraph, Module, ModuleGraph, ModuleType,
-    asset::asset_parser::effective_module_type,
     cache_hash::stable_hash,
     code_generation::Asset,
     code_generation_record::{CodeGenerationRecord, CodeGenerationSource},
+    parser::ParsedModuleData,
     runtime::{RuntimeRequirement, RuntimeRequirements},
 };
 
 pub(crate) fn generate(module: &Module) -> CodeGenerationRecord {
-    let module_type =
-        effective_module_type(module.identity().module_type, module.source_bytes().len());
+    let ParsedModuleData::Asset { module_type } = module.parsed_data() else {
+        unreachable!("asset modules must contain Asset Parser data")
+    };
+    let module_type = *module_type;
     let value = match module_type {
         ModuleType::AssetResource => resource_url(module),
         ModuleType::AssetInline => data_uri(&module.identity().resource, module.source_bytes()),
@@ -23,11 +25,9 @@ pub(crate) fn generate(module: &Module) -> CodeGenerationRecord {
     let value = serde_json::to_string(&value).expect("asset module exports must serialize");
     let source = format!(
         "var __WEBPACK_ASSET_MODULE__ = {value};\n\
-         __webpack_require__.r(__webpack_exports__);\n\
          __webpack_require__.d(__webpack_exports__, {{ default: () => (__WEBPACK_ASSET_MODULE__) }});"
     );
     let mut runtime_requirements = RuntimeRequirements::default();
-    runtime_requirements.insert(RuntimeRequirement::MakeNamespaceObject);
     runtime_requirements.insert(RuntimeRequirement::DefinePropertyGetters);
     CodeGenerationRecord::new(CodeGenerationSource::Raw { source })
         .with_runtime_requirements(runtime_requirements)
@@ -40,8 +40,12 @@ pub(crate) fn render_resource_assets(
     let mut assets = BTreeMap::new();
     for module in module_graph.modules() {
         if chunk_graph.module_chunks(module.handle()).is_empty()
-            || effective_module_type(module.identity().module_type, module.source_bytes().len())
-                != ModuleType::AssetResource
+            || !matches!(
+                module.parsed_data(),
+                ParsedModuleData::Asset {
+                    module_type: ModuleType::AssetResource
+                }
+            )
         {
             continue;
         }

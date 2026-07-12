@@ -711,7 +711,7 @@ fn generate_module_code(
     }
 
     if module.identity().module_type == ModuleType::Json {
-        return Ok(crate::json::json_generator::generate(module.source()));
+        return Ok(crate::json::json_generator::generate(module));
     }
     if module.identity().module_type.is_asset() {
         return Ok(crate::asset::asset_generator::generate(module));

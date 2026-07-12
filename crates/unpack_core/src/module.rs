@@ -78,6 +78,7 @@ impl BuiltModuleContent {
         hasher.write(b"unpack/code-generation/local-inputs/1");
         parsed.dependencies_block.hash(&mut hasher);
         parsed.presentational_dependencies.hash(&mut hasher);
+        parsed.data.hash(&mut hasher);
         let code_generation_local_input_digest = hasher.finish();
         Self {
             parsed,
@@ -176,6 +177,10 @@ impl Module {
         self.built_content.code_generation_local_input_digest()
     }
 
+    pub(crate) fn parsed_data(&self) -> &crate::parser::ParsedModuleData {
+        &self.built_content.parsed().data
+    }
+
     #[cfg(test)]
     pub(crate) fn built_content(&self) -> &Arc<BuiltModuleContent> {
         &self.built_content
@@ -216,6 +221,7 @@ impl Module {
             ParsedModule {
                 dependencies_block: crate::DependenciesBlock::new(dependencies, blocks),
                 presentational_dependencies,
+                data: crate::parser::ParsedModuleData::JavaScript,
             },
             source,
             source_hash,
@@ -239,10 +245,10 @@ impl Module {
         self.exports_info = match self.identity.module_type {
             ModuleType::Json => {
                 let mut names = vec!["default".to_string()];
-                if let Ok(serde_json::Value::Object(object)) =
-                    serde_json::from_str::<serde_json::Value>(self.source())
+                if let crate::parser::ParsedModuleData::Json(serde_json::Value::Object(object)) =
+                    self.parsed_data()
                 {
-                    names.extend(object.into_iter().map(|(name, _)| name));
+                    names.extend(object.keys().cloned());
                 }
                 ExportsInfo::from_names(names)
             }

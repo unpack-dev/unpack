@@ -2,11 +2,17 @@
 
 use std::path::Path;
 
-use crate::{Error, Result, parser::ParsedModule};
+use crate::{
+    Error, Result,
+    parser::{ParsedModule, ParsedModuleData},
+};
 
 pub(crate) fn parse(path: &Path, source: &str) -> Result<ParsedModule> {
     serde_json::from_str::<serde_json::Value>(source)
-        .map(|_| ParsedModule::default())
+        .map(|value| ParsedModule {
+            data: ParsedModuleData::Json(value),
+            ..ParsedModule::default()
+        })
         .map_err(|error| Error::Parse {
             path: path.to_path_buf(),
             message: error.to_string(),

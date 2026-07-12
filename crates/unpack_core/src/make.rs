@@ -550,7 +550,14 @@ impl BuildTask {
             ModuleType::Asset
             | ModuleType::AssetResource
             | ModuleType::AssetInline
-            | ModuleType::AssetSource => Ok(crate::asset::asset_parser::parse()),
+            | ModuleType::AssetSource => Ok(crate::asset::asset_parser::parse(
+                self.identity.module_type,
+                if self.loader.is_some() {
+                    source.len()
+                } else {
+                    raw_bytes.len()
+                },
+            )),
         } {
             Ok(parsed) => parsed,
             Err(error) if error.is_compilation_error() => {
@@ -572,13 +579,11 @@ impl BuildTask {
                 raw_bytes.clone()
             }
         });
+        let built_content = Arc::new(match binary_source {
+            Some(binary_source) => BuiltModuleContent::new_binary(parsed, source, binary_source),
+            None => BuiltModuleContent::new(parsed, source),
+        });
         if !services.module_build_cache.is_enabled() {
-            let built_content = Arc::new(match binary_source {
-                Some(binary_source) => {
-                    BuiltModuleContent::new_binary(parsed, source, binary_source)
-                }
-                None => BuiltModuleContent::new(parsed, source),
-            });
             state
                 .lock()
                 .await
@@ -609,10 +614,6 @@ impl BuildTask {
             );
         }
         let snapshot = services.file_system_info.merge_snapshots(snapshots.iter());
-        let built_content = Arc::new(match binary_source {
-            Some(binary_source) => BuiltModuleContent::new_binary(parsed, source, binary_source),
-            None => BuiltModuleContent::new(parsed, source),
-        });
         let record = ModuleBuildRecord::new(Arc::clone(&built_content), snapshot);
 
         state

@@ -166,7 +166,7 @@ impl NormalModuleFactory {
         if factorized
             .resource
             .extension()
-            .is_some_and(|extension| extension == "json")
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
         {
             factorized.identity.module_type = crate::ModuleType::Json;
         }

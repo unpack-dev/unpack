@@ -22,6 +22,7 @@ pub struct ModuleGraphConnection {
     pub origin_block: Option<AsyncDependenciesBlockIndex>,
     pub origin_dependency_index: Option<DependencyIndex>,
     pub dependency: Dependency,
+    pub resolved_module: ModuleHandle,
     pub module: ModuleHandle,
     pub(crate) state: ModuleGraphConnectionState,
 }

@@ -2178,7 +2178,12 @@ test("watch option validation throws synchronously", async () => {
 });
 
 async function runCompiler(options: Parameters<typeof unpack>[0]) {
-  return runExistingCompiler(unpack(options));
+  const compiler = unpack(options);
+  try {
+    return await runExistingCompiler(compiler);
+  } finally {
+    await closeCompiler(compiler);
+  }
 }
 
 async function assertSameTimestampModuleEditEmits(

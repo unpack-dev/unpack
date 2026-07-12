@@ -214,6 +214,8 @@ pub struct NativeModuleGraphConnection {
     pub origin_module_handle: Option<u32>,
     #[napi(js_name = "moduleHandle")]
     pub module_handle: u32,
+    #[napi(js_name = "resolvedModuleHandle")]
+    pub resolved_module_handle: u32,
     #[napi(js_name = "dependencyType")]
     pub dependency_type: String,
     pub request: Option<String>,
@@ -260,48 +262,124 @@ pub struct NativeRunResult {
 
 #[napi]
 pub struct NativeCompilation {
-    module_graph: Arc<unpack_core::ModuleGraph>,
-    chunk_graph: Arc<unpack_core::ChunkGraph>,
+    module_graph: NativeModuleGraph,
+    chunk_graph: unpack_core::ChunkGraph,
+}
+
+enum NativeModuleGraph {
+    Owned(unpack_core::ModuleGraph),
+    Leased {
+        module_graph: unpack_core::ModuleGraph,
+        return_sender: tokio::sync::oneshot::Sender<unpack_core::ModuleGraph>,
+    },
+    Released,
+}
+
+impl NativeCompilation {
+    fn module_graph(&self) -> Result<&unpack_core::ModuleGraph> {
+        match &self.module_graph {
+            NativeModuleGraph::Owned(module_graph)
+            | NativeModuleGraph::Leased { module_graph, .. } => Ok(module_graph),
+            NativeModuleGraph::Released => Err(napi::Error::from_reason(
+                "native compilation graph lease has been released",
+            )),
+        }
+    }
+
+    fn return_module_graph_lease(&mut self) -> Result<()> {
+        let state = std::mem::replace(&mut self.module_graph, NativeModuleGraph::Released);
+        let NativeModuleGraph::Leased {
+            module_graph,
+            return_sender,
+        } = state
+        else {
+            self.module_graph = state;
+            return Err(napi::Error::from_reason(
+                "native compilation does not hold a module graph lease",
+            ));
+        };
+        return_sender.send(module_graph).map_err(|module_graph| {
+            self.module_graph = NativeModuleGraph::Owned(module_graph);
+            napi::Error::from_reason("native compilation graph lease receiver was dropped")
+        })
+    }
+}
+
+impl Drop for NativeCompilation {
+    fn drop(&mut self) {
+        let state = std::mem::replace(&mut self.module_graph, NativeModuleGraph::Released);
+        if let NativeModuleGraph::Leased {
+            module_graph,
+            return_sender,
+        } = state
+        {
+            let _ = return_sender.send(module_graph);
+        }
+    }
 }
 
 #[napi]
 impl NativeCompilation {
     #[napi]
-    pub fn modules(&self) -> Vec<NativeModule> {
-        self.module_graph
+    pub fn modules(&self) -> Result<Vec<NativeModule>> {
+        Ok(self
+            .module_graph()?
             .modules()
             .iter()
             .map(native_module)
-            .collect()
-    }
-
-    #[napi(js_name = "incomingConnections")]
-    pub fn incoming_connections(&self, module_handle: u32) -> Vec<NativeModuleGraphConnection> {
-        let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
-        if self.module_graph.module(module_handle).is_none() {
-            return Vec::new();
-        }
-        self.module_graph
-            .incoming_connections(module_handle)
-            .map(native_module_graph_connection)
-            .collect()
+            .collect())
     }
 
     #[napi(js_name = "outgoingConnections")]
-    pub fn outgoing_connections(&self, module_handle: u32) -> Vec<NativeModuleGraphConnection> {
+    pub fn outgoing_connections(
+        &self,
+        module_handle: u32,
+    ) -> Result<Vec<NativeModuleGraphConnection>> {
+        let module_graph = self.module_graph()?;
         let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
-        if self.module_graph.module(module_handle).is_none() {
-            return Vec::new();
+        if module_graph.module(module_handle).is_none() {
+            return Ok(Vec::new());
         }
-        self.module_graph
+        Ok(module_graph
             .outgoing_connections(module_handle)
             .map(native_module_graph_connection)
-            .collect()
+            .collect())
+    }
+
+    #[napi(js_name = "incomingConnections")]
+    pub fn incoming_connections(
+        &self,
+        module_handle: u32,
+    ) -> Result<Vec<NativeModuleGraphConnection>> {
+        let module_graph = self.module_graph()?;
+        let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
+        if module_graph.module(module_handle).is_none() {
+            return Ok(Vec::new());
+        }
+        Ok(module_graph
+            .incoming_connections(module_handle)
+            .map(native_module_graph_connection)
+            .collect())
+    }
+
+    #[napi(js_name = "connectionsByHandle")]
+    pub fn connections_by_handle(
+        &self,
+        connection_handles: Vec<u32>,
+    ) -> Result<Vec<NativeModuleGraphConnection>> {
+        let module_graph = self.module_graph()?;
+        Ok(connection_handles
+            .into_iter()
+            .filter_map(|handle| module_graph.connections().get(handle as usize))
+            .map(native_module_graph_connection)
+            .collect())
     }
 
     #[napi]
-    pub fn chunks(&self) -> Vec<NativeChunk> {
-        self.chunk_graph
+    pub fn chunks(&self) -> Result<Vec<NativeChunk>> {
+        self.module_graph()?;
+        Ok(self
+            .chunk_graph
             .chunks()
             .iter()
             .map(|chunk| NativeChunk {
@@ -309,46 +387,56 @@ impl NativeCompilation {
                 name: chunk.name().map(str::to_string),
                 render_id: native_render_id(chunk.render_id_string(), chunk.render_id_number()),
             })
-            .collect()
+            .collect())
     }
 
     #[napi(js_name = "chunkModules")]
-    pub fn chunk_modules(&self, chunk_handle: u32) -> Vec<u32> {
+    pub fn chunk_modules(&self, chunk_handle: u32) -> Result<Vec<u32>> {
+        self.module_graph()?;
         let chunk_handle = unpack_core::ChunkHandle::new(chunk_handle as usize);
         if self.chunk_graph.chunk(chunk_handle).is_none() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        self.chunk_graph
+        Ok(self
+            .chunk_graph
             .chunk_modules(chunk_handle)
             .iter()
             .copied()
             .map(native_module_handle)
-            .collect()
+            .collect())
     }
 
     #[napi(js_name = "moduleChunks")]
-    pub fn module_chunks(&self, module_handle: u32) -> Vec<u32> {
+    pub fn module_chunks(&self, module_handle: u32) -> Result<Vec<u32>> {
+        let module_graph = self.module_graph()?;
         let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
-        if self.module_graph.module(module_handle).is_none() {
-            return Vec::new();
+        if module_graph.module(module_handle).is_none() {
+            return Ok(Vec::new());
         }
-        self.chunk_graph
+        Ok(self
+            .chunk_graph
             .module_chunks(module_handle)
             .iter()
             .map(|chunk| chunk.index().try_into().unwrap_or(u32::MAX))
-            .collect()
+            .collect())
     }
 
     #[napi(js_name = "moduleId")]
-    pub fn module_id(&self, module_handle: u32) -> Option<Either<String, u32>> {
+    pub fn module_id(&self, module_handle: u32) -> Result<Option<Either<String, u32>>> {
+        let module_graph = self.module_graph()?;
         let module_handle = unpack_core::ModuleHandle::new(module_handle as usize);
-        if self.module_graph.module(module_handle).is_none() {
-            return None;
+        if module_graph.module(module_handle).is_none() {
+            return Ok(None);
         }
-        native_render_id(
+        Ok(native_render_id(
             self.chunk_graph.module_render_id_string(module_handle),
             self.chunk_graph.module_render_id_number(module_handle),
-        )
+        ))
+    }
+
+    #[napi(js_name = "returnModuleGraphLease")]
+    pub fn return_module_graph_lease_to_compiler(&mut self) -> Result<()> {
+        self.return_module_graph_lease()
     }
 }
 
@@ -441,18 +529,21 @@ impl CompilationHooks for NativeCompilationHooks {
         call_compilation_hook(Arc::clone(&self.compilation), compilation)
     }
 
-    fn finish_modules<'a>(&'a self, compilation: &'a unpack_core::Compilation) -> HookFuture<'a> {
-        call_compilation_hook(Arc::clone(&self.finish_modules), compilation)
+    fn finish_modules<'a>(
+        &'a self,
+        compilation: &'a mut unpack_core::Compilation,
+    ) -> HookFuture<'a> {
+        call_finish_modules_hook(Arc::clone(&self.finish_modules), compilation)
     }
 }
 
 fn call_compilation_hook<'a>(
     callback: Arc<NativeFinishModulesCallback>,
-    compilation: &'a unpack_core::Compilation,
+    _compilation: &'a unpack_core::Compilation,
 ) -> HookFuture<'a> {
     let native_compilation = NativeCompilation {
-        module_graph: Arc::new(compilation.module_graph().clone()),
-        chunk_graph: Arc::new(unpack_core::ChunkGraph::default()),
+        module_graph: NativeModuleGraph::Owned(unpack_core::ModuleGraph::default()),
+        chunk_graph: unpack_core::ChunkGraph::default(),
     };
     Box::pin(async move {
         let promise = callback
@@ -464,6 +555,37 @@ fn call_compilation_hook<'a>(
         promise.await.map_err(|error| CoreError::Hook {
             message: error.to_string(),
         })
+    })
+}
+
+fn call_finish_modules_hook<'a>(
+    callback: Arc<NativeFinishModulesCallback>,
+    compilation: &'a mut unpack_core::Compilation,
+) -> HookFuture<'a> {
+    let module_graph = compilation.take_module_graph();
+    let (return_sender, return_receiver) = tokio::sync::oneshot::channel();
+    let native_compilation = NativeCompilation {
+        module_graph: NativeModuleGraph::Leased {
+            module_graph,
+            return_sender,
+        },
+        chunk_graph: unpack_core::ChunkGraph::default(),
+    };
+    Box::pin(async move {
+        let callback_result = match callback.call_async_catch(native_compilation).await {
+            Ok(promise) => promise.await.map_err(|error| CoreError::Hook {
+                message: error.to_string(),
+            }),
+            Err(error) => Err(CoreError::Hook {
+                message: error.to_string(),
+            }),
+        };
+
+        let module_graph = return_receiver.await.map_err(|error| CoreError::Hook {
+            message: format!("finishModules did not return the module graph lease: {error}"),
+        })?;
+        compilation.restore_module_graph(module_graph);
+        callback_result
     })
 }
 
@@ -847,8 +969,8 @@ async fn run_compiler_inner(
         error: None,
         stats: Some(stats),
         compilation: Some(NativeCompilation {
-            module_graph: Arc::new(module_graph),
-            chunk_graph: Arc::new(chunk_graph),
+            module_graph: NativeModuleGraph::Owned(module_graph),
+            chunk_graph,
         }),
         logs,
     }
@@ -870,6 +992,7 @@ fn native_module_graph_connection(
         handle: connection.handle.index().try_into().unwrap_or(u32::MAX),
         origin_module_handle: connection.origin_module.map(native_module_handle),
         module_handle: native_module_handle(connection.module),
+        resolved_module_handle: native_module_handle(connection.resolved_module),
         dependency_type: dependency_type(&connection.dependency).to_string(),
         request: connection.dependency.request().map(str::to_string),
         weak: dependency_is_weak(&connection.dependency),

@@ -733,7 +733,7 @@ impl Compiler {
             }
             compilation.make().await?;
             if let Some(hooks) = &self.options.compilation_hooks {
-                hooks.finish_modules(&compilation).await?;
+                hooks.finish_modules(&mut compilation).await?;
             }
             compilation.seal();
             Ok(compilation)

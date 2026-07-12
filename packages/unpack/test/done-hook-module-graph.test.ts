@@ -92,8 +92,13 @@ test("finishModules taps run after make and before done", async () => {
       assert.equal(modules, capturedModules);
       assert.equal(compilation.moduleGraph, capturedModuleGraph);
       finishedModule = modules.values().next().value;
+      const entry = findModule(modules, "/src/index.js");
       events.push(`finishModules:${modules.size}:start`);
       setTimeout(() => {
+        assert.equal(
+          compilation.moduleGraph.getOutgoingConnections(entry).size > 0,
+          true
+        );
         events.push("finishModules:end");
         done();
       }, 5);
@@ -197,6 +202,128 @@ test("finishModules exposes a live webpack-shaped ModuleGraph", async () => {
     await new Promise<void>((resolve, reject) => {
       webpackCompiler.close((error) => (error ? reject(error) : resolve()));
     });
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("module graph access after finishModules rejects an expired native lease", async () => {
+  const fixture = await createGraphFixture();
+  const compiler = createCompiler(fixture);
+  let detachedAccess: Promise<Error | undefined> | undefined;
+
+  compiler.hooks.compilation.tap("schedule detached graph access", (compilation) => {
+    compilation.hooks.finishModules.tap("schedule detached graph access", (modules) => {
+      const entry = findModule(modules, "/src/index.js");
+      assert.equal(compilation.moduleGraph.getOutgoingConnections(entry).size > 0, true);
+      detachedAccess = afterMicrotasks(20).then(() => {
+        try {
+          compilation.moduleGraph.getOutgoingConnections(entry);
+          return undefined;
+        } catch (error) {
+          return error instanceof Error ? error : new Error(String(error));
+        }
+      });
+    });
+  });
+
+  try {
+    await runCompiler(compiler);
+    const error = await detachedAccess;
+    assert.match(error?.message ?? "", /module graph lease has been released/i);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("done refreshes connections materialized before seal", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-module-graph-rewrite-"));
+  await writeFixtureFile(join(fixture, "package.json"), JSON.stringify({ sideEffects: false }));
+  await writeFixtureFile(
+    join(fixture, "src/index.js"),
+    'import { value } from "./barrel.js"; export const result = value;\n'
+  );
+  await writeFixtureFile(
+    join(fixture, "src/barrel.js"),
+    'export { value } from "./leaf.js";\n'
+  );
+  await writeFixtureFile(join(fixture, "src/leaf.js"), "export const value = 42;\n");
+  const compiler = unpack({
+    context: fixture,
+    mode: "production",
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist") },
+    sourcemap: false,
+    optimization: { sideEffects: true, usedExports: true }
+  });
+  assert.ok(compiler);
+  let connection: ModuleGraphConnection | undefined;
+  let resolvedModule: Module | undefined;
+
+  compiler.hooks.compilation.tap("capture pre-seal connection", (compilation) => {
+    compilation.hooks.finishModules.tap("capture pre-seal connection", (modules) => {
+      const entry = findModule(modules, "/src/index.js");
+      const barrel = findModule(modules, "/src/barrel.js");
+      connection = [...compilation.moduleGraph.getOutgoingConnections(entry)].find(
+        (candidate) => candidate.module === barrel
+      );
+      assert.ok(connection);
+      resolvedModule = connection.resolvedModule;
+    });
+  });
+  compiler.hooks.done.tap("inspect rewritten connection", (stats) => {
+    assert.ok(connection);
+    const leaf = findModule(stats.compilation.modules, "/src/leaf.js");
+    assert.equal(connection.module, leaf);
+    assert.equal(connection.resolvedModule, resolvedModule);
+    assert.equal(stats.compilation.moduleGraph.getConnection(connection.dependency), connection);
+  });
+
+  try {
+    await runCompiler(compiler);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("done preserves resolvedModule for a connection first loaded after seal", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-module-graph-lazy-rewrite-"));
+  await writeFixtureFile(join(fixture, "package.json"), JSON.stringify({ sideEffects: false }));
+  await writeFixtureFile(
+    join(fixture, "src/index.js"),
+    'import { value } from "./barrel.js"; export const result = value;\n'
+  );
+  await writeFixtureFile(
+    join(fixture, "src/barrel.js"),
+    'export { value } from "./leaf.js";\n'
+  );
+  await writeFixtureFile(join(fixture, "src/leaf.js"), "export const value = 42;\n");
+  const compiler = unpack({
+    context: fixture,
+    mode: "production",
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist") },
+    sourcemap: false,
+    optimization: { sideEffects: true, usedExports: true }
+  });
+  assert.ok(compiler);
+
+  compiler.hooks.done.tap("inspect lazy rewritten connection", (stats) => {
+    const modules = stats.compilation.modules;
+    const entry = findModule(modules, "/src/index.js");
+    const barrel = findModule(modules, "/src/barrel.js");
+    const leaf = findModule(modules, "/src/leaf.js");
+    const connection = [...stats.compilation.moduleGraph.getOutgoingConnections(entry)]
+      .find((candidate) => candidate.module === leaf);
+    assert.ok(connection);
+    assert.equal(connection.resolvedModule, barrel);
+  });
+
+  try {
+    await runCompiler(compiler);
+  } finally {
+    await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
   }
 });
@@ -652,4 +779,12 @@ function closeCompiler(compiler: Compiler): Promise<void> {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function afterMicrotasks(turns: number): Promise<void> {
+  let pending = Promise.resolve();
+  for (let index = 0; index < turns; index += 1) {
+    pending = pending.then(() => undefined);
+  }
+  return pending;
 }

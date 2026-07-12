@@ -81,6 +81,19 @@ impl Compilation {
         &mut self.module_graph
     }
 
+    /// Temporarily detaches the module graph for a host hook that takes
+    /// ownership of it. The caller must restore the graph before compilation
+    /// continues.
+    pub fn take_module_graph(&mut self) -> ModuleGraph {
+        std::mem::take(&mut self.module_graph)
+    }
+
+    /// Restores a module graph previously detached by `take_module_graph`.
+    pub fn restore_module_graph(&mut self, module_graph: ModuleGraph) {
+        debug_assert!(self.module_graph.modules().is_empty());
+        self.module_graph = module_graph;
+    }
+
     pub(crate) fn module_computation_cache(&self) -> Option<&ModuleComputationCache> {
         self.module_computation_cache.as_ref()
     }

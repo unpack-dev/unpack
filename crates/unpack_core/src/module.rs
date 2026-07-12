@@ -53,6 +53,7 @@ pub struct Module {
 pub(crate) struct BuiltModuleContent {
     parsed: ParsedModule,
     source: String,
+    binary_source: Option<Vec<u8>>,
     source_hash: u64,
     code_generation_local_input_digest: u64,
 }
@@ -60,22 +61,39 @@ pub(crate) struct BuiltModuleContent {
 impl BuiltModuleContent {
     pub(crate) fn new(parsed: ParsedModule, source: String) -> Self {
         let source_hash = stable_hash(&source);
-        Self::from_persistent_parts(parsed, source, source_hash)
+        Self::from_persistent_parts_with_binary(parsed, source, None, source_hash)
     }
 
+    pub(crate) fn new_binary(parsed: ParsedModule, source: String, binary_source: Vec<u8>) -> Self {
+        let source_hash = stable_hash(&binary_source);
+        Self::from_persistent_parts_with_binary(parsed, source, Some(binary_source), source_hash)
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_persistent_parts(
         parsed: ParsedModule,
         source: String,
+        source_hash: u64,
+    ) -> Self {
+        Self::from_persistent_parts_with_binary(parsed, source, None, source_hash)
+    }
+
+    pub(crate) fn from_persistent_parts_with_binary(
+        parsed: ParsedModule,
+        source: String,
+        binary_source: Option<Vec<u8>>,
         source_hash: u64,
     ) -> Self {
         let mut hasher = StableHasher::default();
         hasher.write(b"unpack/code-generation/local-inputs/1");
         parsed.dependencies_block.hash(&mut hasher);
         parsed.presentational_dependencies.hash(&mut hasher);
+        parsed.data.hash(&mut hasher);
         let code_generation_local_input_digest = hasher.finish();
         Self {
             parsed,
             source,
+            binary_source,
             source_hash,
             code_generation_local_input_digest,
         }
@@ -87,6 +105,10 @@ impl BuiltModuleContent {
 
     pub(crate) fn source(&self) -> &str {
         &self.source
+    }
+
+    pub(crate) fn binary_source(&self) -> Option<&[u8]> {
+        self.binary_source.as_deref()
     }
 
     pub(crate) fn source_hash(&self) -> u64 {
@@ -155,8 +177,18 @@ impl Module {
         self.built_content.source_hash()
     }
 
+    pub(crate) fn source_bytes(&self) -> &[u8] {
+        self.built_content
+            .binary_source()
+            .unwrap_or_else(|| self.source().as_bytes())
+    }
+
     pub(crate) fn code_generation_local_input_digest(&self) -> u64 {
         self.built_content.code_generation_local_input_digest()
+    }
+
+    pub(crate) fn parsed_data(&self) -> &crate::parser::ParsedModuleData {
+        &self.built_content.parsed().data
     }
 
     #[cfg(test)]
@@ -195,6 +227,7 @@ impl Module {
             ParsedModule {
                 dependencies_block: crate::DependenciesBlock::new(dependencies, blocks),
                 presentational_dependencies,
+                data: crate::parser::ParsedModuleData::JavaScript,
                 build_meta: Default::default(),
             },
             source,
@@ -217,9 +250,21 @@ impl Module {
     }
 
     pub(crate) fn analyze_provided_exports(&mut self) {
-        self.exports_info = ExportsInfo::from_dependencies(
-            self.built_content.parsed.dependencies_block.dependencies(),
-        );
+        self.exports_info = match self.parsed_data() {
+            crate::parser::ParsedModuleData::Json(value) => {
+                let mut names = vec!["default".to_string()];
+                if let serde_json::Value::Object(object) = value {
+                    names.extend(object.keys().cloned());
+                }
+                ExportsInfo::from_names(names)
+            }
+            crate::parser::ParsedModuleData::Asset { .. } => {
+                ExportsInfo::from_names(["default".to_string()])
+            }
+            crate::parser::ParsedModuleData::JavaScript => ExportsInfo::from_dependencies(
+                self.built_content.parsed.dependencies_block.dependencies(),
+            ),
+        };
     }
 
     pub(crate) fn fail_build(&mut self, error: Error, source: String) {
@@ -257,4 +302,9 @@ impl ModuleIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ModuleType {
     JavaScriptAuto,
+    Json,
+    Asset,
+    AssetResource,
+    AssetInline,
+    AssetSource,
 }

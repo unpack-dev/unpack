@@ -23,7 +23,8 @@ use crate::{
     cache::{Cache, ModuleBuildRecord},
     cache_facade::{CacheETag, ModuleBuildCache},
     module::BuiltModuleContent,
-    parser::{JavascriptParserHookSet, ParsedModule, parse_module_dependencies_with_hooks},
+    normal_module_factory::{ModuleParserContext, ModuleSourceKind, ModuleTypeRegistry},
+    parser::{JavascriptParserHookSet, ParsedModule},
     snapshot::{FileSystemInfo, SnapshotCache},
 };
 
@@ -50,6 +51,7 @@ struct MakeServices {
     loader_runner: Option<Arc<dyn LoaderRunner>>,
     metrics: Arc<MakeMetrics>,
     semaphore: Arc<Semaphore>,
+    module_types: ModuleTypeRegistry,
 }
 
 #[derive(Debug)]
@@ -191,6 +193,7 @@ pub(crate) async fn run(
     resolver: UnpackResolver,
     cache: Cache,
     file_system_info: FileSystemInfo,
+    module_types: ModuleTypeRegistry,
     parser_hooks: JavascriptParserHookSet,
     state: Arc<Mutex<MakeState>>,
 ) -> Result<()> {
@@ -202,6 +205,7 @@ pub(crate) async fn run(
             file_system_info.clone(),
             options.snapshot.resolve,
             snapshot_cache.clone(),
+            module_types.clone(),
         )
         .with_module_rules(options.module_rules.clone())
         .with_side_effects(options.side_effects != crate::SideEffectsOption::Disabled),
@@ -214,6 +218,7 @@ pub(crate) async fn run(
         loader_runner: options.loader_runner.clone(),
         metrics: Arc::new(MakeMetrics::new()),
         semaphore: Arc::new(Semaphore::new(options.parallelism.max(1))),
+        module_types,
     };
 
     let mut main_queue = VecDeque::new();
@@ -486,10 +491,30 @@ impl BuildTask {
             }
         }
 
-        let raw_source = match tokio::fs::read_to_string(&self.resource).await {
+        let raw_bytes = match tokio::fs::read(&self.resource).await {
             Ok(source) => source,
             Err(error) => {
                 let error = Error::read(&self.resource, error);
+                state
+                    .lock()
+                    .await
+                    .fail_module(self.module_handle, error, String::new())?;
+                return Ok(Vec::new());
+            }
+        };
+        let registration = services
+            .module_types
+            .registration(self.identity.module_type)?;
+        let raw_source = match String::from_utf8(raw_bytes.clone()) {
+            Ok(source) => source,
+            Err(error) if registration.source_kind == ModuleSourceKind::Binary => {
+                String::from_utf8_lossy(error.as_bytes()).into_owned()
+            }
+            Err(error) => {
+                let error = Error::Read {
+                    path: self.resource.clone(),
+                    message: error.to_string(),
+                };
                 state
                     .lock()
                     .await
@@ -532,11 +557,18 @@ impl BuildTask {
         } else {
             raw_source.clone()
         };
-        let parsed = match parse_module_dependencies_with_hooks(
-            &self.resource,
-            &source,
-            &services.parser_hooks,
-        ) {
+        let source_bytes = if self.loader.is_some() {
+            source.as_bytes()
+        } else {
+            raw_bytes.as_slice()
+        };
+        let parsed = match services.module_types.parse(ModuleParserContext {
+            module_type: self.identity.module_type,
+            resource: &self.resource,
+            source: &source,
+            source_bytes,
+            javascript_parser_hooks: &services.parser_hooks,
+        }) {
             Ok(parsed) => parsed,
             Err(error) if error.is_compilation_error() => {
                 state
@@ -550,8 +582,13 @@ impl BuildTask {
         let process_dependencies =
             process_dependencies_task(self.module_handle, &issuer_context, &parsed);
 
+        let binary_source =
+            (registration.source_kind == ModuleSourceKind::Binary).then(|| source_bytes.to_vec());
+        let built_content = Arc::new(match binary_source {
+            Some(binary_source) => BuiltModuleContent::new_binary(parsed, source, binary_source),
+            None => BuiltModuleContent::new(parsed, source),
+        });
         if !services.module_build_cache.is_enabled() {
-            let built_content = Arc::new(BuiltModuleContent::new(parsed, source));
             state
                 .lock()
                 .await
@@ -562,9 +599,9 @@ impl BuildTask {
         let mut snapshots = vec![
             services
                 .file_system_info
-                .create_file_snapshot(
+                .create_file_snapshot_bytes(
                     &self.resource,
-                    &raw_source,
+                    &raw_bytes,
                     services.module_snapshot_strategy,
                 )
                 .await?,
@@ -582,7 +619,6 @@ impl BuildTask {
             );
         }
         let snapshot = services.file_system_info.merge_snapshots(snapshots.iter());
-        let built_content = Arc::new(BuiltModuleContent::new(parsed, source));
         let record = ModuleBuildRecord::new(Arc::clone(&built_content), snapshot);
 
         state
@@ -845,6 +881,7 @@ mod tests {
             resolver,
             cache.clone(),
             FileSystemInfo::new(),
+            crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
             JavascriptParserHookSet::default(),
             Arc::clone(&state),
         )

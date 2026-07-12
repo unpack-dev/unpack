@@ -18,7 +18,7 @@ use crate::{
 use tracing::Instrument;
 
 mod hooks;
-pub(crate) use hooks::CompilationHookSet;
+pub(crate) use hooks::{CompilationHookSet, RenderManifestHook};
 
 #[derive(Debug, Clone)]
 pub struct Compilation {
@@ -133,6 +133,7 @@ impl Compilation {
                 self.resolver.clone(),
                 self.cache.clone(),
                 self.file_system_info.clone(),
+                self.hooks.normal_module_factory_hooks.clone(),
                 self.hooks.javascript_parser.clone(),
                 Arc::clone(&state),
             )
@@ -241,12 +242,18 @@ impl Compilation {
     }
 
     pub fn create_asset_render_manifest(&mut self) {
+        let code_generation_results = self
+            .code_generation_results
+            .as_ref()
+            .expect("code generation results should exist before render manifest creation");
         self.asset_render_manifest = Some(code_generation::create_render_manifest(
-            &self.chunk_graph,
-            &self.entries,
-            self.code_generation_results
-                .as_ref()
-                .expect("code generation results should exist before render manifest creation"),
+            code_generation::RenderManifestContext {
+                module_graph: &self.module_graph,
+                chunk_graph: &self.chunk_graph,
+                entries: &self.entries,
+                code_generation_results,
+            },
+            &self.hooks.render_manifest,
         ));
     }
 
@@ -274,6 +281,7 @@ impl Compilation {
             &self.module_graph,
             &self.chunk_graph,
             &self.cache,
+            &self.hooks.normal_module_factory_hooks,
         );
         self.errors.extend(outcome.errors);
         self.code_generation_results = Some(outcome.results);

@@ -11,6 +11,9 @@ type AsyncTap = Arc<
         + Sync,
 >;
 type SyncTap = Arc<dyn Fn(&mut Compilation) + Send + Sync>;
+type RenderManifestTap = for<'a> fn(
+    crate::code_generation::RenderManifestContext<'a>,
+) -> Vec<crate::code_generation::RenderManifestEntry>;
 
 #[derive(Default, Clone)]
 pub(crate) struct AsyncCompilationHook {
@@ -59,15 +62,40 @@ impl SyncCompilationHook {
 
 #[derive(Default, Clone)]
 pub(crate) struct CompilationHookSet {
+    pub normal_module_factory_hooks: crate::normal_module_factory::ModuleTypeRegistry,
+    pub render_manifest: RenderManifestHook,
     pub javascript_parser: JavascriptParserHookSet,
     pub finish_modules: AsyncCompilationHook,
     pub optimize_dependencies: SyncCompilationHook,
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RenderManifestHook {
+    taps: Vec<RenderManifestTap>,
+}
+
+impl RenderManifestHook {
+    pub(crate) fn tap(&mut self, tap: RenderManifestTap) {
+        self.taps.push(tap);
+    }
+
+    pub(crate) fn call(
+        &self,
+        context: crate::code_generation::RenderManifestContext<'_>,
+    ) -> Vec<crate::code_generation::RenderManifestEntry> {
+        self.taps.iter().flat_map(|tap| tap(context)).collect()
+    }
 }
 
 impl std::fmt::Debug for CompilationHookSet {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CompilationHookSet")
+            .field(
+                "normal_module_factory_hooks",
+                &self.normal_module_factory_hooks,
+            )
+            .field("render_manifest", &self.render_manifest)
             .field("javascript_parser", &self.javascript_parser)
             .field("finish_modules_taps", &self.finish_modules.taps.len())
             .field(

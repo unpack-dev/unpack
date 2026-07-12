@@ -46,6 +46,11 @@ impl CacheKey for ModuleIdentity {
         let mut parts = vec![
             match self.module_type {
                 crate::ModuleType::JavaScriptAuto => b"javascript/auto".to_vec(),
+                crate::ModuleType::Json => b"json".to_vec(),
+                crate::ModuleType::Asset => b"asset".to_vec(),
+                crate::ModuleType::AssetResource => b"asset/resource".to_vec(),
+                crate::ModuleType::AssetInline => b"asset/inline".to_vec(),
+                crate::ModuleType::AssetSource => b"asset/source".to_vec(),
             },
             self.resource.as_os_str().as_encoded_bytes().to_vec(),
             optional_identifier_part(self.query.as_deref()),
@@ -225,10 +230,11 @@ impl ModuleBuildRecord {
         &self.built_content
     }
 
-    pub(crate) fn persistent_parts(&self) -> (&ParsedModule, &str, Option<u64>) {
+    pub(crate) fn persistent_parts(&self) -> (&ParsedModule, &str, Option<&[u8]>, Option<u64>) {
         (
             self.built_content.parsed(),
             self.built_content.source(),
+            self.built_content.binary_source(),
             Some(self.built_content.source_hash()),
         )
     }
@@ -236,13 +242,15 @@ impl ModuleBuildRecord {
     pub(crate) fn from_persistent_parts(
         parsed: ParsedModule,
         source: String,
+        binary_source: Option<Vec<u8>>,
         source_hash: u64,
         snapshot: Snapshot,
     ) -> Self {
         Self {
-            built_content: Arc::new(BuiltModuleContent::from_persistent_parts(
+            built_content: Arc::new(BuiltModuleContent::from_persistent_parts_with_binary(
                 parsed,
                 source,
+                binary_source,
                 source_hash,
             )),
             snapshot,

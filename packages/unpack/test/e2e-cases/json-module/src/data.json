@@ -1,0 +1,10 @@
+{
+  "answer": 42,
+  "nested": {
+    "ok": true
+  },
+  "default": "property",
+  "__proto__": {
+    "polluted": true
+  }
+}

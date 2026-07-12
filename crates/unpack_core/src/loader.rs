@@ -14,7 +14,8 @@ use crate::Result;
 #[derive(Debug, Clone)]
 pub struct ModuleRule {
     test: Regex,
-    loader: PathBuf,
+    loader: Option<PathBuf>,
+    module_type: Option<crate::ModuleType>,
     options: String,
     side_effects: Option<bool>,
 }
@@ -27,10 +28,29 @@ impl ModuleRule {
     ) -> std::result::Result<Self, regex::Error> {
         Ok(Self {
             test: Regex::new(test)?,
-            loader: loader.into(),
+            loader: Some(loader.into()),
+            module_type: None,
             options: options.into(),
             side_effects: None,
         })
+    }
+
+    pub fn without_loader(
+        test: &str,
+        options: impl Into<String>,
+    ) -> std::result::Result<Self, regex::Error> {
+        Ok(Self {
+            test: Regex::new(test)?,
+            loader: None,
+            module_type: None,
+            options: options.into(),
+            side_effects: None,
+        })
+    }
+
+    pub fn with_module_type(mut self, module_type: Option<crate::ModuleType>) -> Self {
+        self.module_type = module_type;
+        self
     }
 
     pub fn with_side_effects(mut self, side_effects: Option<bool>) -> Self {
@@ -42,16 +62,20 @@ impl ModuleRule {
         self.side_effects
     }
 
+    pub(crate) fn module_type(&self) -> Option<crate::ModuleType> {
+        self.module_type
+    }
+
     pub(crate) fn matches(&self, resource: &Path) -> bool {
         self.test.is_match(&resource.to_string_lossy())
     }
 
-    pub(crate) fn matched_loader(&self) -> MatchedLoader {
-        MatchedLoader {
-            identifier: format!("{}?{}", self.loader.to_string_lossy(), self.options),
-            loader: self.loader.clone(),
+    pub(crate) fn matched_loader(&self) -> Option<MatchedLoader> {
+        self.loader.as_ref().map(|loader| MatchedLoader {
+            identifier: format!("{}?{}", loader.to_string_lossy(), self.options),
+            loader: loader.clone(),
             options: self.options.clone(),
-        }
+        })
     }
 }
 

@@ -9,7 +9,7 @@ import test from "node:test";
 import unpack from "@unpack-js/core";
 import type { Compiler, Stats, UnpackOptions } from "@unpack-js/core";
 
-export type ConfigCaseOptions = Omit<UnpackOptions, "entry"> & {
+export type ConfigCaseOptions = Omit<UnpackOptions, "context" | "entry" | "output"> & {
   entry?: UnpackOptions["entry"];
 };
 
@@ -129,14 +129,11 @@ function withHarnessDefaults(
   outputPath: string
 ): UnpackOptions {
   return {
-    context: fixturePath,
     entry: "./index.js",
     sourcemap: false,
     ...options,
-    output: {
-      ...options.output,
-      path: options.output?.path ?? outputPath
-    }
+    context: fixturePath,
+    output: { path: outputPath }
   };
 }
 

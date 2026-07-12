@@ -16,7 +16,7 @@ const casesRoot = join(
   "..",
   "..",
   "test",
-  "e2e-cases"
+  "defaultCases"
 );
 const defaultEntry = "./src/index.js";
 const defaultEntryAsset = "main.js";
@@ -24,7 +24,7 @@ const defaultCompilerOptions = {
   sourcemap: false
 } satisfies Pick<UnpackOptions, "sourcemap">;
 
-interface BundleExecutionCase {
+interface DefaultCase {
   id: string;
   path: string;
   entry?: UnpackOptions["entry"];
@@ -36,7 +36,7 @@ interface BundleExecutionCase {
   expectedAssets?: string[];
 }
 
-interface BundleExecutionCaseManifest {
+interface DefaultCaseManifest {
   entry?: UnpackOptions["entry"];
   entryAsset?: string;
   runtimeExpression: string;
@@ -46,80 +46,80 @@ interface BundleExecutionCaseManifest {
   expectedAssets?: string[];
 }
 
-const bundleExecutionCases = await readBundleExecutionCases();
+const defaultCases = await readDefaultCases();
 
-for (const bundleCase of bundleExecutionCases) {
-  test(`emitted bundle ${bundleCase.id}`, async () => {
-    await runBundleExecutionCase(bundleCase);
+for (const defaultCase of defaultCases) {
+  test(`default case ${defaultCase.id}`, async () => {
+    await runDefaultCase(defaultCase);
   });
 }
 
-async function runBundleExecutionCase(bundleCase: BundleExecutionCase) {
-  const fixture = await createFixture(bundleCase.path);
+async function runDefaultCase(defaultCase: DefaultCase) {
+  const fixture = await createFixture(defaultCase.path);
   const outputPath = join(fixture, "dist");
 
   try {
     const { err, stats } = await runCompiler({
       ...defaultCompilerOptions,
       context: fixture,
-      entry: bundleCase.entry ?? defaultEntry,
+      entry: defaultCase.entry ?? defaultEntry,
       output: { path: outputPath }
     });
 
     assert.equal(err, null);
     const errors = stats?.toJson().errors ?? [];
-    if (bundleCase.expectedErrors === undefined && bundleCase.expectedErrorCount === undefined) {
+    if (defaultCase.expectedErrors === undefined && defaultCase.expectedErrorCount === undefined) {
       assert.equal(stats?.hasErrors(), false);
     } else {
-      if (bundleCase.expectedErrors !== undefined) {
+      if (defaultCase.expectedErrors !== undefined) {
         assert.equal(stats?.hasErrors(), true);
-        for (const expectedError of bundleCase.expectedErrors) {
+        for (const expectedError of defaultCase.expectedErrors) {
           assert.ok(
             errors.some((error) => error.message.includes(expectedError)),
             `expected Stats error containing ${JSON.stringify(expectedError)}`
           );
         }
       }
-      if (bundleCase.expectedErrorCount !== undefined) {
-        assert.equal(errors.length, bundleCase.expectedErrorCount);
+      if (defaultCase.expectedErrorCount !== undefined) {
+        assert.equal(errors.length, defaultCase.expectedErrorCount);
       }
     }
     assert.ok(
-      stats?.toJson().assets.some((asset) => asset.name === (bundleCase.entryAsset ?? defaultEntryAsset))
+      stats?.toJson().assets.some((asset) => asset.name === (defaultCase.entryAsset ?? defaultEntryAsset))
     );
     assert.ok(
-      (await readdir(outputPath)).includes(bundleCase.entryAsset ?? defaultEntryAsset)
+      (await readdir(outputPath)).includes(defaultCase.entryAsset ?? defaultEntryAsset)
     );
-    if (bundleCase.expectedAssets !== undefined) {
+    if (defaultCase.expectedAssets !== undefined) {
       assert.deepEqual(
         stats?.toJson().assets.map((asset) => asset.name).sort(),
-        [...bundleCase.expectedAssets].sort()
+        [...defaultCase.expectedAssets].sort()
       );
     }
 
     const result = await executeEntryExpression(
       outputPath,
-      bundleCase.entryAsset ?? defaultEntryAsset,
-      bundleCase.runtimeExpression
+      defaultCase.entryAsset ?? defaultEntryAsset,
+      defaultCase.runtimeExpression
     );
 
-    assert.equal(result, JSON.stringify(bundleCase.expected));
+    assert.equal(result, JSON.stringify(defaultCase.expected));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
 }
 
-async function readBundleExecutionCases() {
+async function readDefaultCases() {
   const entries = await readdir(casesRoot, { withFileTypes: true });
   const caseDirectories = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
 
-  assert.notEqual(caseDirectories.length, 0, "expected at least one e2e case");
+  assert.notEqual(caseDirectories.length, 0, "expected at least one default case");
 
   return Promise.all(
-    caseDirectories.map(async (id): Promise<BundleExecutionCase> => {
+    caseDirectories.map(async (id): Promise<DefaultCase> => {
       const casePath = join(casesRoot, id);
       const manifest = parseCaseManifest(
         id,
@@ -198,12 +198,12 @@ function createNodeScript(entryAsset: string, runtimeExpression: string) {
   `;
 }
 
-function parseCaseManifest(id: string, source: string): BundleExecutionCaseManifest {
+function parseCaseManifest(id: string, source: string): DefaultCaseManifest {
   const parsed = JSON.parse(source) as unknown;
 
   assert.ok(isRecord(parsed), `${id}/case.json must define an object`);
 
-  const manifest = parsed as Partial<BundleExecutionCaseManifest>;
+  const manifest = parsed as Partial<DefaultCaseManifest>;
 
   assert.equal(
     typeof manifest.runtimeExpression,
@@ -244,7 +244,7 @@ function parseCaseManifest(id: string, source: string): BundleExecutionCaseManif
     );
   }
 
-  return manifest as BundleExecutionCaseManifest;
+  return manifest as DefaultCaseManifest;
 }
 
 function isEntryOption(entry: unknown): entry is UnpackOptions["entry"] {

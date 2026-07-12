@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, cp, mkdtemp, readdir, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -29,7 +29,7 @@ export interface ConfigCaseTest {
   validate(result: ConfigCaseResult): Promise<void> | void;
 }
 
-interface ConfigCase {
+interface TestCase {
   category: string;
   name: string;
   sourcePath: string;
@@ -44,16 +44,16 @@ const require = createRequire(import.meta.url);
 export async function registerConfigCases(): Promise<void> {
   const cases = await discoverConfigCases();
 
-  assert.notEqual(cases.length, 0, "expected at least one config case");
+  assert.notEqual(cases.length, 0, "expected at least one test case");
 
-  for (const configCase of cases) {
-    test(`config case ${configCase.category}/${configCase.name}`, async () => {
-      await runConfigCase(configCase);
+  for (const testCase of cases) {
+    test(`config case ${testCase.category}/${testCase.name}`, async () => {
+      await runCase(testCase);
     });
   }
 }
 
-async function discoverConfigCases(): Promise<ConfigCase[]> {
+async function discoverConfigCases(): Promise<TestCase[]> {
   const categories = await readDirectories(sourceCasesPath);
   const cases = await Promise.all(
     categories.map(async (category) => {
@@ -70,6 +70,15 @@ async function discoverConfigCases(): Promise<ConfigCase[]> {
   return cases.flat();
 }
 
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function readDirectories(path: string): Promise<string[]> {
   return (await readdir(path, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith("_"))
@@ -77,27 +86,22 @@ async function readDirectories(path: string): Promise<string[]> {
     .sort();
 }
 
-async function runConfigCase(configCase: ConfigCase): Promise<void> {
-  const fixturePath = await mkdtemp(join(tmpdir(), "unpack-config-case-"));
+async function runCase(testCase: TestCase): Promise<void> {
+  const fixturePath = await mkdtemp(join(tmpdir(), "unpack-test-case-"));
   const outputPath = join(fixturePath, "dist");
   let compiler: Compiler | undefined;
 
   try {
-    await copyFixture(configCase.sourcePath, fixturePath);
+    await copyFixture(testCase.sourcePath, fixturePath);
 
-    const [optionsModule, testModule] = await Promise.all([
-      import(pathToFileURL(join(configCase.compiledPath, "webpack.config.js")).href) as Promise<{
-        default: ConfigCaseOptions;
-      }>,
-      import(pathToFileURL(join(configCase.compiledPath, "test.config.js")).href) as Promise<{
-        default: ConfigCaseTest;
-      }>
+    const [options, caseTest] = await Promise.all([
+      loadOptions(testCase),
+      loadCaseTest(testCase)
     ]);
-    const options = withHarnessDefaults(optionsModule.default, fixturePath, outputPath);
-    const caseTest = testModule.default;
+    const normalizedOptions = withHarnessDefaults(options, fixturePath, outputPath);
 
     await caseTest.prepare?.({ fixturePath, outputPath });
-    compiler = unpack(options);
+    compiler = unpack(normalizedOptions);
     const stats = await runCompiler(compiler);
     const errors = stats.toJson().errors.map((error) => error.message).join("\n");
 
@@ -121,6 +125,28 @@ async function runConfigCase(configCase: ConfigCase): Promise<void> {
     }
     await rm(fixturePath, { recursive: true, force: true });
   }
+}
+
+async function loadOptions(testCase: TestCase): Promise<ConfigCaseOptions> {
+  const optionsModule = (await import(
+    pathToFileURL(join(testCase.compiledPath, "webpack.config.js")).href
+  )) as { default: ConfigCaseOptions };
+  return optionsModule.default;
+}
+
+async function loadCaseTest(testCase: TestCase): Promise<ConfigCaseTest> {
+  if (!(await fileExists(join(testCase.sourcePath, "test.config.ts")))) {
+    return {
+      validate({ requireEntry }) {
+        requireEntry();
+      }
+    };
+  }
+
+  const testModule = (await import(
+    pathToFileURL(join(testCase.compiledPath, "test.config.js")).href
+  )) as { default: ConfigCaseTest };
+  return testModule.default;
 }
 
 function withHarnessDefaults(

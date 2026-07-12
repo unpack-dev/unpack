@@ -1,6 +1,11 @@
 # Webpack implementation differences
 
-This note compares the current Unpack implementation with the local webpack checkout at `/Users/bytedance/github/webpack` commit `10f5fccb2`. The goal is to identify gaps between current Unpack behavior and webpack so staged scope decisions can be separated from alignment gaps.
+This note compares current Unpack behavior with the repository-pinned
+`webpack@5.108.1` and current source-layout decisions with webpack commit
+`da91761ed92c8e133ee321c7db4ad6c4698cae0a`. The goal is to identify gaps
+between current Unpack behavior and webpack so staged scope decisions can be
+separated from alignment gaps. The central classification and refactoring index
+is `webpack-architecture-deviation-register.md`.
 
 ## Webpack alignment boundary
 
@@ -199,9 +204,10 @@ tracks (#140, #145, and #147). The JavaScript package entry remains ESM-only,
 while emitted entry assets intentionally use CommonJS startup. Render IDs are
 readable and deterministic with controlled churn, but are not a byte-for-byte
 webpack ID contract. Context modules, general CommonJS parsing/interop, broader
-loader rules and loader chains, plugins, tree shaking, module concatenation,
-browser loading targets, and other
-unimplemented options remain explicit unsupported surfaces.
+loader rules and loader chains, public JavaScript plugins, Inner Graph, module
+concatenation, browser loading targets, and other unimplemented options remain
+explicit unsupported surfaces. Provided-exports, used-exports, and Side Effects
+Flag Plugin responsibilities are implemented for the current ESM surface.
 
 ## ESM code generation
 
@@ -217,8 +223,12 @@ Webpack templates include additional behavior for used exports, inlined exports,
 Necessity:
 
 - Getter-based export bindings and import-usage rewrites are necessary for webpack-like ESM live binding semantics.
-- Always treating exports as used is a deliberate first implementation.
-- Full export usage pruning, ambiguous star export conflict handling, namespace/default interop, and module concatenation should be deferred until optimization or CommonJS interop becomes a goal.
+- The current provided-exports and used-exports plugins drive export getter
+  emission and side-effects connection optimization for the supported ESM
+  surface.
+- Inner Graph, broader export-usage semantics, ambiguous star export conflict
+  handling, namespace/default interop, and module concatenation should be
+  deferred until their corresponding webpack surfaces are chosen.
 
 ## Render IDs and filenames
 
@@ -241,10 +251,10 @@ Current staged scope limits:
 - Readable render IDs and semantic tests.
 - Byte-offset source ranges in Rust.
 
-Implementation gaps to resolve for current stated semantics:
-
-- Nested dynamic imports: async blocks discovered inside async chunks must create further async chunk groups.
-- Runtime requirements should either drive helper emission or be kept clearly internal until needed.
+Current documented architecture deviations and resolved violations are tracked
+in `webpack-architecture-deviation-register.md`. Nested dynamic imports and
+Runtime Requirement-driven helper emission are implemented and are no longer
+alignment gaps.
 
 Feature work to defer until explicitly chosen:
 
@@ -253,4 +263,4 @@ Feature work to defer until explicitly chosen:
 - Broader loader rules, loader chains, loader options, async loaders, and plugin API parity.
 - Magic comments, dynamic import modes, import attributes, deferred/source import phases.
 - Split chunks, cache groups, runtime chunks, HMR, browser/ESM/webworker chunk loading.
-- Export usage analysis, tree shaking, module concatenation, and deterministic id plugins.
+- Inner Graph, module concatenation, broader export-usage semantics, and deterministic id plugins.

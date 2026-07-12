@@ -14,6 +14,9 @@ use crate::{
 };
 use tracing::Instrument;
 
+mod hooks;
+pub(crate) use hooks::CompilationHookSet;
+
 #[derive(Debug, Clone)]
 pub struct Compilation {
     options: CompilerOptions,
@@ -30,6 +33,7 @@ pub struct Compilation {
     watch_dependencies: WatchDependencies,
     infrastructure_log_events: Vec<InfrastructureLogEvent>,
     file_system_info: FileSystemInfo,
+    hooks: CompilationHookSet,
 }
 
 impl Compilation {
@@ -37,6 +41,7 @@ impl Compilation {
         options: CompilerOptions,
         resolver: UnpackResolver,
         build_cache: BuildCache,
+        hooks: CompilationHookSet,
     ) -> Self {
         let file_system_info = FileSystemInfo::from_snapshot_options(&options.snapshot);
         Self {
@@ -54,6 +59,7 @@ impl Compilation {
             watch_dependencies: WatchDependencies::default(),
             infrastructure_log_events: Vec::new(),
             file_system_info,
+            hooks,
         }
     }
 
@@ -63,6 +69,10 @@ impl Compilation {
 
     pub fn module_graph(&self) -> &ModuleGraph {
         &self.module_graph
+    }
+
+    pub(crate) fn module_graph_mut(&mut self) -> &mut ModuleGraph {
+        &mut self.module_graph
     }
 
     pub fn into_graphs(self) -> (ModuleGraph, ChunkGraph) {
@@ -134,6 +144,10 @@ impl Compilation {
             };
 
             if result.is_ok() {
+                self.hooks.clone().finish_modules.call(self).await;
+            }
+
+            if result.is_ok() {
                 self.log_infrastructure(
                     InfrastructureLogLevel::Verbose,
                     "unpack.Compilation",
@@ -171,6 +185,7 @@ impl Compilation {
     }
 
     pub fn seal(&mut self) {
+        self.hooks.clone().optimize_dependencies.call(self);
         self.build_chunk_graph();
         self.assign_render_ids();
         self.code_generation();

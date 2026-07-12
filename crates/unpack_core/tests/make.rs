@@ -54,7 +54,10 @@ async fn make_constructs_static_esm_module_graph() -> Result<(), Box<dyn std::er
         .iter()
         .find(|module| module.identity().resource.ends_with("dep.ts"))
         .expect("dep module should exist");
-    assert!(dep_module.exports_info().is_export_provided("value"));
+    assert_eq!(
+        dep_module.exports_info().is_export_provided("value"),
+        Some(true)
+    );
 
     let entry = compilation.entries()[0];
     let outgoing = graph

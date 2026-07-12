@@ -964,7 +964,9 @@ fn apply_harmony_export_specifier_dependency(
     exports_info: &ExportsInfo,
     init_fragments: &mut Vec<InitFragment>,
 ) {
-    let used_name = exports_info.get_used_name(&dep.name).unwrap_or(&dep.name);
+    let Some(used_name) = exports_info.get_used_name(&dep.name) else {
+        return;
+    };
     push_init_fragment(
         init_fragments,
         InitFragmentStage::HarmonyExport,
@@ -999,7 +1001,9 @@ fn apply_harmony_export_expression_dependency(
             "/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = ".to_string(),
         );
     }
-    let used_name = exports_info.get_used_name("default").unwrap_or("default");
+    let Some(used_name) = exports_info.get_used_name("default") else {
+        return;
+    };
     push_init_fragment(
         init_fragments,
         InitFragmentStage::HarmonyExport,
@@ -1034,8 +1038,10 @@ fn apply_harmony_export_imported_specifier_dependency(
             ),
         );
     } else if let Some(name) = &dep.name {
+        let Some(used_name) = exports_info.get_used_name(name) else {
+            return;
+        };
         let expression = export_access_expression(&import_var, &dep.ids);
-        let used_name = exports_info.get_used_name(name).unwrap_or(name);
         push_init_fragment(
             init_fragments,
             InitFragmentStage::HarmonyExport,

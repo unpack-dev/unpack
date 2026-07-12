@@ -11,6 +11,8 @@ mod compiler;
 mod dependency;
 mod error;
 mod exports_info;
+mod flag_dependency_exports_plugin;
+mod flag_dependency_usage_plugin;
 mod hooks;
 mod id_assignment;
 mod loader;

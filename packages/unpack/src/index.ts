@@ -16,6 +16,12 @@ export interface UnpackOptions {
   snapshot?: SnapshotOptions;
   infrastructureLogging?: InfrastructureLoggingOptions;
   module?: ModuleOptions;
+  optimization?: OptimizationOptions;
+}
+
+export interface OptimizationOptions {
+  providedExports?: boolean;
+  usedExports?: boolean | "global";
 }
 
 export interface ModuleOptions {
@@ -168,16 +174,16 @@ export interface ModuleGraphConnection {
 
 export interface ExportInfo {
   readonly name: string;
-  readonly provided: boolean;
-  getUsedName(): string;
+  readonly provided: boolean | null;
+  getUsedName(): string | false;
 }
 
 export interface ExportsInfo {
-  getProvidedExports(): string[];
-  isExportProvided(exportName: string | readonly string[]): boolean;
+  getProvidedExports(): string[] | null;
+  isExportProvided(exportName: string | readonly string[]): boolean | null;
   getExportInfo(exportName: string): ExportInfo;
   getReadOnlyExportInfo(exportName: string): ExportInfo;
-  getUsedExports(runtime?: unknown): null;
+  getUsedExports(runtime?: unknown): ReadonlySet<string> | boolean | null;
 }
 
 export interface ModuleGraph {
@@ -199,15 +205,15 @@ export interface ModuleGraph {
   ): ReadonlyMap<Module, readonly ModuleGraphConnection[]> | undefined;
   getIssuer(module: Module): Module | null | undefined;
   getOptimizationBailout(module: Module): readonly string[];
-  getProvidedExports(module: Module): string[];
+  getProvidedExports(module: Module): string[] | null;
   isExportProvided(
     module: Module,
     exportName: string | readonly string[]
-  ): boolean;
+  ): boolean | null;
   getExportsInfo(module: Module): ExportsInfo;
   getExportInfo(module: Module, exportName: string): ExportInfo;
   getReadOnlyExportInfo(module: Module, exportName: string): ExportInfo;
-  getUsedExports(module: Module, runtime?: unknown): null;
+  getUsedExports(module: Module, runtime?: unknown): ReadonlySet<string> | boolean | null;
   cached<TArgs extends unknown[], TResult>(
     fn: (moduleGraph: ModuleGraph, ...args: TArgs) => TResult,
     ...args: TArgs
@@ -325,6 +331,8 @@ interface NormalizedOptions {
   snapshot: NormalizedSnapshotOptions;
   infrastructureLogging: NormalizedInfrastructureLoggingOptions;
   moduleRules: NormalizedModuleRule[];
+  providedExports: boolean;
+  usedExports: boolean;
 }
 
 interface NormalizedModuleRule {
@@ -454,7 +462,9 @@ interface NativeModule {
   identifier: string;
   resource: string;
   type: string;
-  providedExports: string[];
+  providedExports?: string[] | null;
+  usedExports?: string[] | null;
+  allExportsUsed?: boolean;
 }
 
 interface NativeModuleGraphConnection {
@@ -1513,15 +1523,23 @@ class ModuleImpl implements Module {
   readonly #identifier: string;
   #moduleGraph: ModuleGraphImpl | undefined;
   #dependencies: readonly Dependency[] | undefined;
+  providedExports: readonly string[] | null;
+  usedExports: readonly string[] | null;
+  allExportsUsed: boolean;
 
   constructor(
     readonly nativeHandle: number,
     readonly resource: string,
     readonly type: string,
-    readonly providedExports: readonly string[],
+    providedExports: readonly string[] | null,
+    usedExports: readonly string[] | null,
+    allExportsUsed: boolean,
     identifier: string
   ) {
     this.#identifier = identifier;
+    this.providedExports = providedExports;
+    this.usedExports = usedExports;
+    this.allExportsUsed = allExportsUsed;
   }
 
   identifier(): string {
@@ -1549,6 +1567,16 @@ class ModuleImpl implements Module {
 
   bindModuleGraph(moduleGraph: ModuleGraphImpl): void {
     this.#moduleGraph = moduleGraph;
+  }
+
+  updateExports(
+    providedExports: readonly string[] | null,
+    usedExports: readonly string[] | null,
+    allExportsUsed: boolean
+  ): void {
+    this.providedExports = providedExports;
+    this.usedExports = usedExports;
+    this.allExportsUsed = allExportsUsed;
   }
 }
 
@@ -1596,34 +1624,52 @@ class ModuleGraphConnectionImpl implements ModuleGraphConnection {
 }
 
 class ExportInfoImpl implements ExportInfo {
-  constructor(readonly name: string, readonly provided: boolean) {}
+  constructor(
+    readonly name: string,
+    readonly provided: boolean | null,
+    readonly used: boolean | null
+  ) {}
 
-  getUsedName(): string {
-    return this.name;
+  getUsedName(): string | false {
+    return this.used === false ? false : this.name;
   }
 }
 
 class ExportsInfoImpl implements ExportsInfo {
   readonly #provided: Set<string>;
+  readonly #providedKnown: boolean;
+  readonly #used: Set<string> | null;
   readonly #exports = new Map<string, ExportInfo>();
 
-  constructor(providedExports: readonly string[]) {
-    this.#provided = new Set(providedExports);
+  constructor(
+    providedExports: readonly string[] | null,
+    usedExports: readonly string[] | null,
+    readonly allExportsUsed = false
+  ) {
+    this.#providedKnown = providedExports !== null;
+    this.#provided = new Set(providedExports ?? []);
+    this.#used = usedExports === null ? null : new Set(usedExports);
   }
 
-  getProvidedExports(): string[] {
-    return [...this.#provided];
+  getProvidedExports(): string[] | null {
+    return this.#providedKnown ? [...this.#provided] : null;
   }
 
-  isExportProvided(exportName: string | readonly string[]): boolean {
+  isExportProvided(exportName: string | readonly string[]): boolean | null {
     const name = typeof exportName === "string" ? exportName : exportName[0];
-    return name !== undefined && this.#provided.has(name);
+    return this.#providedKnown && name !== undefined ? this.#provided.has(name) : null;
   }
 
   getExportInfo(exportName: string): ExportInfo {
     let info = this.#exports.get(exportName);
     if (!info) {
-      info = new ExportInfoImpl(exportName, this.#provided.has(exportName));
+      info = new ExportInfoImpl(
+        exportName,
+        this.#providedKnown ? this.#provided.has(exportName) : null,
+        this.#used === null
+          ? null
+          : this.allExportsUsed || this.#used.has(exportName)
+      );
       this.#exports.set(exportName, info);
     }
     return info;
@@ -1633,8 +1679,10 @@ class ExportsInfoImpl implements ExportsInfo {
     return this.getExportInfo(exportName);
   }
 
-  getUsedExports(_runtime?: unknown): null {
-    return null;
+  getUsedExports(_runtime?: unknown): ReadonlySet<string> | boolean | null {
+    if (this.#used === null) return null;
+    if (this.allExportsUsed) return true;
+    return this.#used.size === 0 ? false : this.#used;
   }
 }
 
@@ -1644,7 +1692,7 @@ const EMPTY_INCOMING_CONNECTION_GROUPS: ReadonlyMap<
   readonly ModuleGraphConnection[]
 > = new Map();
 const EMPTY_OPTIMIZATION_BAILOUTS: readonly string[] = [];
-const EMPTY_EXPORTS_INFO = new ExportsInfoImpl([]);
+const EMPTY_EXPORTS_INFO = new ExportsInfoImpl([], null);
 
 class ModuleGraphImpl implements ModuleGraph {
   #nativeCompilation: NativeCompilation | undefined;
@@ -1673,16 +1721,28 @@ class ModuleGraphImpl implements ModuleGraph {
     this.#nativeCompilation = nativeCompilation;
     this.#modulesByHandle = modulesByHandle;
     for (const module of modulesByHandle.values()) {
-      this.#exports.set(module, new ExportsInfoImpl(module.providedExports));
+      this.#exports.set(
+        module,
+        new ExportsInfoImpl(
+          module.providedExports,
+          module.usedExports,
+          module.allExportsUsed
+        )
+      );
     }
   }
 
   updateNativeCompilation(nativeCompilation: NativeCompilation | undefined): void {
     this.#nativeCompilation = nativeCompilation;
     for (const module of this.#modulesByHandle.values()) {
-      if (!this.#exports.has(module)) {
-        this.#exports.set(module, new ExportsInfoImpl(module.providedExports));
-      }
+      this.#exports.set(
+        module,
+        new ExportsInfoImpl(
+          module.providedExports,
+          module.usedExports,
+          module.allExportsUsed
+        )
+      );
     }
   }
 
@@ -1823,14 +1883,14 @@ class ModuleGraphImpl implements ModuleGraph {
     return EMPTY_OPTIMIZATION_BAILOUTS;
   }
 
-  getProvidedExports(module: Module): string[] {
+  getProvidedExports(module: Module): string[] | null {
     return this.getExportsInfo(module).getProvidedExports();
   }
 
   isExportProvided(
     module: Module,
     exportName: string | readonly string[]
-  ): boolean {
+  ): boolean | null {
     return this.getExportsInfo(module).isExportProvided(exportName);
   }
 
@@ -1846,7 +1906,7 @@ class ModuleGraphImpl implements ModuleGraph {
     return this.getExportsInfo(module).getReadOnlyExportInfo(exportName);
   }
 
-  getUsedExports(module: Module, runtime?: unknown): null {
+  getUsedExports(module: Module, runtime?: unknown): ReadonlySet<string> | boolean | null {
     return this.getExportsInfo(module).getUsedExports(runtime);
   }
 
@@ -2049,12 +2109,21 @@ class CompilationImpl implements Compilation {
 
   update(compilation: NativeCompilation | null | undefined): void {
     for (const module of compilation?.modules() ?? []) {
-      if (!this.#modulesByHandle.has(module.handle)) {
+      const existing = this.#modulesByHandle.get(module.handle);
+      if (existing) {
+        existing.updateExports(
+          module.providedExports ?? null,
+          module.usedExports ?? null,
+          module.allExportsUsed ?? false
+        );
+      } else {
         const moduleImpl = new ModuleImpl(
           module.handle,
           module.resource,
           module.type,
-          module.providedExports,
+          module.providedExports ?? null,
+          module.usedExports ?? null,
+          module.allExportsUsed ?? false,
           module.identifier
         );
         moduleImpl.bindModuleGraph(this.moduleGraph);
@@ -2154,7 +2223,8 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       "cache",
       "snapshot",
       "infrastructureLogging",
-      "module"
+      "module",
+      "optimization"
     ],
     "options"
   );
@@ -2184,6 +2254,7 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
       ? true
       : assertBoolean(options.sourcemap, "options.sourcemap");
   const moduleRules = normalizeModuleOptions(options.module);
+  const optimization = normalizeOptimizationOptions(options.optimization, mode);
   if (moduleRules.length > 0 && sourcemap) {
     throw new TypeError("options.sourcemap must be false when options.module.rules is configured");
   }
@@ -2196,7 +2267,30 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     cache: normalizeCacheOptions(options.cache, normalizedContext, mode, name),
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
-    moduleRules
+    moduleRules,
+    providedExports: optimization.providedExports,
+    usedExports: optimization.usedExports
+  };
+}
+
+function normalizeOptimizationOptions(
+  optimization: OptimizationOptions | undefined,
+  mode: Mode
+): { providedExports: boolean; usedExports: boolean } {
+  if (optimization === undefined) {
+    return { providedExports: true, usedExports: mode === "production" };
+  }
+  assertPlainObject(optimization, "options.optimization");
+  assertKnownKeys(optimization, ["providedExports", "usedExports"], "options.optimization");
+  return {
+    providedExports: optimization.providedExports === undefined
+      ? true
+      : assertBoolean(optimization.providedExports, "options.optimization.providedExports"),
+    usedExports: optimization.usedExports === undefined
+      ? mode === "production"
+      : optimization.usedExports === "global"
+        ? true
+        : assertBoolean(optimization.usedExports, "options.optimization.usedExports")
   };
 }
 

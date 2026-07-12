@@ -7,8 +7,13 @@ use std::{
 use crate::{
     CacheOptions, Compilation, CompilationHooks, InfrastructureLoggingOptions, LoaderRunner,
     ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+    compilation::CompilationHookSet, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
+    flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
 };
 use tracing::Instrument;
+
+mod hooks;
+pub(crate) use hooks::CompilerHookSet;
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx"];
 
@@ -40,6 +45,8 @@ pub struct CompilerOptions {
     pub compilation_hooks: Option<Arc<dyn CompilationHooks>>,
     pub parallelism: usize,
     pub sourcemap: bool,
+    pub provided_exports: bool,
+    pub used_exports: bool,
 }
 
 impl CompilerOptions {
@@ -56,6 +63,8 @@ impl CompilerOptions {
             compilation_hooks: None,
             parallelism: 100,
             sourcemap: true,
+            provided_exports: true,
+            used_exports: true,
         }
     }
 }
@@ -65,6 +74,7 @@ pub struct Compiler {
     options: CompilerOptions,
     build_cache: BuildCache,
     cache_lifecycle: Arc<CacheLifecycle>,
+    hooks: CompilerHookSet,
 }
 
 #[derive(Debug)]
@@ -641,10 +651,18 @@ impl Compiler {
     pub fn new(options: CompilerOptions) -> Self {
         let build_cache = BuildCache::new(options.cache.clone(), options.snapshot.clone());
         let cache_lifecycle = CacheLifecycle::new(build_cache.clone(), &options.cache);
+        let mut hooks = CompilerHookSet::default();
+        if options.provided_exports {
+            FlagDependencyExportsPlugin.apply(&mut hooks);
+        }
+        if options.used_exports {
+            FlagDependencyUsagePlugin.apply(&mut hooks);
+        }
         Self {
             options,
             build_cache,
             cache_lifecycle,
+            hooks,
         }
     }
 
@@ -653,10 +671,13 @@ impl Compiler {
     }
 
     pub fn create_compilation(&self) -> Compilation {
+        let mut compilation_hooks = CompilationHookSet::default();
+        self.hooks.compilation.call(&mut compilation_hooks);
         Compilation::new(
             self.options.clone(),
             UnpackResolver::new(self.options.resolve.clone()),
             self.build_cache.clone(),
+            compilation_hooks,
         )
     }
 

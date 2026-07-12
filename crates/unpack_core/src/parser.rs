@@ -12,15 +12,15 @@ use crate::{
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Result,
     SourceRange,
 };
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use swc_experimental_allocator::Allocator;
 use swc_experimental_allocator::atom::Wtf8Atom;
 use swc_experimental_ecma_ast::{
-    ArrowExpr, AssignExpr, AwaitExpr, BindingIdent, BlockStmt, CallExpr, Callee, ClassDecl,
-    ClassExpr, Decl, DefaultDecl, EsVersion, ExportSpecifier, Expr, FnDecl, FnExpr, Function,
-    Ident, Lit, Module, ModuleDecl, ModuleExportName, ModuleItem, NewExpr, Pat, Prop, Stmt, Str,
-    TaggedTpl, Tpl, UpdateExpr, VarDeclarator, Visit, VisitWith, YieldExpr,
+    ArrowExpr, BinaryOp, BindingIdent, BlockStmt, CallExpr, Callee, Class, ClassDecl, ClassExpr,
+    ClassMember, Comments, Decl, DefaultDecl, EsVersion, ExportSpecifier, Expr, FnDecl, FnExpr,
+    Function, GetSpan, Ident, Key, Lit, Module, ModuleDecl, ModuleExportName, ModuleItem,
+    OptChainBase, Pat, Prop, PropName, PropOrSpread, Stmt, Str, Tpl, UnaryOp, VarDeclKind,
+    VarDeclOrExpr, VarDeclarator, Visit, VisitWith,
 };
 use swc_experimental_ecma_parser::{EsSyntax, Syntax, parse_file_as_module};
 
@@ -47,162 +47,943 @@ pub(crate) fn parse_module_dependencies(path: &Path, source: &str) -> Result<Par
 
 pub(crate) fn source_is_side_effect_free(path: &Path, source: &str) -> bool {
     let allocator = Allocator::new();
-    let Ok(module) = parse_file_as_module(
+    let mut comments = Comments::new_in(&allocator);
+    let Ok(module) = swc_experimental_ecma_parser::with_file_parser(
         &allocator,
         source,
         syntax_for_path(path),
         EsVersion::EsNext,
-        None,
+        Some(&mut comments),
+        |parser| parser.parse_module(),
     ) else {
         return false;
     };
 
-    let pure_functions = no_side_effects_functions(source);
-    module
-        .body
-        .iter()
-        .all(|item| module_item_is_side_effect_free(item, &pure_functions))
+    PureAnalysis::new(&comments, &module).module_is_pure(&module)
 }
 
-fn module_item_is_side_effect_free(
-    item: &ModuleItem<'_>,
-    pure_functions: &HashSet<String>,
-) -> bool {
-    match item {
-        ModuleItem::ModuleDecl(declaration) => match &**declaration {
-            ModuleDecl::Import(_) | ModuleDecl::ExportAll(_) | ModuleDecl::ExportNamed(_) => true,
-            ModuleDecl::ExportDecl(declaration) => {
-                declaration_is_side_effect_free(&declaration.decl, pure_functions)
-            }
-            ModuleDecl::ExportDefaultDecl(declaration) => match &declaration.decl {
-                DefaultDecl::Fn(_) => true,
-                DefaultDecl::Class(class) => {
-                    let mut visitor = SideEffectsVisitor::new(pure_functions);
-                    class.visit_with(&mut visitor);
-                    !visitor.has_side_effects
-                }
-            },
-            ModuleDecl::ExportDefaultExpr(expression) => {
-                expression_is_side_effect_free(&expression.expr, pure_functions)
-            }
-        },
-        ModuleItem::Stmt(statement) => match &**statement {
-            Stmt::Empty(_) => true,
-            Stmt::Decl(declaration) => declaration_is_side_effect_free(declaration, pure_functions),
-            Stmt::Expr(expression) => {
-                expression_is_side_effect_free(&expression.expr, pure_functions)
-            }
-            _ => false,
-        },
-    }
+struct PureAnalysis<'comments, 'arena> {
+    comments: &'comments Comments<'arena>,
+    pure_function_calls: HashSet<u32>,
 }
 
-fn declaration_is_side_effect_free(
-    declaration: &Decl<'_>,
-    pure_functions: &HashSet<String>,
-) -> bool {
-    if matches!(declaration, Decl::Fn(_)) {
-        return true;
-    }
-    let mut visitor = SideEffectsVisitor::new(pure_functions);
-    declaration.visit_with(&mut visitor);
-    !visitor.has_side_effects
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrimitiveKind {
+    NonBigInt,
+    BigInt,
+    Mixed,
 }
 
-fn expression_is_side_effect_free(expression: &Expr<'_>, pure_functions: &HashSet<String>) -> bool {
-    let mut visitor = SideEffectsVisitor::new(pure_functions);
-    expression.visit_with(&mut visitor);
-    !visitor.has_side_effects
-}
-
-struct SideEffectsVisitor<'names> {
-    has_side_effects: bool,
-    pure_functions: &'names HashSet<String>,
-}
-
-impl<'names> SideEffectsVisitor<'names> {
-    fn new(pure_functions: &'names HashSet<String>) -> Self {
+impl<'comments, 'arena> PureAnalysis<'comments, 'arena> {
+    fn new(comments: &'comments Comments<'arena>, module: &Module<'_>) -> Self {
+        let pure_functions = no_side_effects_functions(comments, module);
+        let mut collector = PureFunctionCallCollector::new(comments, &pure_functions);
+        module.visit_with(&mut collector);
         Self {
-            has_side_effects: false,
-            pure_functions,
+            comments,
+            pure_function_calls: collector.calls,
         }
     }
+
+    fn module_is_pure(&self, module: &Module<'_>) -> bool {
+        let mut comments_start = 0;
+        module.body.iter().all(|item| {
+            let pure = self.module_item_is_pure(item, comments_start);
+            comments_start = span_end(item.span());
+            pure
+        })
+    }
+
+    fn module_item_is_pure(&self, item: &ModuleItem<'_>, comments_start: usize) -> bool {
+        match item {
+            ModuleItem::ModuleDecl(declaration) => match &**declaration {
+                ModuleDecl::Import(_) | ModuleDecl::ExportAll(_) | ModuleDecl::ExportNamed(_) => {
+                    true
+                }
+                ModuleDecl::ExportDecl(declaration) => self.declaration_is_pure(&declaration.decl),
+                ModuleDecl::ExportDefaultDecl(declaration) => match &declaration.decl {
+                    DefaultDecl::Fn(_) => true,
+                    DefaultDecl::Class(class) => self.class_is_pure(&class.class),
+                },
+                ModuleDecl::ExportDefaultExpr(expression) => {
+                    self.expression_is_pure(&expression.expr, comments_start)
+                }
+            },
+            ModuleItem::Stmt(statement) => self.statement_is_pure(statement, comments_start),
+        }
+    }
+
+    fn statements_are_pure<'a>(
+        &self,
+        mut statements: impl Iterator<Item = &'a Stmt<'a>>,
+        mut comments_start: usize,
+    ) -> bool {
+        statements.all(|statement| {
+            let pure = self.statement_is_pure(statement, comments_start);
+            comments_start = span_end(statement.span());
+            pure
+        })
+    }
+
+    fn statement_is_pure(&self, statement: &Stmt<'_>, comments_start: usize) -> bool {
+        match statement {
+            Stmt::Block(block) => {
+                self.statements_are_pure(block.stmts.iter(), span_start(block.span))
+            }
+            Stmt::Empty(_) => true,
+            Stmt::Labeled(statement) => {
+                self.statement_is_pure(&statement.body, span_start(statement.span))
+            }
+            Stmt::If(statement) => {
+                self.expression_is_pure(&statement.test, comments_start)
+                    && self.statement_is_pure(&statement.cons, span_end(statement.test.span()))
+                    && statement.alt.as_ref().is_none_or(|alternate| {
+                        self.statement_is_pure(alternate, span_end(statement.cons.span()))
+                    })
+            }
+            Stmt::Switch(statement) => {
+                self.expression_is_pure(&statement.discriminant, comments_start)
+                    && statement.cases.iter().all(|case| {
+                        self.statements_are_pure(
+                            case.cons.iter(),
+                            case.test
+                                .as_ref()
+                                .map_or(span_start(case.span), |test| span_end(test.span())),
+                        )
+                    })
+            }
+            Stmt::While(statement) => {
+                self.expression_is_pure(&statement.test, comments_start)
+                    && self.statement_is_pure(&statement.body, span_end(statement.test.span()))
+            }
+            Stmt::DoWhile(statement) => {
+                self.statement_is_pure(&statement.body, comments_start)
+                    && self.expression_is_pure(&statement.test, span_end(statement.body.span()))
+            }
+            Stmt::For(statement) => {
+                let mut next_comments_start = comments_start;
+                let init_is_pure = statement.init.as_ref().is_none_or(|init| {
+                    let pure = match init {
+                        VarDeclOrExpr::VarDecl(declaration) => {
+                            self.variable_declaration_is_pure(declaration)
+                        }
+                        VarDeclOrExpr::Expr(expression) => {
+                            self.expression_is_pure(expression, next_comments_start)
+                        }
+                    };
+                    next_comments_start = span_end(init.span());
+                    pure
+                });
+                let test_is_pure = statement.test.as_ref().is_none_or(|test| {
+                    let pure = self.expression_is_pure(test, next_comments_start);
+                    next_comments_start = span_end(test.span());
+                    pure
+                });
+                let update_is_pure = statement.update.as_ref().is_none_or(|update| {
+                    let pure = self.expression_is_pure(update, next_comments_start);
+                    next_comments_start = span_end(update.span());
+                    pure
+                });
+                init_is_pure
+                    && test_is_pure
+                    && update_is_pure
+                    && self.statement_is_pure(&statement.body, next_comments_start)
+            }
+            Stmt::Decl(declaration) => self.declaration_is_pure(declaration),
+            Stmt::Expr(expression) => self.expression_is_pure(&expression.expr, comments_start),
+            _ => false,
+        }
+    }
+
+    fn declaration_is_pure(&self, declaration: &Decl<'_>) -> bool {
+        match declaration {
+            Decl::Fn(_) => true,
+            Decl::Class(class) => self.class_is_pure(&class.class),
+            Decl::Var(declaration) => self.variable_declaration_is_pure(declaration),
+            Decl::Using(_) => false,
+        }
+    }
+
+    fn variable_declaration_is_pure(
+        &self,
+        declaration: &swc_experimental_ecma_ast::VarDecl<'_>,
+    ) -> bool {
+        declaration.decls.iter().all(|declarator| {
+            declarator.init.as_ref().is_none_or(|initializer| {
+                self.expression_is_pure(initializer, span_start(declarator.span))
+            })
+        })
+    }
+
+    fn expression_is_pure(&self, expression: &Expr<'_>, comments_start: usize) -> bool {
+        match expression {
+            Expr::This(_)
+            | Expr::Fn(_)
+            | Expr::Arrow(_)
+            | Expr::Ident(_)
+            | Expr::Lit(_)
+            | Expr::MetaProp(_)
+            | Expr::PrivateName(_) => true,
+            Expr::Array(array) => {
+                let mut next_comments_start = comments_start;
+                array.elems.iter().all(|element| {
+                    let Some(element) = element else {
+                        return true;
+                    };
+                    if element.spread.is_some() {
+                        return false;
+                    }
+                    let pure = self.expression_is_pure(&element.expr, next_comments_start);
+                    next_comments_start = span_end(element.expr.span());
+                    pure
+                })
+            }
+            Expr::Object(object) => {
+                let mut next_comments_start = comments_start;
+                object.props.iter().all(|property| {
+                    let PropOrSpread::Prop(property) = property else {
+                        return false;
+                    };
+                    let pure = self.property_is_pure(property, next_comments_start);
+                    next_comments_start = span_end(property.span());
+                    pure
+                })
+            }
+            Expr::Unary(unary) => match unary.op {
+                UnaryOp::TypeOf | UnaryOp::Void | UnaryOp::Bang => {
+                    self.expression_is_pure(&unary.arg, comments_start)
+                }
+                UnaryOp::Minus | UnaryOp::Plus | UnaryOp::Tilde => {
+                    self.expression_is_known_primitive(&unary.arg)
+                        && self.expression_is_pure(&unary.arg, comments_start)
+                }
+                UnaryOp::Delete => false,
+            },
+            Expr::Bin(binary) => match binary.op {
+                BinaryOp::EqEqEq | BinaryOp::NotEqEq => {
+                    self.expression_is_pure(&binary.left, comments_start)
+                        && self.expression_is_pure(&binary.right, span_end(binary.left.span()))
+                }
+                BinaryOp::LogicalOr | BinaryOp::LogicalAnd | BinaryOp::NullishCoalescing => {
+                    self.expression_is_pure(&binary.left, comments_start)
+                        && self.expression_is_pure(&binary.right, span_end(binary.left.span()))
+                }
+                BinaryOp::In | BinaryOp::InstanceOf => false,
+                _ => {
+                    self.binary_operands_are_safe(binary.op, &binary.left, &binary.right)
+                        && self.expression_is_pure(&binary.left, comments_start)
+                        && self.expression_is_pure(&binary.right, span_end(binary.left.span()))
+                }
+            },
+            Expr::Cond(conditional) => {
+                self.expression_is_pure(&conditional.test, comments_start)
+                    && self.expression_is_pure(&conditional.cons, span_end(conditional.test.span()))
+                    && self.expression_is_pure(&conditional.alt, span_end(conditional.cons.span()))
+            }
+            Expr::Seq(sequence) => {
+                let mut next_comments_start = comments_start;
+                sequence.exprs.iter().all(|expression| {
+                    let pure = self.expression_is_pure(expression, next_comments_start);
+                    next_comments_start = span_end(expression.span());
+                    pure
+                })
+            }
+            Expr::Call(call) => {
+                let named_pure = self.pure_function_calls.contains(&call.span.start);
+                if !named_pure && !self.has_pure_annotation(comments_start, span_start(call.span)) {
+                    return false;
+                }
+                self.arguments_are_pure(
+                    call.args.iter(),
+                    match &call.callee {
+                        Callee::Expr(callee) => span_end(callee.span()),
+                        Callee::Super(super_) => span_end(super_.span),
+                        Callee::Import(import) => span_end(import.span),
+                    },
+                )
+            }
+            Expr::New(new) => {
+                self.has_pure_annotation(comments_start, span_start(new.span))
+                    && new.args.as_ref().is_none_or(|arguments| {
+                        self.arguments_are_pure(arguments.iter(), span_end(new.callee.span()))
+                    })
+            }
+            Expr::Tpl(template) => {
+                let mut next_comments_start = comments_start;
+                template.exprs.iter().all(|expression| {
+                    let pure = self.expression_is_pure(expression, next_comments_start);
+                    next_comments_start = span_end(expression.span());
+                    pure
+                })
+            }
+            Expr::TaggedTpl(tagged) => {
+                self.has_pure_annotation(comments_start, span_start(tagged.span)) && {
+                    let mut next_comments_start = span_end(tagged.tag.span());
+                    tagged.tpl.exprs.iter().all(|expression| {
+                        let pure = self.expression_is_pure(expression, next_comments_start);
+                        next_comments_start = span_end(expression.span());
+                        pure
+                    })
+                }
+            }
+            Expr::Class(class) => self.class_is_pure(&class.class),
+            Expr::Paren(parenthesized) => {
+                self.expression_is_pure(&parenthesized.expr, comments_start)
+            }
+            Expr::OptChain(chain) => match &chain.base {
+                OptChainBase::Member(_) => false,
+                OptChainBase::Call(call) => {
+                    self.has_pure_annotation(comments_start, span_start(chain.span))
+                        && self.arguments_are_pure(call.args.iter(), span_end(call.callee.span()))
+                }
+            },
+            Expr::Update(_)
+            | Expr::Assign(_)
+            | Expr::Member(_)
+            | Expr::SuperProp(_)
+            | Expr::Yield(_)
+            | Expr::Await(_)
+            | Expr::JSXMember(_)
+            | Expr::JSXNamespacedName(_)
+            | Expr::JSXEmpty(_)
+            | Expr::JSXElement(_)
+            | Expr::JSXFragment(_)
+            | Expr::Invalid(_) => false,
+        }
+    }
+
+    fn arguments_are_pure<'a>(
+        &self,
+        mut arguments: impl Iterator<Item = &'a swc_experimental_ecma_ast::ExprOrSpread<'a>>,
+        mut comments_start: usize,
+    ) -> bool {
+        arguments.all(|argument| {
+            if argument.spread.is_some() {
+                return false;
+            }
+            let pure = self.expression_is_pure(&argument.expr, comments_start);
+            comments_start = span_end(argument.expr.span());
+            pure
+        })
+    }
+
+    fn property_is_pure(&self, property: &Prop<'_>, comments_start: usize) -> bool {
+        match property {
+            Prop::Shorthand(_) => true,
+            Prop::KeyValue(property) => {
+                self.property_name_is_pure(&property.key, comments_start)
+                    && self.expression_is_pure(&property.value, span_end(property.key.span()))
+            }
+            Prop::Assign(property) => {
+                self.expression_is_pure(&property.value, span_end(property.key.span))
+            }
+            Prop::Getter(property) => self.property_name_is_pure(&property.key, comments_start),
+            Prop::Setter(property) => self.property_name_is_pure(&property.key, comments_start),
+            Prop::Method(property) => self.property_name_is_pure(&property.key, comments_start),
+        }
+    }
+
+    fn property_name_is_pure(&self, name: &PropName<'_>, comments_start: usize) -> bool {
+        match name {
+            PropName::Computed(computed) => self.expression_is_pure(&computed.expr, comments_start),
+            _ => true,
+        }
+    }
+
+    fn class_is_pure(&self, class: &Class<'_>) -> bool {
+        if !class.decorators.is_empty()
+            || class.super_class.as_ref().is_some_and(|super_class| {
+                !self.expression_is_pure(super_class, span_start(class.span))
+            })
+        {
+            return false;
+        }
+
+        class.body.iter().all(|member| match member {
+            ClassMember::Constructor(_) => class.super_class.is_none(),
+            ClassMember::Method(method) => {
+                self.property_name_is_pure(&method.key, span_start(method.span))
+            }
+            ClassMember::PrivateMethod(_) | ClassMember::Empty(_) => true,
+            ClassMember::ClassProp(property) => {
+                property.decorators.is_empty()
+                    && self.property_name_is_pure(&property.key, span_start(property.span))
+                    && (!property.is_static
+                        || property.value.as_ref().is_none_or(|value| {
+                            self.expression_is_pure(value, span_end(property.key.span()))
+                        }))
+            }
+            ClassMember::PrivateProp(property) => {
+                property.decorators.is_empty()
+                    && (!property.is_static
+                        || property.value.as_ref().is_none_or(|value| {
+                            self.expression_is_pure(value, span_end(property.key.span))
+                        }))
+            }
+            ClassMember::StaticBlock(_) => false,
+            ClassMember::AutoAccessor(accessor) => {
+                accessor.decorators.is_empty()
+                    && match &accessor.key {
+                        Key::Private(_) => true,
+                        Key::Public(name) => {
+                            self.property_name_is_pure(name, span_start(accessor.span))
+                        }
+                    }
+                    && (!accessor.is_static
+                        || accessor.value.as_ref().is_none_or(|value| {
+                            self.expression_is_pure(value, span_start(accessor.span))
+                        }))
+            }
+        })
+    }
+
+    fn expression_is_known_primitive(&self, expression: &Expr<'_>) -> bool {
+        self.primitive_kind(expression).is_some()
+    }
+
+    fn primitive_kind(&self, expression: &Expr<'_>) -> Option<PrimitiveKind> {
+        match expression {
+            Expr::Lit(literal) => match &**literal {
+                Lit::BigInt(_) => Some(PrimitiveKind::BigInt),
+                Lit::Regex(_) => None,
+                _ => Some(PrimitiveKind::NonBigInt),
+            },
+            Expr::Tpl(template) => template
+                .exprs
+                .iter()
+                .all(|expression| self.primitive_kind(expression).is_some())
+                .then_some(PrimitiveKind::NonBigInt),
+            Expr::Unary(unary) => match unary.op {
+                UnaryOp::TypeOf | UnaryOp::Void | UnaryOp::Bang => Some(PrimitiveKind::NonBigInt),
+                UnaryOp::Minus | UnaryOp::Tilde => self.primitive_kind(&unary.arg),
+                UnaryOp::Plus => match self.primitive_kind(&unary.arg)? {
+                    PrimitiveKind::BigInt | PrimitiveKind::Mixed => None,
+                    PrimitiveKind::NonBigInt => Some(PrimitiveKind::NonBigInt),
+                },
+                UnaryOp::Delete => None,
+            },
+            Expr::Bin(binary) => match binary.op {
+                BinaryOp::EqEq
+                | BinaryOp::NotEq
+                | BinaryOp::EqEqEq
+                | BinaryOp::NotEqEq
+                | BinaryOp::Lt
+                | BinaryOp::LtEq
+                | BinaryOp::Gt
+                | BinaryOp::GtEq => Some(PrimitiveKind::NonBigInt),
+                BinaryOp::LogicalOr | BinaryOp::LogicalAnd | BinaryOp::NullishCoalescing => {
+                    merge_primitive_kinds(
+                        self.primitive_kind(&binary.left)?,
+                        self.primitive_kind(&binary.right)?,
+                    )
+                }
+                BinaryOp::In | BinaryOp::InstanceOf => None,
+                _ => self.binary_result_kind(binary.op, &binary.left, &binary.right),
+            },
+            Expr::Cond(conditional) => merge_primitive_kinds(
+                self.primitive_kind(&conditional.cons)?,
+                self.primitive_kind(&conditional.alt)?,
+            ),
+            Expr::Seq(sequence) => sequence
+                .exprs
+                .last()
+                .and_then(|expression| self.primitive_kind(expression)),
+            Expr::Paren(parenthesized) => self.primitive_kind(&parenthesized.expr),
+            _ => None,
+        }
+    }
+
+    fn binary_operands_are_safe(
+        &self,
+        operator: BinaryOp,
+        left: &Expr<'_>,
+        right: &Expr<'_>,
+    ) -> bool {
+        self.binary_result_kind(operator, left, right).is_some()
+    }
+
+    fn binary_result_kind(
+        &self,
+        operator: BinaryOp,
+        left_expression: &Expr<'_>,
+        right_expression: &Expr<'_>,
+    ) -> Option<PrimitiveKind> {
+        let left = self.primitive_kind(left_expression)?;
+        let right = self.primitive_kind(right_expression)?;
+
+        if matches!(operator, BinaryOp::EqEq | BinaryOp::NotEq)
+            || matches!(
+                operator,
+                BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+            )
+        {
+            return Some(PrimitiveKind::NonBigInt);
+        }
+
+        if left == PrimitiveKind::Mixed
+            || right == PrimitiveKind::Mixed
+            || (left == PrimitiveKind::BigInt) != (right == PrimitiveKind::BigInt)
+        {
+            return None;
+        }
+
+        if left == PrimitiveKind::BigInt {
+            match operator {
+                BinaryOp::Div if !bigint_literal_is_nonzero(right_expression) => {
+                    return None;
+                }
+                BinaryOp::Mod => return None,
+                BinaryOp::Exp if bigint_literal(right_expression).is_none() => {
+                    return None;
+                }
+                BinaryOp::ZeroFillRShift => return None,
+                _ => {}
+            }
+        }
+
+        Some(left)
+    }
+
+    fn has_pure_annotation(&self, comments_start: usize, expression_start: usize) -> bool {
+        has_compiler_hint(self.comments, comments_start, expression_start, "PURE")
+    }
 }
 
-impl<'a> Visit<'a> for SideEffectsVisitor<'_> {
+fn merge_primitive_kinds(left: PrimitiveKind, right: PrimitiveKind) -> Option<PrimitiveKind> {
+    Some(if left == right {
+        left
+    } else {
+        PrimitiveKind::Mixed
+    })
+}
+
+fn bigint_literal_is_nonzero(expression: &Expr<'_>) -> bool {
+    bigint_literal(expression).is_some_and(|value| value.value.as_str() != "0")
+}
+
+fn bigint_literal<'expression>(
+    expression: &'expression Expr<'_>,
+) -> Option<&'expression swc_experimental_ecma_ast::BigInt<'expression>> {
+    match expression {
+        Expr::Lit(literal) => match &**literal {
+            Lit::BigInt(value) => Some(value),
+            _ => None,
+        },
+        Expr::Paren(parenthesized) => bigint_literal(&parenthesized.expr),
+        _ => None,
+    }
+}
+
+fn span_start(span: swc_experimental_ecma_ast::Span) -> usize {
+    span.start.saturating_sub(1) as usize
+}
+
+fn span_end(span: swc_experimental_ecma_ast::Span) -> usize {
+    span.end.saturating_sub(1) as usize
+}
+
+fn no_side_effects_functions(comments: &Comments<'_>, module: &Module<'_>) -> HashSet<String> {
+    let mut candidates = HashSet::new();
+    let mut comments_start = 0;
+    for item in module.body.iter() {
+        let statement_start = span_start(item.span());
+        match item {
+            ModuleItem::Stmt(statement) => {
+                if let Stmt::Decl(declaration) = &**statement {
+                    collect_no_side_effects_declaration(
+                        comments,
+                        declaration,
+                        comments_start,
+                        statement_start,
+                        &mut candidates,
+                    );
+                }
+            }
+            ModuleItem::ModuleDecl(declaration) => {
+                match &**declaration {
+                    ModuleDecl::ExportDecl(declaration) => collect_no_side_effects_declaration(
+                        comments,
+                        &declaration.decl,
+                        comments_start,
+                        statement_start,
+                        &mut candidates,
+                    ),
+                    ModuleDecl::ExportDefaultDecl(declaration) => {
+                        if let DefaultDecl::Fn(function) = &declaration.decl
+                            && has_compiler_hint(
+                                comments,
+                                comments_start,
+                                statement_start,
+                                "NO_SIDE_EFFECTS",
+                            )
+                        {
+                            candidates.insert(function.ident.as_ref().map_or_else(
+                                || "default".to_string(),
+                                |ident| ident_to_string(ident),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        comments_start = span_end(item.span());
+    }
+
+    let mut nested_var_collector = AnnotatedTopLevelVarCollector {
+        comments,
+        names: HashSet::new(),
+    };
+    module.visit_with(&mut nested_var_collector);
+    candidates.extend(nested_var_collector.names);
+
+    candidates
+}
+
+fn collect_no_side_effects_declaration(
+    comments: &Comments<'_>,
+    declaration: &Decl<'_>,
+    comments_start: usize,
+    statement_start: usize,
+    candidates: &mut HashSet<String>,
+) {
+    match declaration {
+        Decl::Fn(function) => {
+            if has_compiler_hint(comments, comments_start, statement_start, "NO_SIDE_EFFECTS") {
+                candidates.insert(ident_to_string(&function.ident));
+            }
+        }
+        Decl::Var(declaration) => {
+            for declarator in declaration.decls.iter() {
+                let (Pat::Ident(binding), Some(initializer)) = (&declarator.name, &declarator.init)
+                else {
+                    continue;
+                };
+                if !matches!(initializer, Expr::Fn(_) | Expr::Arrow(_)) {
+                    continue;
+                }
+                let before_declaration = declaration.kind == VarDeclKind::Const
+                    && has_compiler_hint(
+                        comments,
+                        comments_start,
+                        statement_start,
+                        "NO_SIDE_EFFECTS",
+                    );
+                let before_initializer = has_compiler_hint(
+                    comments,
+                    span_end(binding.id.span),
+                    span_start(initializer.span()),
+                    "NO_SIDE_EFFECTS",
+                );
+                if before_declaration || before_initializer {
+                    candidates.insert(ident_to_string(&binding.id));
+                }
+            }
+        }
+        Decl::Class(_) | Decl::Using(_) => {}
+    }
+}
+
+struct AnnotatedTopLevelVarCollector<'comments, 'arena> {
+    comments: &'comments Comments<'arena>,
+    names: HashSet<String>,
+}
+
+impl<'a> Visit<'a> for AnnotatedTopLevelVarCollector<'_, '_> {
+    fn visit_var_decl(&mut self, node: &swc_experimental_ecma_ast::VarDecl<'a>) {
+        if node.kind == VarDeclKind::Var {
+            for declarator in node.decls.iter() {
+                let (Pat::Ident(binding), Some(initializer)) = (&declarator.name, &declarator.init)
+                else {
+                    continue;
+                };
+                if matches!(initializer, Expr::Fn(_) | Expr::Arrow(_))
+                    && has_compiler_hint(
+                        self.comments,
+                        span_end(binding.id.span),
+                        span_start(initializer.span()),
+                        "NO_SIDE_EFFECTS",
+                    )
+                {
+                    self.names.insert(ident_to_string(&binding.id));
+                }
+            }
+        }
+        node.visit_children_with(self);
+    }
+
+    fn visit_fn_decl(&mut self, _: &FnDecl<'a>) {}
+
+    fn visit_fn_expr(&mut self, _: &FnExpr<'a>) {}
+
     fn visit_arrow_expr(&mut self, _: &ArrowExpr<'a>) {}
 
     fn visit_function(&mut self, _: &Function<'a>) {}
 
-    fn visit_fn_expr(&mut self, _: &FnExpr<'a>) {}
+    fn visit_class_decl(&mut self, _: &ClassDecl<'a>) {}
 
-    fn visit_call_expr(&mut self, expression: &CallExpr<'a>) {
-        let is_pure = match &expression.callee {
-            Callee::Expr(callee) => match &**callee {
-                Expr::Ident(identifier) => {
-                    self.pure_functions.contains(&ident_to_string(identifier))
-                }
-                _ => false,
-            },
-            _ => false,
-        };
-        if !is_pure {
-            self.has_side_effects = true;
-            return;
+    fn visit_class_expr(&mut self, _: &ClassExpr<'a>) {}
+}
+
+fn has_compiler_hint(
+    comments: &Comments<'_>,
+    range_start: usize,
+    range_end: usize,
+    hint: &str,
+) -> bool {
+    if range_start >= range_end {
+        return false;
+    }
+    comments
+        .leading
+        .values()
+        .chain(comments.trailing.values())
+        .flatten()
+        .any(|comment| {
+            comment.kind == swc_experimental_ecma_ast::CommentKind::Block
+                && span_start(comment.span) >= range_start
+                && span_end(comment.span) <= range_end
+                && compiler_hint_matches(comment.text.as_str(), hint)
+        })
+}
+
+fn compiler_hint_matches(comment: &str, hint: &str) -> bool {
+    let comment = comment.trim();
+    match hint {
+        "PURE" => matches!(comment, "#__PURE__" | "@__PURE__"),
+        "NO_SIDE_EFFECTS" => {
+            matches!(comment, "#__NO_SIDE_EFFECTS__" | "@__NO_SIDE_EFFECTS__")
         }
-        for argument in expression.args.iter() {
-            argument.expr.visit_with(self);
-        }
-    }
-
-    fn visit_new_expr(&mut self, _: &NewExpr<'a>) {
-        self.has_side_effects = true;
-    }
-
-    fn visit_assign_expr(&mut self, _: &AssignExpr<'a>) {
-        self.has_side_effects = true;
-    }
-
-    fn visit_update_expr(&mut self, _: &UpdateExpr<'a>) {
-        self.has_side_effects = true;
-    }
-
-    fn visit_await_expr(&mut self, _: &AwaitExpr<'a>) {
-        self.has_side_effects = true;
-    }
-
-    fn visit_yield_expr(&mut self, _: &YieldExpr<'a>) {
-        self.has_side_effects = true;
-    }
-
-    fn visit_tagged_tpl(&mut self, _: &TaggedTpl<'a>) {
-        self.has_side_effects = true;
+        _ => false,
     }
 }
 
-fn no_side_effects_functions(source: &str) -> HashSet<String> {
-    let annotation = r"/\*[#@]__NO_SIDE_EFFECTS__\*/";
-    let identifier = r"([A-Za-z_$][A-Za-z0-9_$]*)";
-    let before_declaration = Regex::new(&format!(
-        r"(?s){annotation}\s*(?:function\s+{identifier}|(?:const|let|var)\s+{identifier})"
-    ))
-    .expect("NO_SIDE_EFFECTS declaration regex must compile");
-    let inside_initializer = Regex::new(&format!(
-        r"(?s)(?:const|let|var)\s+{identifier}\s*=\s*{annotation}"
-    ))
-    .expect("NO_SIDE_EFFECTS initializer regex must compile");
-    let mut names = HashSet::new();
-    for captures in before_declaration.captures_iter(source) {
-        if let Some(name) = captures.get(1).or_else(|| captures.get(2)) {
-            names.insert(name.as_str().to_string());
+struct PureFunctionCallCollector<'comments, 'arena, 'functions> {
+    comments: &'comments Comments<'arena>,
+    pure_functions: &'functions HashSet<String>,
+    scopes: Vec<HashMap<String, bool>>,
+    calls: HashSet<u32>,
+}
+
+impl<'comments, 'arena, 'functions> PureFunctionCallCollector<'comments, 'arena, 'functions> {
+    fn new(
+        comments: &'comments Comments<'arena>,
+        pure_functions: &'functions HashSet<String>,
+    ) -> Self {
+        Self {
+            comments,
+            pure_functions,
+            scopes: Vec::new(),
+            calls: HashSet::new(),
         }
     }
-    for captures in inside_initializer.captures_iter(source) {
-        if let Some(name) = captures.get(1) {
-            names.insert(name.as_str().to_string());
+
+    fn push_scope(&mut self, bindings: HashMap<String, bool>) {
+        self.scopes.push(bindings);
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn is_pure_binding(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+            .unwrap_or_else(|| self.pure_functions.contains(name))
+    }
+}
+
+impl<'a> Visit<'a> for PureFunctionCallCollector<'_, '_, '_> {
+    fn visit_block_stmt(&mut self, node: &BlockStmt<'a>) {
+        self.push_scope(direct_statement_bindings(
+            self.comments,
+            node.stmts.iter(),
+            span_start(node.span),
+        ));
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
+
+    fn visit_fn_decl(&mut self, _: &FnDecl<'a>) {}
+
+    fn visit_fn_expr(&mut self, _: &FnExpr<'a>) {}
+
+    fn visit_arrow_expr(&mut self, _: &ArrowExpr<'a>) {}
+
+    fn visit_class_expr(&mut self, node: &ClassExpr<'a>) {
+        let mut bindings = HashMap::new();
+        if let Some(identifier) = &node.ident {
+            bindings.insert(ident_to_string(identifier), false);
+        }
+        self.push_scope(bindings);
+        node.class.visit_with(self);
+        self.pop_scope();
+    }
+
+    fn visit_for_stmt(&mut self, node: &swc_experimental_ecma_ast::ForStmt<'a>) {
+        let bindings = match &node.init {
+            Some(VarDeclOrExpr::VarDecl(declaration)) => variable_scope_bindings(
+                self.comments,
+                declaration,
+                span_start(node.span),
+                span_start(declaration.span),
+            ),
+            _ => HashMap::new(),
+        };
+        self.push_scope(bindings);
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
+
+    fn visit_for_in_stmt(&mut self, node: &swc_experimental_ecma_ast::ForInStmt<'a>) {
+        self.visit_for_head_scope(&node.left, |collector| node.visit_children_with(collector));
+    }
+
+    fn visit_for_of_stmt(&mut self, node: &swc_experimental_ecma_ast::ForOfStmt<'a>) {
+        self.visit_for_head_scope(&node.left, |collector| node.visit_children_with(collector));
+    }
+
+    fn visit_switch_stmt(&mut self, node: &swc_experimental_ecma_ast::SwitchStmt<'a>) {
+        let mut bindings = HashMap::new();
+        for case in node.cases.iter() {
+            bindings.extend(direct_statement_bindings(
+                self.comments,
+                case.cons.iter(),
+                span_start(case.span),
+            ));
+        }
+        self.push_scope(bindings);
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
+
+    fn visit_call_expr(&mut self, node: &CallExpr<'a>) {
+        if let Callee::Expr(callee) = &node.callee
+            && let Expr::Ident(identifier) = &**callee
+            && self.is_pure_binding(identifier.sym.as_str())
+        {
+            self.calls.insert(node.span.start);
+        }
+        node.visit_children_with(self);
+    }
+}
+
+impl PureFunctionCallCollector<'_, '_, '_> {
+    fn visit_for_head_scope<'a>(
+        &mut self,
+        head: &swc_experimental_ecma_ast::ForHead<'a>,
+        visit: impl FnOnce(&mut Self),
+    ) {
+        let mut bindings = HashMap::new();
+        match head {
+            swc_experimental_ecma_ast::ForHead::VarDecl(declaration) => {
+                bindings.extend(variable_scope_bindings(
+                    self.comments,
+                    declaration,
+                    span_start(declaration.span),
+                    span_start(declaration.span),
+                ));
+            }
+            swc_experimental_ecma_ast::ForHead::Pat(pattern) => {
+                let mut names = HashSet::new();
+                add_pat_bindings(pattern, &mut names);
+                bindings.extend(names.into_iter().map(|name| (name, false)));
+            }
+            swc_experimental_ecma_ast::ForHead::UsingDecl(declaration) => {
+                for declarator in declaration.decls.iter() {
+                    let mut names = HashSet::new();
+                    add_pat_bindings(&declarator.name, &mut names);
+                    bindings.extend(names.into_iter().map(|name| (name, false)));
+                }
+            }
+        }
+        self.push_scope(bindings);
+        visit(self);
+        self.pop_scope();
+    }
+}
+
+fn direct_statement_bindings<'a>(
+    comments: &Comments<'_>,
+    statements: impl Iterator<Item = &'a Stmt<'a>>,
+    mut comments_start: usize,
+) -> HashMap<String, bool> {
+    let mut bindings = HashMap::new();
+    for statement in statements {
+        if let Stmt::Decl(declaration) = statement {
+            match &**declaration {
+                Decl::Fn(function) => {
+                    bindings.insert(
+                        ident_to_string(&function.ident),
+                        has_compiler_hint(
+                            comments,
+                            comments_start,
+                            span_start(statement.span()),
+                            "NO_SIDE_EFFECTS",
+                        ),
+                    );
+                }
+                Decl::Class(class) => {
+                    bindings.insert(ident_to_string(&class.ident), false);
+                }
+                Decl::Var(declaration) => {
+                    bindings.extend(variable_scope_bindings(
+                        comments,
+                        declaration,
+                        comments_start,
+                        span_start(statement.span()),
+                    ));
+                }
+                Decl::Using(declaration) => {
+                    for declarator in declaration.decls.iter() {
+                        let mut names = HashSet::new();
+                        add_pat_bindings(&declarator.name, &mut names);
+                        bindings.extend(names.into_iter().map(|name| (name, false)));
+                    }
+                }
+            }
+        }
+        comments_start = span_end(statement.span());
+    }
+    bindings
+}
+
+fn variable_scope_bindings(
+    comments: &Comments<'_>,
+    declaration: &swc_experimental_ecma_ast::VarDecl<'_>,
+    comments_start: usize,
+    statement_start: usize,
+) -> HashMap<String, bool> {
+    let mut bindings = HashMap::new();
+    if declaration.kind == VarDeclKind::Var {
+        return bindings;
+    }
+    for declarator in declaration.decls.iter() {
+        let mut names = HashSet::new();
+        add_pat_bindings(&declarator.name, &mut names);
+        bindings.extend(names.into_iter().map(|name| (name, false)));
+
+        let (Pat::Ident(binding), Some(initializer)) = (&declarator.name, &declarator.init) else {
+            continue;
+        };
+        if !matches!(initializer, Expr::Fn(_) | Expr::Arrow(_)) {
+            continue;
+        }
+        let before_declaration = declaration.kind == VarDeclKind::Const
+            && has_compiler_hint(comments, comments_start, statement_start, "NO_SIDE_EFFECTS");
+        let before_initializer = has_compiler_hint(
+            comments,
+            span_end(binding.id.span),
+            span_start(initializer.span()),
+            "NO_SIDE_EFFECTS",
+        );
+        if before_declaration || before_initializer {
+            bindings.insert(ident_to_string(&binding.id), true);
         }
     }
-    names
+    bindings
 }
 
 fn parse_module_dependencies_sync(path: &Path, source: &str) -> Result<ParsedModule> {
@@ -936,5 +1717,118 @@ fn lit_span(lit: &Lit<'_>) -> swc_experimental_ecma_ast::Span {
         Lit::Num(lit) => lit.span,
         Lit::BigInt(lit) => lit.span,
         Lit::Regex(lit) => lit.span,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::source_is_side_effect_free;
+
+    fn is_pure(source: &str) -> bool {
+        source_is_side_effect_free(Path::new("module.js"), source)
+    }
+
+    #[test]
+    fn pure_annotations_cover_calls_construction_and_tagged_templates() {
+        assert!(is_pure("const value = /*#__PURE__*/ factory();"));
+        assert!(is_pure("const value = /*#__PURE__*/ (factory());"));
+        assert!(is_pure("const value = /*@__PURE__*/ new Factory();"));
+        assert!(is_pure("const value = /*#__PURE__*/ tag`value ${1}`;"));
+
+        assert!(!is_pure(
+            "const value = /*#__PURE__*/ factory(sideEffect());"
+        ));
+        assert!(!is_pure(
+            "const value = /*#__PURE__*/ tag`value ${sideEffect()}`;"
+        ));
+        assert!(!is_pure("const value = `/*#__PURE__*/ ${sideEffect()}`;"));
+        assert!(!is_pure(
+            "const value = /* explanation\n#__PURE__*/ factory();"
+        ));
+    }
+
+    #[test]
+    fn no_side_effects_annotations_apply_only_to_function_bindings() {
+        assert!(is_pure(
+            "/*#__NO_SIDE_EFFECTS__*/ const fn1 = () => 1; fn1();"
+        ));
+        assert!(is_pure(
+            "let fn2 = /*@__NO_SIDE_EFFECTS__*/ () => 2; fn2();"
+        ));
+        assert!(is_pure(
+            "/*#__NO_SIDE_EFFECTS__*/ const fn3 = () => 3; { const fn3 = () => 4; } fn3();"
+        ));
+        assert!(is_pure(
+            "{ /*#__NO_SIDE_EFFECTS__*/ const nested = () => 4; nested(); }"
+        ));
+        assert!(is_pure(
+            "/*#__NO_SIDE_EFFECTS__*/ function fn4() {} { var fn4; fn4(); }"
+        ));
+        assert!(is_pure(
+            "{ var nestedVar = /*@__NO_SIDE_EFFECTS__*/ () => 5; nestedVar(); }"
+        ));
+
+        assert!(!is_pure(
+            "/*#__NO_SIDE_EFFECTS__*/ const value = 1; value();"
+        ));
+        assert!(!is_pure(
+            "/*#__NO_SIDE_EFFECTS__*/ let fn5 = () => 5; fn5();"
+        ));
+        assert!(!is_pure(
+            "/*#__NO_SIDE_EFFECTS__*/ const fn6 = () => 6; { const fn6 = () => 7; fn6(); }"
+        ));
+        assert!(!is_pure(
+            "/* explanation\n#__NO_SIDE_EFFECTS__*/ const fn7 = () => 7; fn7();"
+        ));
+        assert!(!is_pure(
+            "const object = { method() { var leaked = /*#__NO_SIDE_EFFECTS__*/ () => 1; } }; const leaked = () => sideEffect(); leaked();"
+        ));
+    }
+
+    #[test]
+    fn pure_analysis_models_values_without_invoking_user_code() {
+        assert!(is_pure(
+            "const value = [1, { key: `value ${2}` }, flag ? 3 : 4];"
+        ));
+        assert!(is_pure("const value = typeof input === 'undefined';"));
+        assert!(is_pure("const value = 1 + 2;"));
+        assert!(is_pure("const value = 1n / 1n;"));
+        assert!(is_pure("const value = 1n / (1n);"));
+        assert!(is_pure("const value = 2n ** 3n;"));
+        assert!(is_pure("const value = 2n ** (3n);"));
+
+        assert!(!is_pure("const value = [...items];"));
+        assert!(!is_pure("const value = { ...items };"));
+        assert!(!is_pure("const value = object.property;"));
+        assert!(!is_pure("const value = object + 1;"));
+        assert!(!is_pure("const value = 1n + 1;"));
+        assert!(!is_pure("const value = 1n / 0n;"));
+        assert!(!is_pure("const value = 4n % 2n;"));
+        assert!(!is_pure("const value = 2n ** -1n;"));
+    }
+
+    #[test]
+    fn class_analysis_only_checks_definition_time_effects() {
+        assert!(is_pure(
+            "class Deferred { field = sideEffect(); method() { sideEffect(); } }"
+        ));
+        assert!(!is_pure("class Derived extends Base { constructor() {} }"));
+        assert!(!is_pure("class Immediate { static field = sideEffect(); }"));
+        assert!(!is_pure("class Immediate { static { sideEffect(); } }"));
+        assert!(!is_pure("class Computed { [sideEffect()]() {} }"));
+    }
+
+    #[test]
+    fn top_level_control_flow_is_pure_when_its_executed_parts_are_pure() {
+        assert!(is_pure("if (flag) { const value = 1; }"));
+        assert!(is_pure("while (false) { const value = 1; }"));
+        assert!(is_pure("for (let index = 0; index !== 0; index) {}"));
+        assert!(is_pure("switch (value) { case sideEffect(): }"));
+
+        assert!(!is_pure("if (sideEffect()) {}"));
+        assert!(!is_pure("if (flag) { sideEffect(); }"));
+        assert!(!is_pure("for (sideEffect(); false;) {}"));
     }
 }

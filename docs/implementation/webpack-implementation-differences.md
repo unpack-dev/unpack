@@ -27,6 +27,8 @@ Unpack currently runs a compact Rust pipeline with a webpack-shaped sealing boun
    2. assign render IDs
    3. generate one result per module
    4. create assets
+3. awaited JavaScript `processAssets`
+4. emit assets
 
 Webpack's lifecycle is much larger: `Compiler.run` guards concurrent runs, calls run hooks, reads records, compiles, emits assets, emits records, stores build dependencies, and returns `Stats`. `Compiler.compile` creates normal and context module factories, runs make hooks, finishes the compilation, seals it, and then runs after-compile hooks.
 
@@ -50,6 +52,27 @@ a raw pointer concurrently. Purely materialized JavaScript records remain
 ordinary values. The final native graph is then rebound to the same JavaScript
 `Compilation`; already materialized connection targets are refreshed by handle
 and phase-dependent caches are invalidated in place.
+
+Generated assets use the same ownership-handoff pattern at the
+`processAssets` boundary. Rust moves the asset vector into a phase-scoped Node
+lease after `seal`; JavaScript materializes webpack `Source` values only when a
+plugin actually taps the hook, runs taps serially, and returns the updated asset
+set before output is written. This keeps asset mutation lock-free and prevents
+Rust emission from racing asynchronous plugin work. The supported façade
+includes the assets argument, `Compilation.assets`, `emitAsset`, `updateAsset`,
+and `getAsset`. Mutations made through the façade before `processAssets` are
+staged and merged when generated assets cross the host boundary. Unlike
+webpack, emitting different content to an existing filename currently uses the
+latest Source without adding a Compilation error; source-map metadata and the
+rest of webpack's Asset Info API remain outside this slice.
+
+The root Rust `CompilationHooks` trait is an object-safe host-transport seam
+owned by `CompilerOptions`, not an implementation of webpack's individual Hook
+classes. It aggregates the Node callbacks needed to pause the compiler at
+`compilation`, `finishModules`, and `processAssets`; the public hook objects and
+ordering behavior remain on the JavaScript `Compiler` and `Compilation`
+facades. This Rust-specific aggregate keeps N-API transport out of the core
+Compilation module.
 
 ## Cache layout
 

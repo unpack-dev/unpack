@@ -11,7 +11,7 @@ use std::{
 
 use napi::{
     Result, Status,
-    bindgen_prelude::{Either, FnArgs, Function, Promise},
+    bindgen_prelude::{Buffer, Either, FnArgs, Function, Promise},
     threadsafe_function::ThreadsafeFunction,
 };
 use napi_derive::napi;
@@ -182,6 +182,12 @@ pub struct NativeAsset {
 }
 
 #[napi(object)]
+pub struct NativeAssetSource {
+    pub name: String,
+    pub source: Buffer,
+}
+
+#[napi(object)]
 pub struct NativeStatsJson {
     pub errors: Vec<NativeStatsError>,
     pub warnings: Vec<NativeStatsError>,
@@ -264,6 +270,7 @@ pub struct NativeRunResult {
 pub struct NativeCompilation {
     module_graph: NativeModuleGraph,
     chunk_graph: unpack_core::ChunkGraph,
+    assets: Vec<Asset>,
 }
 
 enum NativeModuleGraph {
@@ -328,6 +335,16 @@ impl NativeCompilation {
             .iter()
             .map(native_module)
             .collect())
+    }
+
+    #[napi(js_name = "takeAssetSources")]
+    pub fn take_asset_sources(&mut self) -> Vec<NativeAssetSource> {
+        native_asset_sources(std::mem::take(&mut self.assets))
+    }
+
+    #[napi(js_name = "clearAssetSources")]
+    pub fn clear_asset_sources(&mut self) {
+        self.assets.clear();
     }
 
     #[napi(js_name = "outgoingConnections")]
@@ -440,6 +457,78 @@ impl NativeCompilation {
     }
 }
 
+#[napi]
+pub struct NativeAssets {
+    state: NativeAssetsState,
+}
+
+enum NativeAssetsState {
+    Leased {
+        assets: Vec<Asset>,
+        return_sender: tokio::sync::oneshot::Sender<Vec<Asset>>,
+    },
+    Released,
+}
+
+impl NativeAssets {
+    fn assets_mut(&mut self) -> Result<&mut Vec<Asset>> {
+        match &mut self.state {
+            NativeAssetsState::Leased { assets, .. } => Ok(assets),
+            NativeAssetsState::Released => Err(napi::Error::from_reason(
+                "native assets lease has been released",
+            )),
+        }
+    }
+
+    fn return_lease(&mut self) -> Result<()> {
+        let state = std::mem::replace(&mut self.state, NativeAssetsState::Released);
+        let NativeAssetsState::Leased {
+            assets,
+            return_sender,
+        } = state
+        else {
+            return Err(napi::Error::from_reason(
+                "native assets lease has already been released",
+            ));
+        };
+        return_sender
+            .send(assets)
+            .map_err(|_| napi::Error::from_reason("native assets lease receiver was dropped"))
+    }
+}
+
+impl Drop for NativeAssets {
+    fn drop(&mut self) {
+        let state = std::mem::replace(&mut self.state, NativeAssetsState::Released);
+        if let NativeAssetsState::Leased {
+            assets,
+            return_sender,
+        } = state
+        {
+            let _ = return_sender.send(assets);
+        }
+    }
+}
+
+#[napi]
+impl NativeAssets {
+    #[napi(js_name = "takeAssetSources")]
+    pub fn take_asset_sources(&mut self) -> Result<Vec<NativeAssetSource>> {
+        Ok(native_asset_sources(std::mem::take(self.assets_mut()?)))
+    }
+
+    #[napi(js_name = "replaceAssetSources")]
+    pub fn replace_asset_sources(&mut self, assets: Vec<NativeAssetSource>) -> Result<()> {
+        *self.assets_mut()? = assets.into_iter().map(asset_from_native).collect();
+        Ok(())
+    }
+
+    #[napi(js_name = "returnAssetsLease")]
+    pub fn return_assets_lease(&mut self) -> Result<()> {
+        self.return_lease()
+    }
+}
+
 #[napi(object)]
 pub struct NativeFlushResult {
     pub error: Option<NativeInfrastructureError>,
@@ -454,6 +543,7 @@ pub fn create_compiler(
     >,
     compilation_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
     finish_modules_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
+    process_assets_callback: Option<Function<'_, NativeAssets, Promise<()>>>,
 ) -> Result<NativeCompiler> {
     init_internal_tracing_from_env();
     NativeCompiler::new(
@@ -461,6 +551,7 @@ pub fn create_compiler(
         loader_callback,
         compilation_callback,
         finish_modules_callback,
+        process_assets_callback,
     )
 }
 
@@ -512,10 +603,13 @@ impl LoaderRunner for NativeLoaderRunner {
 
 type NativeFinishModulesCallback =
     ThreadsafeFunction<NativeCompilation, Promise<()>, NativeCompilation, Status, false, true>;
+type NativeProcessAssetsCallback =
+    ThreadsafeFunction<NativeAssets, Promise<()>, NativeAssets, Status, false, true>;
 
 struct NativeCompilationHooks {
     compilation: Arc<NativeFinishModulesCallback>,
     finish_modules: Arc<NativeFinishModulesCallback>,
+    process_assets: Arc<NativeProcessAssetsCallback>,
 }
 
 impl std::fmt::Debug for NativeCompilationHooks {
@@ -535,6 +629,13 @@ impl CompilationHooks for NativeCompilationHooks {
     ) -> HookFuture<'a> {
         call_finish_modules_hook(Arc::clone(&self.finish_modules), compilation)
     }
+
+    fn process_assets<'a>(
+        &'a self,
+        compilation: &'a mut unpack_core::Compilation,
+    ) -> HookFuture<'a> {
+        call_process_assets_hook(Arc::clone(&self.process_assets), compilation)
+    }
 }
 
 fn call_compilation_hook<'a>(
@@ -544,6 +645,7 @@ fn call_compilation_hook<'a>(
     let native_compilation = NativeCompilation {
         module_graph: NativeModuleGraph::Owned(unpack_core::ModuleGraph::default()),
         chunk_graph: unpack_core::ChunkGraph::default(),
+        assets: Vec::new(),
     };
     Box::pin(async move {
         let promise = callback
@@ -570,6 +672,7 @@ fn call_finish_modules_hook<'a>(
             return_sender,
         },
         chunk_graph: unpack_core::ChunkGraph::default(),
+        assets: Vec::new(),
     };
     Box::pin(async move {
         let callback_result = match callback.call_async_catch(native_compilation).await {
@@ -585,6 +688,36 @@ fn call_finish_modules_hook<'a>(
             message: format!("finishModules did not return the module graph lease: {error}"),
         })?;
         compilation.restore_module_graph(module_graph);
+        callback_result
+    })
+}
+
+fn call_process_assets_hook<'a>(
+    callback: Arc<NativeProcessAssetsCallback>,
+    compilation: &'a mut unpack_core::Compilation,
+) -> HookFuture<'a> {
+    let assets = compilation.take_assets();
+    let (return_sender, return_receiver) = tokio::sync::oneshot::channel();
+    let native_assets = NativeAssets {
+        state: NativeAssetsState::Leased {
+            assets,
+            return_sender,
+        },
+    };
+    Box::pin(async move {
+        let callback_result = match callback.call_async_catch(native_assets).await {
+            Ok(promise) => promise.await.map_err(|error| CoreError::Hook {
+                message: error.to_string(),
+            }),
+            Err(error) => Err(CoreError::Hook {
+                message: error.to_string(),
+            }),
+        };
+
+        let assets = return_receiver.await.map_err(|error| CoreError::Hook {
+            message: format!("processAssets did not return the assets lease: {error}"),
+        })?;
+        compilation.restore_assets(assets);
         callback_result
     })
 }
@@ -676,6 +809,7 @@ impl NativeCompiler {
         >,
         compilation_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
         finish_modules_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
+        process_assets_callback: Option<Function<'_, NativeAssets, Promise<()>>>,
     ) -> Result<Self> {
         let context = PathBuf::from(&options.context);
         let output_path = PathBuf::from(&options.output_path);
@@ -736,22 +870,31 @@ impl NativeCompiler {
             .transpose()?;
         compiler_options.compilation_hooks = compilation_callback
             .zip(finish_modules_callback)
-            .map(|(compilation_callback, finish_modules_callback)| {
-                let compilation: NativeFinishModulesCallback = compilation_callback
-                    .build_threadsafe_function()
-                    .callee_handled::<false>()
-                    .weak::<true>()
-                    .build()?;
-                let finish_modules: NativeFinishModulesCallback = finish_modules_callback
-                    .build_threadsafe_function()
-                    .callee_handled::<false>()
-                    .weak::<true>()
-                    .build()?;
-                Ok::<Arc<dyn CompilationHooks>, napi::Error>(Arc::new(NativeCompilationHooks {
-                    compilation: Arc::new(compilation),
-                    finish_modules: Arc::new(finish_modules),
-                }))
-            })
+            .zip(process_assets_callback)
+            .map(
+                |((compilation_callback, finish_modules_callback), process_assets_callback)| {
+                    let compilation: NativeFinishModulesCallback = compilation_callback
+                        .build_threadsafe_function()
+                        .callee_handled::<false>()
+                        .weak::<true>()
+                        .build()?;
+                    let finish_modules: NativeFinishModulesCallback = finish_modules_callback
+                        .build_threadsafe_function()
+                        .callee_handled::<false>()
+                        .weak::<true>()
+                        .build()?;
+                    let process_assets: NativeProcessAssetsCallback = process_assets_callback
+                        .build_threadsafe_function()
+                        .callee_handled::<false>()
+                        .weak::<true>()
+                        .build()?;
+                    Ok::<Arc<dyn CompilationHooks>, napi::Error>(Arc::new(NativeCompilationHooks {
+                        compilation: Arc::new(compilation),
+                        finish_modules: Arc::new(finish_modules),
+                        process_assets: Arc::new(process_assets),
+                    }))
+                },
+            )
             .transpose()?;
         let compiler = Compiler::new(compiler_options);
 
@@ -963,7 +1106,7 @@ async fn run_compiler_inner(
         output_path: output_path.to_string_lossy().into_owned(),
         watch_dependencies: watch_dependencies(compilation.watch_dependencies()),
     };
-    let (module_graph, chunk_graph) = compilation.into_graphs();
+    let (module_graph, chunk_graph, assets) = compilation.into_parts();
 
     NativeRunResult {
         error: None,
@@ -971,6 +1114,7 @@ async fn run_compiler_inner(
         compilation: Some(NativeCompilation {
             module_graph: NativeModuleGraph::Owned(module_graph),
             chunk_graph,
+            assets,
         }),
         logs,
     }
@@ -1187,6 +1331,31 @@ fn asset_stats(asset: &Asset) -> NativeAsset {
     NativeAsset {
         name: asset.filename.clone(),
         size: asset.source_bytes().len().try_into().unwrap_or(u32::MAX),
+    }
+}
+
+fn native_asset_sources(assets: Vec<Asset>) -> Vec<NativeAssetSource> {
+    assets
+        .into_iter()
+        .map(|asset| NativeAssetSource {
+            name: asset.filename,
+            source: Buffer::from(
+                asset
+                    .binary_source
+                    .unwrap_or_else(|| asset.source.into_bytes()),
+            ),
+        })
+        .collect()
+}
+
+fn asset_from_native(asset: NativeAssetSource) -> Asset {
+    let bytes = asset.source.to_vec();
+    let source = String::from_utf8_lossy(&bytes).into_owned();
+    let binary_source = std::str::from_utf8(&bytes).is_err().then_some(bytes);
+    Asset {
+        filename: asset.name,
+        source,
+        binary_source,
     }
 }
 

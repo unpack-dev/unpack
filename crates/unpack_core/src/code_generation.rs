@@ -38,7 +38,7 @@ impl Asset {
     pub fn source_bytes(&self) -> &[u8] {
         self.binary_source
             .as_deref()
-            .unwrap_or_else(|| self.source.as_bytes())
+            .unwrap_or(self.source.as_bytes())
     }
 }
 

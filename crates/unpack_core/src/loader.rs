@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/NormalModule.js
+
 use std::{
     fmt::Debug,
     future::Future,
@@ -14,6 +16,7 @@ pub struct ModuleRule {
     test: Regex,
     loader: PathBuf,
     options: String,
+    side_effects: Option<bool>,
 }
 
 impl ModuleRule {
@@ -26,7 +29,17 @@ impl ModuleRule {
             test: Regex::new(test)?,
             loader: loader.into(),
             options: options.into(),
+            side_effects: None,
         })
+    }
+
+    pub fn with_side_effects(mut self, side_effects: Option<bool>) -> Self {
+        self.side_effects = side_effects;
+        self
+    }
+
+    pub(crate) fn side_effects(&self) -> Option<bool> {
+        self.side_effects
     }
 
     pub(crate) fn matches(&self, resource: &Path) -> bool {

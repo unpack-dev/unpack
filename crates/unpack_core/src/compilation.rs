@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Compilation.js
+
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use tokio::sync::Mutex;
@@ -5,8 +7,8 @@ use tokio::sync::Mutex;
 use crate::{
     Asset, ChunkGraph, CompilerOptions, Error, InfrastructureLogEvent, InfrastructureLogLevel,
     ModuleGraph, ModuleHandle, Result, UnpackResolver,
-    build_cache::BuildCache,
     build_chunk_graph::build_chunk_graph_with_cache,
+    cache::BuildCache,
     code_generation::{self, CodeGenerationResults, RenderManifest},
     id_assignment::{assign_chunk_render_ids, assign_module_render_ids},
     make::{self, MakeState},

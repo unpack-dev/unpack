@@ -33,6 +33,31 @@ Necessity:
   results deliberately belong to one `Compilation`; they are not a persistent
   cache boundary.
 
+## Cache layout
+
+Unpack's top-level `cache` and `cache_facade` modules map to webpack's root
+`Cache.js` and `CacheFacade.js` responsibilities. Memory Cache Plugin, Memory
+With GC Cache Plugin, and Pack File Cache Strategy implementations live in
+separate modules below the `cache` category. The private `BuildCache`
+composition helper coordinates Compiler lifecycle, while Cache Items, options,
+and Pack File storage remain Rust-only helpers colocated with the webpack
+responsibility that owns them. There is no separate `build_cache` source
+hierarchy.
+
+Webpack wires these responsibilities through plugins and Tapable hooks. Unpack
+keeps its existing typed layers, explicit lifecycle methods, and closed Cache
+Item families under ADR 0131; the different Rust representation is deliberate,
+while the directory and file boundaries remain webpack-locatable.
+
+This layout change covers the cache-category alignment tracked by issue #217.
+The first serialization-layout slice moves generic Serializer identity,
+registration, type erasure, bounded encoding, and typed decoding into
+`serialization/serializer.rs`. Pack File record codecs remain beside their
+format-specific DTOs, and binary framing plus index persistence remain in the
+private Pack File storage module until later slices establish the corresponding
+Binary Middleware and File Middleware boundaries. The private format and codec
+behavior do not change during these physical moves.
+
 ## Normal module factory
 
 Unpack's `NormalModuleFactory` resolves a dependency request, matches the
@@ -72,6 +97,14 @@ Necessity:
 ## Dependency model and parser
 
 Unpack uses a minimal webpack-like dependency set for ESM imports, exports, re-exports, and static-string dynamic imports. It stores normal dependencies, async dependency blocks, and presentational dependencies separately, and code generation applies dependency templates to `rspack_sources` replacement sources.
+
+The closed `Dependency` enum remains at the top-level webpack `Dependency`
+boundary. `AsyncDependenciesBlock` and `ModuleGraphConnection` each have their
+own top-level modules, while implemented concrete dependency payloads live in
+the `dependencies` category with one webpack-corresponding module per upstream
+class. Public crate re-exports preserve the existing Rust API; the physical
+split is an ownership and navigation boundary rather than a new extension
+surface.
 
 Webpack supports a much wider parser surface: CommonJS, AMD, `import.meta`, context imports, dynamic import modes, magic comments, import attributes, weak/eager imports, deferred/source import phases, referenced-export tracking, branch guards, and detailed export presence behavior.
 

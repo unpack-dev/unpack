@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/webpack.js
+
 import { createRequire } from "node:module";
 import { statSync, watch as watchFileSystem } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -27,6 +29,7 @@ export interface ExperimentsOptions {
 export interface OptimizationOptions {
   providedExports?: boolean;
   usedExports?: boolean | "global";
+  sideEffects?: boolean | "flag";
 }
 
 export interface ModuleOptions {
@@ -37,6 +40,7 @@ export interface ModuleRule {
   test: RegExp;
   loader: string;
   options?: Record<string, unknown>;
+  sideEffects?: boolean;
 }
 
 export type Mode = "development" | "production" | "none";
@@ -340,12 +344,14 @@ interface NormalizedOptions {
   moduleRules: NormalizedModuleRule[];
   providedExports: boolean;
   usedExports: boolean;
+  sideEffects: "disabled" | "flag" | "analyze";
 }
 
 interface NormalizedModuleRule {
   test: string;
   loader: string;
   options: string;
+  sideEffects?: boolean;
 }
 
 interface NormalizedCacheOptions {
@@ -2286,7 +2292,8 @@ function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
     moduleRules,
     providedExports: optimization.providedExports,
-    usedExports: optimization.usedExports
+    usedExports: optimization.usedExports,
+    sideEffects: optimization.sideEffects
   };
 }
 
@@ -2307,12 +2314,16 @@ function normalizeExperimentsOptions(experiments: ExperimentsOptions | undefined
 function normalizeOptimizationOptions(
   optimization: OptimizationOptions | undefined,
   mode: Mode
-): { providedExports: boolean; usedExports: boolean } {
+): { providedExports: boolean; usedExports: boolean; sideEffects: "disabled" | "flag" | "analyze" } {
   if (optimization === undefined) {
-    return { providedExports: true, usedExports: mode === "production" };
+    return {
+      providedExports: true,
+      usedExports: mode === "production",
+      sideEffects: mode === "production" ? "analyze" : "flag"
+    };
   }
   assertPlainObject(optimization, "options.optimization");
-  assertKnownKeys(optimization, ["providedExports", "usedExports"], "options.optimization");
+  assertKnownKeys(optimization, ["providedExports", "usedExports", "sideEffects"], "options.optimization");
   return {
     providedExports: optimization.providedExports === undefined
       ? true
@@ -2321,7 +2332,14 @@ function normalizeOptimizationOptions(
       ? mode === "production"
       : optimization.usedExports === "global"
         ? true
-        : assertBoolean(optimization.usedExports, "options.optimization.usedExports")
+        : assertBoolean(optimization.usedExports, "options.optimization.usedExports"),
+    sideEffects: optimization.sideEffects === undefined
+      ? mode === "production" ? "analyze" : "flag"
+      : optimization.sideEffects === "flag"
+        ? "flag"
+        : assertBoolean(optimization.sideEffects, "options.optimization.sideEffects")
+          ? "analyze"
+          : "disabled"
   };
 }
 
@@ -2335,7 +2353,7 @@ function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedMo
   return module.rules.map((rule, index) => {
     const name = `options.module.rules[${index}]`;
     assertPlainObject(rule, name);
-    assertKnownKeys(rule, ["test", "loader", "options"], name);
+    assertKnownKeys(rule, ["test", "loader", "options", "sideEffects"], name);
     if (!(rule.test instanceof RegExp)) {
       throw new TypeError(`${name}.test must be a RegExp`);
     }
@@ -2354,7 +2372,10 @@ function normalizeModuleOptions(module: ModuleOptions | undefined): NormalizedMo
     } catch {
       throw new TypeError(`${name}.options must be JSON-serializable`);
     }
-    return { test: rule.test.source, loader, options: serializedOptions };
+    const sideEffects = rule.sideEffects === undefined
+      ? undefined
+      : assertBoolean(rule.sideEffects, `${name}.sideEffects`);
+    return { test: rule.test.source, loader, options: serializedOptions, sideEffects };
   });
 }
 

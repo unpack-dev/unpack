@@ -1,3 +1,7 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/cache/PackFileCacheStrategy.js
+
+//! Private Pack File storage used by the Pack File Cache Strategy.
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -14,11 +18,12 @@ mod tests {
         let address = PackFileAddress::new("unpack/resolve", b"issuer:/project/src|request:./dep");
         let etag = PackFileETag::new(b"resolve-inputs-v1");
         let record = resolve_record("dep.js");
-        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let serializer =
+            Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current());
 
         PackFile::publish_resolve_records(
             temp.path(),
-            &registry,
+            &serializer,
             [(address.clone(), Some(etag.clone()), record.clone())],
         )?;
 
@@ -28,7 +33,7 @@ mod tests {
         assert!(!contains_bytes(&index_bytes, b"schema_version"));
         assert_eq!(RESOLVE_RECORD_TYPE_ID.as_bytes(), b"unpack.resolve.1");
 
-        let mut pack_file = PackFile::open(temp.path(), registry);
+        let mut pack_file = PackFile::open(temp.path(), serializer);
         assert_eq!(pack_file.entry_count(), 1);
         assert_eq!(
             pack_file
@@ -47,10 +52,11 @@ mod tests {
         let first = PackFileAddress::new("unpack/resolve", b"first");
         let second = PackFileAddress::new("unpack/resolve", b"second");
         let etag = PackFileETag::new(b"current");
-        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let serializer =
+            Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current());
         PackFile::publish_resolve_records(
             temp.path(),
-            &registry,
+            &serializer,
             [
                 (
                     first.clone(),
@@ -61,7 +67,7 @@ mod tests {
             ],
         )?;
 
-        let mut pack_file = PackFile::open(temp.path(), registry);
+        let mut pack_file = PackFile::open(temp.path(), serializer);
         assert_eq!(pack_file.entry_count(), 2);
         assert_eq!(
             pack_file.read_stats(),
@@ -104,10 +110,10 @@ mod tests {
         let temp = tempdir()?;
         let first = PackFileAddress::new("unpack/dummy", b"first");
         let second = PackFileAddress::new("unpack/dummy", b"second");
-        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let serializer = Serializer::new().with_codec::<DummyItem, _>(DummyCodec);
         let mut batch = PackFileWriteBatch::new();
-        batch.insert(&registry, first.clone(), None, DummyItem(vec![1; 96]))?;
-        batch.insert(&registry, second.clone(), None, DummyItem(vec![2; 96]))?;
+        batch.insert(&serializer, first.clone(), None, DummyItem(vec![1; 96]))?;
+        batch.insert(&serializer, second.clone(), None, DummyItem(vec![2; 96]))?;
         PackFile::publish_batch_with_options(
             temp.path(),
             None,
@@ -128,7 +134,7 @@ mod tests {
         let pack_size = usize::try_from(first_content.pack_size)?;
 
         let mut reopened =
-            PackFile::open_with_options(temp.path(), registry, PackFileOpenOptions::new(false));
+            PackFile::open_with_options(temp.path(), serializer, PackFileOpenOptions::new(false));
         assert_eq!(
             reopened.get::<DummyItem>(&first, None).as_deref(),
             Some(&DummyItem(vec![1; 96]))
@@ -152,10 +158,10 @@ mod tests {
         let temp = tempdir()?;
         let first = PackFileAddress::new("unpack/dummy", b"first");
         let second = PackFileAddress::new("unpack/dummy", b"second");
-        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let serializer = Serializer::new().with_codec::<DummyItem, _>(DummyCodec);
         let mut batch = PackFileWriteBatch::new();
-        batch.insert(&registry, first.clone(), None, DummyItem(vec![1; 32]))?;
-        batch.insert(&registry, second.clone(), None, DummyItem(vec![2; 32]))?;
+        batch.insert(&serializer, first.clone(), None, DummyItem(vec![1; 32]))?;
+        batch.insert(&serializer, second.clone(), None, DummyItem(vec![2; 32]))?;
         PackFile::publish_batch_with_options(
             temp.path(),
             None,
@@ -181,7 +187,7 @@ mod tests {
             .compression = PackFileCompression::Gzip;
         fs::write(index_path, encode_index(&index)?)?;
 
-        let mut reopened = PackFile::open(temp.path(), registry);
+        let mut reopened = PackFile::open(temp.path(), serializer);
         assert_eq!(
             reopened.get::<DummyItem>(&first, None).as_deref(),
             Some(&DummyItem(vec![1; 32]))
@@ -193,7 +199,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct DummyItem(Vec<u8>);
 
-    impl PackFileItem for DummyItem {
+    impl SerializableItem for DummyItem {
         const TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.dummy.001");
     }
 
@@ -219,10 +225,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
         let address = PackFileAddress::new("unpack/dummy", b"example");
-        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let serializer = Serializer::new().with_codec::<DummyItem, _>(DummyCodec);
         PackFile::publish_items(
             temp.path(),
-            &registry,
+            &serializer,
             [(address.clone(), None, DummyItem(b"payload".to_vec()))],
         )?;
 
@@ -231,7 +237,7 @@ mod tests {
         assert_eq!(index.entries[&address].type_id, DummyItem::TYPE_ID);
         assert_eq!(index.entries[&address].codec_id, DummyCodec.codec_id());
 
-        let mut pack_file = PackFile::open(temp.path(), registry);
+        let mut pack_file = PackFile::open(temp.path(), serializer);
         assert_eq!(
             pack_file.get::<DummyItem>(&address, None).as_deref(),
             Some(&DummyItem(b"payload".to_vec()))
@@ -245,17 +251,17 @@ mod tests {
         let temp = tempdir()?;
         let address = PackFileAddress::new("unpack/module-build", b"module-identity");
         let record = module_build_record();
-        let registry =
-            CodecRegistry::new().with_module_build_record(ModuleBuildRecordCodec::current());
+        let serializer = Serializer::new()
+            .with_codec::<ModuleBuildRecordDto, _>(ModuleBuildRecordCodec::current());
 
         PackFile::publish_module_build_records(
             temp.path(),
-            &registry,
+            &serializer,
             [(address.clone(), None, record.clone())],
         )?;
 
         assert_eq!(MODULE_BUILD_RECORD_TYPE_ID.as_bytes(), b"unpack.moduleb.1");
-        let mut pack_file = PackFile::open(temp.path(), registry);
+        let mut pack_file = PackFile::open(temp.path(), serializer);
         assert_eq!(
             pack_file.get_module_build_record(&address, None).as_deref(),
             Some(&record)
@@ -276,17 +282,17 @@ mod tests {
                     .to_string(),
             ),
         };
-        let registry =
-            CodecRegistry::new().with_asset_render_record(AssetRenderRecordCodec::current());
+        let serializer = Serializer::new()
+            .with_codec::<AssetRenderRecordDto, _>(AssetRenderRecordCodec::current());
 
         PackFile::publish_items(
             temp.path(),
-            &registry,
+            &serializer,
             [(address.clone(), Some(etag.clone()), record.clone())],
         )?;
 
         assert_eq!(ASSET_RENDER_RECORD_TYPE_ID.as_bytes(), b"unpack.asset-r.1");
-        let mut pack_file = PackFile::open(temp.path(), registry);
+        let mut pack_file = PackFile::open(temp.path(), serializer);
         assert_eq!(
             pack_file
                 .get::<AssetRenderRecordDto>(&address, Some(&etag))
@@ -357,12 +363,12 @@ mod tests {
             },
             runtime_requirements: RuntimeRequirements::valid_mask(),
         };
-        let registry =
-            CodecRegistry::new().with_code_generation_record(CodeGenerationRecordCodec::current());
+        let serializer = Serializer::new()
+            .with_codec::<CodeGenerationRecordDto, _>(CodeGenerationRecordCodec::current());
 
         PackFile::publish_items(
             temp.path(),
-            &registry,
+            &serializer,
             [(address.clone(), Some(etag.clone()), record.clone())],
         )?;
 
@@ -370,7 +376,7 @@ mod tests {
             CODE_GENERATION_RECORD_TYPE_ID.as_bytes(),
             b"unpack.codegen.1"
         );
-        let mut pack_file = PackFile::open(temp.path(), registry);
+        let mut pack_file = PackFile::open(temp.path(), serializer);
         assert_eq!(
             pack_file
                 .get::<CodeGenerationRecordDto>(&address, Some(&etag))
@@ -478,9 +484,9 @@ mod tests {
         let temp = tempdir()?;
         let resolve_address = PackFileAddress::new("unpack/resolve", b"request");
         let module_address = PackFileAddress::new("unpack/module-build", b"identity");
-        let registry = CodecRegistry::new()
-            .with_resolve_record(ResolveRecordCodec::current())
-            .with_module_build_record(ModuleBuildRecordCodec::current());
+        let serializer = Serializer::new()
+            .with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current())
+            .with_codec::<ModuleBuildRecordDto, _>(ModuleBuildRecordCodec::current());
         let guard_v1 = PackFileGuardDto {
             version: b"v1".to_vec(),
             build_dependencies: resolve_record("build-dependency.js").snapshot,
@@ -488,13 +494,13 @@ mod tests {
         };
         let mut initial = PackFileWriteBatch::new();
         initial.insert(
-            &registry,
+            &serializer,
             resolve_address.clone(),
             None,
             resolve_record("resolved.js"),
         )?;
         initial.insert(
-            &registry,
+            &serializer,
             module_address.clone(),
             None,
             module_build_record(),
@@ -527,7 +533,7 @@ mod tests {
         };
         let mut update = PackFileWriteBatch::new();
         update.insert(
-            &registry,
+            &serializer,
             resolve_address.clone(),
             None,
             resolve_record("resolved-v2.js"),
@@ -541,7 +547,7 @@ mod tests {
             update,
         )?;
 
-        let mut reopened = PackFile::open(temp.path(), registry.clone());
+        let mut reopened = PackFile::open(temp.path(), serializer.clone());
         assert_eq!(reopened.revision(), 2);
         assert_eq!(reopened.guard(), Some(&guard_v2));
         assert_eq!(
@@ -560,7 +566,7 @@ mod tests {
         let committed_index = fs::read(PackFile::index_path(temp.path()))?;
         let mut stale = PackFileWriteBatch::new();
         stale.insert(
-            &registry,
+            &serializer,
             resolve_address.clone(),
             None,
             resolve_record("must-not-publish.js"),
@@ -583,7 +589,7 @@ mod tests {
 
         let mut cold = PackFileWriteBatch::new();
         cold.insert(
-            &registry,
+            &serializer,
             module_address.clone(),
             None,
             module_build_record(),
@@ -594,7 +600,7 @@ mod tests {
             PublicationBase::ReplaceAll,
             cold,
         )?;
-        let mut replaced = PackFile::open(temp.path(), registry);
+        let mut replaced = PackFile::open(temp.path(), serializer);
         assert_eq!(replaced.revision(), 3);
         assert!(
             replaced
@@ -616,15 +622,21 @@ mod tests {
         let first = PackFileAddress::new("unpack/resolve", b"first");
         let recent = PackFileAddress::new("unpack/resolve", b"recent");
         let restored = PackFileAddress::new("unpack/resolve", b"restored");
-        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let serializer =
+            Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current());
         let mut clock = ManualClock::at_millis(1_000);
         let max_age = Duration::from_millis(100);
 
         let mut initial = PackFileWriteBatch::new();
-        initial.insert(&registry, first.clone(), None, resolve_record("first.js"))?;
-        initial.insert(&registry, recent.clone(), None, resolve_record("recent.js"))?;
+        initial.insert(&serializer, first.clone(), None, resolve_record("first.js"))?;
         initial.insert(
-            &registry,
+            &serializer,
+            recent.clone(),
+            None,
+            resolve_record("recent.js"),
+        )?;
+        initial.insert(
+            &serializer,
             restored.clone(),
             None,
             resolve_record("restored.js"),
@@ -641,7 +653,7 @@ mod tests {
         let shared_content = initial_index.entries[&first].content.file.clone();
 
         clock.advance_millis(50);
-        let mut opened = PackFile::open(temp.path(), registry.clone());
+        let mut opened = PackFile::open(temp.path(), serializer.clone());
         assert!(opened.touch(&recent, None, clock.stamp()));
         let mut second = PackFileWriteBatch::new();
         opened.copy_access_updates_to(&mut second);
@@ -670,7 +682,7 @@ mod tests {
         );
 
         clock.advance_millis(50);
-        let mut opened = PackFile::open(temp.path(), registry.clone());
+        let mut opened = PackFile::open(temp.path(), serializer.clone());
         assert!(opened.touch(&restored, None, clock.stamp()));
         let mut boundary = PackFileWriteBatch::new();
         opened.copy_access_updates_to(&mut boundary);
@@ -699,13 +711,13 @@ mod tests {
             None
         );
         assert_eq!(
-            PackFile::open(temp.path(), registry.clone()).entry_count(),
+            PackFile::open(temp.path(), serializer.clone()).entry_count(),
             3,
             "maxAge is strict: equality must retain the entry"
         );
 
         clock.advance_millis(1);
-        let opened = PackFile::open(temp.path(), registry.clone());
+        let opened = PackFile::open(temp.path(), serializer.clone());
         PackFile::publish_batch_with_retention(
             temp.path(),
             None,
@@ -716,7 +728,7 @@ mod tests {
             PackFileRetention::new(clock.stamp(), max_age),
         )?;
 
-        let mut retained = PackFile::open(temp.path(), registry);
+        let mut retained = PackFile::open(temp.path(), serializer);
         assert!(retained.get_resolve_record(&first, None).is_none());
         assert!(retained.get_resolve_record(&recent, None).is_some());
         assert!(retained.get_resolve_record(&restored, None).is_some());
@@ -739,14 +751,14 @@ mod tests {
     fn maintenance_splits_oversized_content_without_changing_cache_item_identity()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let serializer = Serializer::new().with_codec::<DummyItem, _>(DummyCodec);
         let addresses = (0..3)
             .map(|index| PackFileAddress::new("unpack/dummy", format!("item-{index}").as_bytes()))
             .collect::<Vec<_>>();
         let mut batch = PackFileWriteBatch::new();
         for (index, address) in addresses.iter().enumerate() {
             batch.insert(
-                &registry,
+                &serializer,
                 address.clone(),
                 Some(PackFileETag::new(format!("etag-{index}").as_bytes())),
                 DummyItem(vec![u8::try_from(index)?; 96]),
@@ -778,7 +790,7 @@ mod tests {
         );
         let old_file = initial_index.entries[&addresses[0]].content.file.clone();
 
-        let mut opened = PackFile::open(temp.path(), registry.clone());
+        let mut opened = PackFile::open(temp.path(), serializer.clone());
         let mut access_batch = PackFileWriteBatch::new();
         for (index, address) in addresses.iter().enumerate() {
             assert!(opened.touch(
@@ -815,7 +827,7 @@ mod tests {
         );
         assert!(!temp.path().join(old_file).exists());
 
-        let mut reopened = PackFile::open(temp.path(), registry);
+        let mut reopened = PackFile::open(temp.path(), serializer);
         for (index, address) in addresses.iter().enumerate() {
             assert_eq!(
                 reopened
@@ -834,7 +846,7 @@ mod tests {
     fn maintenance_separates_used_and_unused_frames_when_splitting_content()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let serializer = Serializer::new().with_codec::<DummyItem, _>(DummyCodec);
         let used = PackFileAddress::new("unpack/dummy", b"used");
         let unused_first = PackFileAddress::new("unpack/dummy", b"unused-first");
         let unused_second = PackFileAddress::new("unpack/dummy", b"unused-second");
@@ -844,7 +856,7 @@ mod tests {
             (unused_first.clone(), 2),
             (unused_second.clone(), 3),
         ] {
-            initial.insert(&registry, address, None, DummyItem(vec![byte; 96]))?;
+            initial.insert(&serializer, address, None, DummyItem(vec![byte; 96]))?;
         }
         PackFile::publish_batch_with_options(
             temp.path(),
@@ -858,7 +870,7 @@ mod tests {
             .with_maintenance(PackFileMaintenance::for_tests(1_024, 0, usize::MAX)),
         )?;
 
-        let mut opened = PackFile::open(temp.path(), registry.clone());
+        let mut opened = PackFile::open(temp.path(), serializer.clone());
         assert!(opened.touch(&used, None, AccessStamp::from_millis(1_001)));
         let mut accesses = PackFileWriteBatch::new();
         opened.copy_access_updates_to(&mut accesses);
@@ -889,7 +901,7 @@ mod tests {
         assert_eq!(split.entries[&used].unused_since_revision, None);
         assert_eq!(split.entries[&unused_first].unused_since_revision, Some(2));
 
-        let mut reopened = PackFile::open(temp.path(), registry);
+        let mut reopened = PackFile::open(temp.path(), serializer);
         assert!(reopened.get::<DummyItem>(&used, None).is_some());
         assert!(reopened.get::<DummyItem>(&unused_first, None).is_some());
         assert!(reopened.get::<DummyItem>(&unused_second, None).is_some());
@@ -900,13 +912,13 @@ mod tests {
     fn maintenance_merges_small_used_content_and_removes_superseded_packs()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let serializer = Serializer::new().with_codec::<DummyItem, _>(DummyCodec);
         let first = PackFileAddress::new("unpack/dummy", b"first");
         let second = PackFileAddress::new("unpack/dummy", b"second");
         let disabled_maintenance = PackFileMaintenance::for_tests(1_024, 0, usize::MAX);
 
         let mut first_batch = PackFileWriteBatch::new();
-        first_batch.insert(&registry, first.clone(), None, DummyItem(vec![1; 96]))?;
+        first_batch.insert(&serializer, first.clone(), None, DummyItem(vec![1; 96]))?;
         PackFile::publish_batch_with_options(
             temp.path(),
             None,
@@ -919,11 +931,11 @@ mod tests {
             .with_maintenance(disabled_maintenance),
         )?;
 
-        let mut opened = PackFile::open(temp.path(), registry.clone());
+        let mut opened = PackFile::open(temp.path(), serializer.clone());
         assert!(opened.touch(&first, None, AccessStamp::from_millis(1_001)));
         let mut second_batch = PackFileWriteBatch::new();
         opened.copy_access_updates_to(&mut second_batch);
-        second_batch.insert(&registry, second.clone(), None, DummyItem(vec![2; 96]))?;
+        second_batch.insert(&serializer, second.clone(), None, DummyItem(vec![2; 96]))?;
         PackFile::publish_batch_with_options(
             temp.path(),
             None,
@@ -947,7 +959,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(old_files.len(), 2);
 
-        let mut opened = PackFile::open(temp.path(), registry.clone());
+        let mut opened = PackFile::open(temp.path(), serializer.clone());
         assert!(opened.touch(&first, None, AccessStamp::from_millis(1_002)));
         assert!(opened.touch(&second, None, AccessStamp::from_millis(1_002)));
         let mut access_batch = PackFileWriteBatch::new();
@@ -977,7 +989,7 @@ mod tests {
         for old_file in old_files {
             assert!(!temp.path().join(old_file).exists());
         }
-        let mut reopened = PackFile::open(temp.path(), registry);
+        let mut reopened = PackFile::open(temp.path(), serializer);
         assert_eq!(
             reopened.get::<DummyItem>(&first, None).as_deref(),
             Some(&DummyItem(vec![1; 96]))
@@ -993,13 +1005,13 @@ mod tests {
     fn maintenance_compacts_dead_content_out_of_a_mixed_pack()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let serializer = Serializer::new().with_codec::<DummyItem, _>(DummyCodec);
         let live = PackFileAddress::new("unpack/dummy", b"live");
         let dead = PackFileAddress::new("unpack/dummy", b"dead");
         let disabled_maintenance = PackFileMaintenance::for_tests(1_024, 0, usize::MAX);
         let mut initial = PackFileWriteBatch::new();
-        initial.insert(&registry, live.clone(), None, DummyItem(vec![1; 96]))?;
-        initial.insert(&registry, dead.clone(), None, DummyItem(vec![2; 96]))?;
+        initial.insert(&serializer, live.clone(), None, DummyItem(vec![1; 96]))?;
+        initial.insert(&serializer, dead.clone(), None, DummyItem(vec![2; 96]))?;
         PackFile::publish_batch_with_options(
             temp.path(),
             None,
@@ -1016,7 +1028,7 @@ mod tests {
         let old_file = initial_index.entries[&live].content.file.clone();
         assert_eq!(old_file, initial_index.entries[&dead].content.file);
 
-        let mut opened = PackFile::open(temp.path(), registry.clone());
+        let mut opened = PackFile::open(temp.path(), serializer.clone());
         assert!(opened.touch(&live, None, AccessStamp::from_millis(1_001)));
         let mut second = PackFileWriteBatch::new();
         opened.copy_access_updates_to(&mut second);
@@ -1034,7 +1046,7 @@ mod tests {
             .with_maintenance(disabled_maintenance),
         )?;
 
-        let mut opened = PackFile::open(temp.path(), registry.clone());
+        let mut opened = PackFile::open(temp.path(), serializer.clone());
         assert!(opened.touch(&live, None, AccessStamp::from_millis(1_020)));
         let mut third = PackFileWriteBatch::new();
         opened.copy_access_updates_to(&mut third);
@@ -1057,7 +1069,7 @@ mod tests {
         assert!(!compacted.entries.contains_key(&dead));
         assert_ne!(compacted.entries[&live].content.file, old_file);
         assert!(!temp.path().join(old_file).exists());
-        let mut reopened = PackFile::open(temp.path(), registry);
+        let mut reopened = PackFile::open(temp.path(), serializer);
         assert_eq!(
             reopened.get::<DummyItem>(&live, None).as_deref(),
             Some(&DummyItem(vec![1; 96]))
@@ -1079,12 +1091,12 @@ mod tests {
             let module_address = PackFileAddress::new("unpack/module-build", b"module");
             let resolve = resolve_record("compressed-resolve.js");
             let module = module_build_record();
-            let registry = CodecRegistry::new()
-                .with_resolve_record(ResolveRecordCodec::current())
-                .with_module_build_record(ModuleBuildRecordCodec::current());
+            let serializer = Serializer::new()
+                .with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current())
+                .with_codec::<ModuleBuildRecordDto, _>(ModuleBuildRecordCodec::current());
             let mut batch = PackFileWriteBatch::new();
-            batch.insert(&registry, resolve_address.clone(), None, resolve.clone())?;
-            batch.insert(&registry, module_address.clone(), None, module.clone())?;
+            batch.insert(&serializer, resolve_address.clone(), None, resolve.clone())?;
+            batch.insert(&serializer, module_address.clone(), None, module.clone())?;
             PackFile::publish_batch_with_options(
                 temp.path(),
                 None,
@@ -1117,7 +1129,7 @@ mod tests {
                     .ends_with(suffix))
             );
 
-            let mut reopened = PackFile::open(temp.path(), registry);
+            let mut reopened = PackFile::open(temp.path(), serializer);
             assert_eq!(
                 reopened
                     .get_resolve_record(&resolve_address, None)
@@ -1140,10 +1152,10 @@ mod tests {
         let temp = tempdir()?;
         let first = PackFileAddress::new("unpack/dummy", b"first");
         let second = PackFileAddress::new("unpack/dummy", b"second");
-        let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+        let serializer = Serializer::new().with_codec::<DummyItem, _>(DummyCodec);
         let mut batch = PackFileWriteBatch::new();
-        batch.insert(&registry, first.clone(), None, DummyItem(vec![1; 96]))?;
-        batch.insert(&registry, second.clone(), None, DummyItem(vec![2; 96]))?;
+        batch.insert(&serializer, first.clone(), None, DummyItem(vec![1; 96]))?;
+        batch.insert(&serializer, second.clone(), None, DummyItem(vec![2; 96]))?;
         PackFile::publish_batch_with_options(
             temp.path(),
             None,
@@ -1157,7 +1169,7 @@ mod tests {
 
         let mut retained = PackFile::open_with_options(
             temp.path(),
-            registry.clone(),
+            serializer.clone(),
             PackFileOpenOptions::new(false),
         );
         assert_eq!(retained.read_stats().content_reads, 0);
@@ -1169,7 +1181,7 @@ mod tests {
         assert_eq!(retained.read_stats().retained_content_bytes, retained_bytes);
 
         let mut collecting =
-            PackFile::open_with_options(temp.path(), registry, PackFileOpenOptions::new(true));
+            PackFile::open_with_options(temp.path(), serializer, PackFileOpenOptions::new(true));
         assert_eq!(collecting.read_stats().content_reads, 0);
         assert!(collecting.get::<DummyItem>(&first, None).is_some());
         assert_eq!(collecting.read_stats().retained_content_bytes, 0);
@@ -1189,11 +1201,11 @@ mod tests {
             let temp = tempdir()?;
             let live = PackFileAddress::new("unpack/dummy", b"live");
             let dead = PackFileAddress::new("unpack/dummy", b"dead");
-            let registry = CodecRegistry::new().with_codec::<DummyItem, _>(DummyCodec);
+            let serializer = Serializer::new().with_codec::<DummyItem, _>(DummyCodec);
             let no_maintenance = PackFileMaintenance::for_tests(1_024, 0, usize::MAX);
             let mut initial = PackFileWriteBatch::new();
-            initial.insert(&registry, live.clone(), None, DummyItem(vec![1; 96]))?;
-            initial.insert(&registry, dead.clone(), None, DummyItem(vec![2; 96]))?;
+            initial.insert(&serializer, live.clone(), None, DummyItem(vec![1; 96]))?;
+            initial.insert(&serializer, dead.clone(), None, DummyItem(vec![2; 96]))?;
             PackFile::publish_batch_with_options(
                 temp.path(),
                 None,
@@ -1209,7 +1221,7 @@ mod tests {
                 .with_maintenance(no_maintenance),
             )?;
 
-            let mut opened = PackFile::open(temp.path(), registry.clone());
+            let mut opened = PackFile::open(temp.path(), serializer.clone());
             assert!(opened.touch(&live, None, AccessStamp::from_millis(1_001)));
             let mut second = PackFileWriteBatch::new();
             opened.copy_access_updates_to(&mut second);
@@ -1237,7 +1249,7 @@ mod tests {
                 PublishFault::AfterContentCommit,
                 PublishFault::BeforeIndexReplace,
             ] {
-                let mut opened = PackFile::open(temp.path(), registry.clone());
+                let mut opened = PackFile::open(temp.path(), serializer.clone());
                 assert!(opened.touch(&live, None, AccessStamp::from_millis(1_020)));
                 let mut batch = PackFileWriteBatch::new();
                 opened.copy_access_updates_to(&mut batch);
@@ -1264,7 +1276,7 @@ mod tests {
                     committed_index
                 );
                 assert!(temp.path().join(&old_file).exists());
-                let mut reopened = PackFile::open(temp.path(), registry.clone());
+                let mut reopened = PackFile::open(temp.path(), serializer.clone());
                 assert_eq!(
                     reopened.get::<DummyItem>(&live, None).as_deref(),
                     Some(&DummyItem(vec![1; 96]))
@@ -1275,7 +1287,7 @@ mod tests {
                 );
             }
 
-            let mut opened = PackFile::open(temp.path(), registry.clone());
+            let mut opened = PackFile::open(temp.path(), serializer.clone());
             assert!(opened.touch(&live, None, AccessStamp::from_millis(1_020)));
             let mut final_batch = PackFileWriteBatch::new();
             opened.copy_access_updates_to(&mut final_batch);
@@ -1296,7 +1308,7 @@ mod tests {
                 .with_maintenance(PackFileMaintenance::for_tests(1_024, 0, 1)),
             )?;
             assert!(!temp.path().join(old_file).exists());
-            let mut reopened = PackFile::open(temp.path(), registry);
+            let mut reopened = PackFile::open(temp.path(), serializer);
             assert!(reopened.get::<DummyItem>(&live, None).is_some());
             assert!(reopened.get::<DummyItem>(&dead, None).is_none());
         }
@@ -1379,7 +1391,7 @@ mod tests {
         assert_eq!(
             PackFile::open(
                 temp.path(),
-                CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current())
+                Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current())
             )
             .entry_count(),
             0
@@ -1394,13 +1406,13 @@ mod tests {
         assert_eq!(
             PackFile::open(
                 temp.path(),
-                CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current())
+                Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current())
             )
             .entry_count(),
             0
         );
 
-        let (temp, address, _, registry) = published_record("invalid-history.js")?;
+        let (temp, address, _, serializer) = published_record("invalid-history.js")?;
         let index_path = temp.path().join(INDEX_FILE);
         let mut index = decode_index(&fs::read(&index_path)?).expect("decode valid history index");
         let invalid_revision = index.revision + 1;
@@ -1410,7 +1422,7 @@ mod tests {
             .expect("history entry should exist")
             .last_used_revision = invalid_revision;
         fs::write(&index_path, encode_index(&index)?)?;
-        assert_eq!(PackFile::open(temp.path(), registry).entry_count(), 0);
+        assert_eq!(PackFile::open(temp.path(), serializer).entry_count(), 0);
 
         Ok(())
     }
@@ -1418,7 +1430,7 @@ mod tests {
     #[test]
     fn invalid_content_framing_bounds_and_checksums_are_safe_misses()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (temp, address, etag, registry) = published_record("checksum.js")?;
+        let (temp, address, etag, serializer) = published_record("checksum.js")?;
         let content_file_path = content_path(temp.path(), &address);
         let mut content = fs::read(&content_file_path)?;
         *content
@@ -1426,28 +1438,28 @@ mod tests {
             .expect("content frame should not be empty") ^= 0xff;
         fs::write(&content_file_path, content)?;
         assert!(
-            PackFile::open(temp.path(), registry)
+            PackFile::open(temp.path(), serializer)
                 .get_resolve_record(&address, Some(&etag))
                 .is_none()
         );
 
-        let (temp, address, etag, registry) = published_record("framing.js")?;
+        let (temp, address, etag, serializer) = published_record("framing.js")?;
         let content_file_path = content_path(temp.path(), &address);
         fs::write(&content_file_path, CONTENT_MAGIC)?;
         assert!(
-            PackFile::open(temp.path(), registry)
+            PackFile::open(temp.path(), serializer)
                 .get_resolve_record(&address, Some(&etag))
                 .is_none()
         );
 
-        let (temp, address, etag, registry) = published_record("bounds.js")?;
+        let (temp, address, etag, serializer) = published_record("bounds.js")?;
         let content_file_path = content_path(temp.path(), &address);
         fs::OpenOptions::new()
             .write(true)
             .open(&content_file_path)?
             .set_len(u64::try_from(MAX_CONTENT_BYTES + 1)?)?;
         assert!(
-            PackFile::open(temp.path(), registry)
+            PackFile::open(temp.path(), serializer)
                 .get_resolve_record(&address, Some(&etag))
                 .is_none()
         );
@@ -1459,14 +1471,14 @@ mod tests {
     fn unknown_types_and_incompatible_codecs_miss_before_reading_content()
     -> Result<(), Box<dyn std::error::Error>> {
         let (temp, address, etag, _) = published_record("unknown.js")?;
-        let mut unknown = PackFile::open(temp.path(), CodecRegistry::new());
+        let mut unknown = PackFile::open(temp.path(), Serializer::new());
         assert!(unknown.get_resolve_record(&address, Some(&etag)).is_none());
         assert_eq!(unknown.read_stats().content_reads, 0);
 
         let incompatible_id = StableCodecId(*b"unpack.rslv.c999");
-        let registry = CodecRegistry::new()
-            .with_resolve_record(ResolveRecordCodec::with_codec_id(incompatible_id));
-        let mut incompatible = PackFile::open(temp.path(), registry);
+        let serializer = Serializer::new()
+            .with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::with_codec_id(incompatible_id));
+        let mut incompatible = PackFile::open(temp.path(), serializer);
         assert!(
             incompatible
                 .get_resolve_record(&address, Some(&etag))
@@ -1512,14 +1524,15 @@ mod tests {
                 },
             },
         ]);
-        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let serializer =
+            Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current());
         PackFile::publish_resolve_records(
             temp.path(),
-            &registry,
+            &serializer,
             [(address.clone(), None, record.clone())],
         )?;
         assert_eq!(
-            PackFile::open(temp.path(), registry)
+            PackFile::open(temp.path(), serializer)
                 .get_resolve_record(&address, None)
                 .as_deref(),
             Some(&record)
@@ -1532,11 +1545,12 @@ mod tests {
                 nanoseconds: 1_000_000_000,
             });
         }
-        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let serializer =
+            Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current());
         assert!(
             PackFile::publish_resolve_records(
                 temp.path(),
-                &registry,
+                &serializer,
                 [(
                     PackFileAddress::new("unpack/resolve", b"invalid-time"),
                     None,
@@ -1571,10 +1585,11 @@ mod tests {
         let temp = tempdir()?;
         let first = PackFileAddress::new("unpack/resolve", b"first");
         let second = PackFileAddress::new("unpack/resolve", b"second");
-        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let serializer =
+            Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current());
         PackFile::publish_resolve_records(
             temp.path(),
-            &registry,
+            &serializer,
             [
                 (first.clone(), None, resolve_record("first-v1.js")),
                 (second.clone(), None, resolve_record("second.js")),
@@ -1602,7 +1617,7 @@ mod tests {
 
         PackFile::publish_resolve_records(
             temp.path(),
-            &registry,
+            &serializer,
             [(first.clone(), None, resolve_record("first-v2.js"))],
         )?;
         let second_index = decode_index(&fs::read(temp.path().join(INDEX_FILE))?)
@@ -1614,7 +1629,7 @@ mod tests {
             preserved_second_ref.file
         );
 
-        let mut pack_file = PackFile::open(temp.path(), registry);
+        let mut pack_file = PackFile::open(temp.path(), serializer);
         assert_eq!(
             pack_file.get_resolve_record(&second, None).as_deref(),
             Some(&resolve_record("second.js"))
@@ -1639,11 +1654,12 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
         let address = PackFileAddress::new("unpack/resolve", b"stable");
-        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let serializer =
+            Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current());
         let committed = resolve_record("committed.js");
         PackFile::publish_resolve_records(
             temp.path(),
-            &registry,
+            &serializer,
             [(address.clone(), None, committed.clone())],
         )?;
         let committed_index = fs::read(temp.path().join(INDEX_FILE))?;
@@ -1655,7 +1671,7 @@ mod tests {
             assert!(
                 PackFile::publish_resolve_records_with_fault(
                     temp.path(),
-                    &registry,
+                    &serializer,
                     [(address.clone(), None, resolve_record(attempted_name))],
                     fault,
                 )
@@ -1664,7 +1680,7 @@ mod tests {
             assert_eq!(fs::read(temp.path().join(INDEX_FILE))?, committed_index);
             let mut reopened = PackFile::open(
                 temp.path(),
-                CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current()),
+                Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current()),
             );
             assert_eq!(
                 reopened.get_resolve_record(&address, None).as_deref(),
@@ -1803,28 +1819,24 @@ mod tests {
     fn published_record(
         filename: &str,
     ) -> Result<
-        (
-            tempfile::TempDir,
-            PackFileAddress,
-            PackFileETag,
-            CodecRegistry,
-        ),
+        (tempfile::TempDir, PackFileAddress, PackFileETag, Serializer),
         Box<dyn std::error::Error>,
     > {
         let temp = tempdir()?;
         let address = PackFileAddress::new("unpack/resolve", filename.as_bytes());
         let etag = PackFileETag::new(b"current");
-        let registry = CodecRegistry::new().with_resolve_record(ResolveRecordCodec::current());
+        let serializer =
+            Serializer::new().with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current());
         PackFile::publish_resolve_records(
             temp.path(),
-            &registry,
+            &serializer,
             [(
                 address.clone(),
                 Some(etag.clone()),
                 resolve_record(filename),
             )],
         )?;
-        Ok((temp, address, etag, registry))
+        Ok((temp, address, etag, serializer))
     }
 
     fn content_path(root: &Path, address: &PackFileAddress) -> PathBuf {
@@ -1846,9 +1858,8 @@ mod tests {
 // boundary exists so the storage contract can be exercised before the backend cutover.
 
 use std::{
-    any::Any,
     collections::{BTreeMap, BTreeSet, HashMap},
-    fmt, fs,
+    fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -1860,12 +1871,12 @@ use flate2::{Compression as GzipLevel, read::GzDecoder, write::GzEncoder};
 use rspack_sources::ReplacementEnforce;
 
 use crate::{
-    AsyncDependenciesBlock, ConstDependency, Dependency, EntryDependency,
+    AsyncDependenciesBlock, ConstDependency, DependenciesBlock, Dependency, EntryDependency,
     HarmonyExportExpressionDependency, HarmonyExportHeaderDependency,
     HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency,
     ModuleDependency, ModuleIdentity, ModuleType, NullDependency, SourceRange,
-    build_cache::{ModuleBuildRecord, ResolveRecord},
+    cache::{ModuleBuildRecord, ResolveRecord},
     cache_hash::stable_hash,
     code_generation_record::{
         CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationSource,
@@ -1873,6 +1884,10 @@ use crate::{
     parser::ParsedModule,
     rendered_source::RenderedSource,
     runtime::RuntimeRequirements,
+    serialization::{
+        ItemCodec, MAX_SERIALIZED_ITEM_BYTES, SerializableItem, Serializer, StableCodecId,
+        StableTypeId,
+    },
     snapshot::{PersistentManagedItemState, PersistentSnapshotEntry, Snapshot},
 };
 
@@ -1886,7 +1901,7 @@ const CONTENT_MAGIC: &[u8] = b"UNPACK-PACKFILE-CONTENT\0";
 const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ENCODED_CONTENT_BYTES: usize = 40 * 1024 * 1024;
-const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RECORD_BYTES: usize = MAX_SERIALIZED_ITEM_BYTES;
 const MAX_FIELD_BYTES: usize = 1024 * 1024;
 const MAX_COLLECTION_ENTRIES: usize = 100_000;
 pub(crate) const DEFAULT_MAX_AGE: Duration = Duration::from_secs(60 * 24 * 60 * 60);
@@ -1913,28 +1928,6 @@ pub(crate) const CODE_GENERATION_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.codegen.1");
 pub(crate) const ASSET_RENDER_RECORD_TYPE_ID: StableTypeId =
     StableTypeId::new(*b"unpack.asset-r.1");
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct StableTypeId([u8; 16]);
-
-impl StableTypeId {
-    pub(crate) const fn new(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-
-    pub(crate) const fn as_bytes(&self) -> &[u8; 16] {
-        &self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct StableCodecId([u8; 16]);
-
-impl StableCodecId {
-    pub(crate) const fn new(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct AccessStamp {
@@ -2334,14 +2327,14 @@ impl PackFileWriteBatch {
         Self::default()
     }
 
-    pub(crate) fn insert<T: PackFileItem>(
+    pub(crate) fn insert<T: SerializableItem>(
         &mut self,
-        registry: &CodecRegistry,
+        serializer: &Serializer,
         address: PackFileAddress,
         etag: Option<PackFileETag>,
         value: T,
     ) -> io::Result<()> {
-        let (codec_id, payload) = registry.encode(&value)?;
+        let (codec_id, payload) = serializer.encode(&value)?;
         self.items.insert(
             address,
             PendingPackFileItem {
@@ -2856,12 +2849,14 @@ impl TryFrom<&ParsedModule> for ParsedModuleDto {
     fn try_from(parsed: &ParsedModule) -> io::Result<Self> {
         Ok(Self {
             dependencies: parsed
-                .dependencies
+                .dependencies_block
+                .dependencies()
                 .iter()
                 .map(dependency_to_dto)
                 .collect::<io::Result<_>>()?,
             blocks: parsed
-                .blocks
+                .dependencies_block
+                .blocks()
                 .iter()
                 .map(|block| {
                     Ok(AsyncDependenciesBlockDto {
@@ -2891,23 +2886,24 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
             blocks,
             presentational_dependencies,
         } = parsed;
+        let dependencies = dependencies
+            .into_iter()
+            .map(dependency_from_dto)
+            .collect::<io::Result<_>>()?;
+        let blocks = blocks
+            .into_iter()
+            .map(|block| {
+                Ok(AsyncDependenciesBlock::new(
+                    block
+                        .dependencies
+                        .into_iter()
+                        .map(dependency_from_dto)
+                        .collect::<io::Result<_>>()?,
+                ))
+            })
+            .collect::<io::Result<_>>()?;
         Ok(Self {
-            dependencies: dependencies
-                .into_iter()
-                .map(dependency_from_dto)
-                .collect::<io::Result<_>>()?,
-            blocks: blocks
-                .into_iter()
-                .map(|block| {
-                    Ok(AsyncDependenciesBlock::new(
-                        block
-                            .dependencies
-                            .into_iter()
-                            .map(dependency_from_dto)
-                            .collect::<io::Result<_>>()?,
-                    ))
-                })
-                .collect::<io::Result<_>>()?,
+            dependencies_block: DependenciesBlock::new(dependencies, blocks),
             presentational_dependencies: presentational_dependencies
                 .into_iter()
                 .map(dependency_from_dto)
@@ -3082,161 +3078,20 @@ impl From<SourceRangeDto> for SourceRange {
     }
 }
 
-pub(crate) trait PackFileItem: Clone + Send + Sync + 'static {
-    const TYPE_ID: StableTypeId;
-}
-
-impl PackFileItem for ResolveRecordDto {
+impl SerializableItem for ResolveRecordDto {
     const TYPE_ID: StableTypeId = RESOLVE_RECORD_TYPE_ID;
 }
 
-impl PackFileItem for ModuleBuildRecordDto {
+impl SerializableItem for ModuleBuildRecordDto {
     const TYPE_ID: StableTypeId = MODULE_BUILD_RECORD_TYPE_ID;
 }
 
-impl PackFileItem for CodeGenerationRecordDto {
+impl SerializableItem for CodeGenerationRecordDto {
     const TYPE_ID: StableTypeId = CODE_GENERATION_RECORD_TYPE_ID;
 }
 
-impl PackFileItem for AssetRenderRecordDto {
+impl SerializableItem for AssetRenderRecordDto {
     const TYPE_ID: StableTypeId = ASSET_RENDER_RECORD_TYPE_ID;
-}
-
-pub(crate) trait ItemCodec<T: PackFileItem>: fmt::Debug + Send + Sync + 'static {
-    fn codec_id(&self) -> StableCodecId;
-    fn encode(&self, value: &T) -> io::Result<Vec<u8>>;
-    fn decode(&self, bytes: &[u8]) -> Option<T>;
-}
-
-trait ErasedItemCodec: fmt::Debug + Send + Sync {
-    fn codec_id(&self) -> StableCodecId;
-    fn encode(&self, value: &dyn Any) -> io::Result<Vec<u8>>;
-    fn decode(&self, bytes: &[u8]) -> Option<Box<dyn Any + Send + Sync>>;
-}
-
-struct CodecAdapter<T, C> {
-    codec: C,
-    marker: std::marker::PhantomData<fn() -> T>,
-}
-
-impl<T, C: fmt::Debug> fmt::Debug for CodecAdapter<T, C> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CodecAdapter")
-            .field("codec", &self.codec)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<T, C> ErasedItemCodec for CodecAdapter<T, C>
-where
-    T: PackFileItem,
-    C: ItemCodec<T>,
-{
-    fn codec_id(&self) -> StableCodecId {
-        self.codec.codec_id()
-    }
-
-    fn encode(&self, value: &dyn Any) -> io::Result<Vec<u8>> {
-        let value = value.downcast_ref::<T>().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "PackFile item type mismatch")
-        })?;
-        self.codec.encode(value)
-    }
-
-    fn decode(&self, bytes: &[u8]) -> Option<Box<dyn Any + Send + Sync>> {
-        self.codec
-            .decode(bytes)
-            .map(|value| Box::new(value) as Box<dyn Any + Send + Sync>)
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CodecRegistry {
-    codecs: HashMap<StableTypeId, Arc<dyn ErasedItemCodec>>,
-}
-
-impl CodecRegistry {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn with_resolve_record(mut self, codec: ResolveRecordCodec) -> Self {
-        self.register::<ResolveRecordDto, _>(codec);
-        self
-    }
-
-    pub(crate) fn with_module_build_record(mut self, codec: ModuleBuildRecordCodec) -> Self {
-        self.register::<ModuleBuildRecordDto, _>(codec);
-        self
-    }
-
-    pub(crate) fn with_code_generation_record(mut self, codec: CodeGenerationRecordCodec) -> Self {
-        self.register::<CodeGenerationRecordDto, _>(codec);
-        self
-    }
-
-    pub(crate) fn with_asset_render_record(mut self, codec: AssetRenderRecordCodec) -> Self {
-        self.register::<AssetRenderRecordDto, _>(codec);
-        self
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn with_codec<T, C>(mut self, codec: C) -> Self
-    where
-        T: PackFileItem,
-        C: ItemCodec<T>,
-    {
-        self.register::<T, C>(codec);
-        self
-    }
-
-    fn register<T, C>(&mut self, codec: C)
-    where
-        T: PackFileItem,
-        C: ItemCodec<T>,
-    {
-        self.codecs.insert(
-            T::TYPE_ID,
-            Arc::new(CodecAdapter::<T, C> {
-                codec,
-                marker: std::marker::PhantomData,
-            }),
-        );
-    }
-
-    fn encode<T: PackFileItem>(&self, value: &T) -> io::Result<(StableCodecId, Vec<u8>)> {
-        let codec = self.codecs.get(&T::TYPE_ID).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "PackFile codec is not registered",
-            )
-        })?;
-        let payload = codec.encode(value)?;
-        if payload.len() > MAX_RECORD_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "PackFile record exceeds the configured bound",
-            ));
-        }
-        Ok((codec.codec_id(), payload))
-    }
-
-    fn decode<T: PackFileItem>(
-        &self,
-        type_id: StableTypeId,
-        codec_id: StableCodecId,
-        bytes: &[u8],
-    ) -> Option<T> {
-        if type_id != T::TYPE_ID {
-            return None;
-        }
-        let codec = self.codecs.get(&type_id)?;
-        if codec.codec_id() != codec_id {
-            return None;
-        }
-        Some(*codec.decode(bytes)?.downcast::<T>().ok()?)
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4293,7 +4148,7 @@ struct PackFileReadStats {
 #[derive(Debug)]
 pub(crate) struct PackFile {
     root: PathBuf,
-    registry: CodecRegistry,
+    serializer: Serializer,
     index: PackFileIndex,
     access_updates: BTreeMap<PackFileAddress, AccessStamp>,
     allow_collecting_memory: bool,
@@ -4311,7 +4166,7 @@ struct RetainedContentPack {
 
 #[derive(Debug)]
 pub(crate) struct PackFileRestore<T> {
-    registry: CodecRegistry,
+    serializer: Serializer,
     type_id: StableTypeId,
     codec_id: StableCodecId,
     checksum: u64,
@@ -4321,14 +4176,14 @@ pub(crate) struct PackFileRestore<T> {
     marker: std::marker::PhantomData<fn() -> T>,
 }
 
-impl<T: PackFileItem> PackFileRestore<T> {
+impl<T: SerializableItem> PackFileRestore<T> {
     pub(crate) fn decode(self) -> Option<T> {
         let frame = self.content.get(self.start..self.end)?;
         let (type_id, codec_id, payload) = decode_indexed_content(frame, self.checksum)?;
         if type_id != self.type_id || codec_id != self.codec_id {
             return None;
         }
-        self.registry.decode::<T>(type_id, codec_id, payload)
+        self.serializer.decode::<T>(type_id, codec_id, payload)
     }
 }
 
@@ -4344,13 +4199,13 @@ impl PackFile {
     }
 
     #[cfg(test)]
-    pub(crate) fn open(root: impl AsRef<Path>, registry: CodecRegistry) -> Self {
-        Self::open_with_options(root, registry, PackFileOpenOptions::new(false))
+    pub(crate) fn open(root: impl AsRef<Path>, serializer: Serializer) -> Self {
+        Self::open_with_options(root, serializer, PackFileOpenOptions::new(false))
     }
 
     pub(crate) fn open_with_options(
         root: impl AsRef<Path>,
-        registry: CodecRegistry,
+        serializer: Serializer,
         options: PackFileOpenOptions,
     ) -> Self {
         let root = root.as_ref().to_path_buf();
@@ -4360,7 +4215,7 @@ impl PackFile {
             .unwrap_or_default();
         Self {
             root,
-            registry,
+            serializer,
             index,
             access_updates: BTreeMap::new(),
             allow_collecting_memory: options.allow_collecting_memory,
@@ -4420,7 +4275,7 @@ impl PackFile {
     }
 
     #[cfg(test)]
-    pub(crate) fn get<T: PackFileItem>(
+    pub(crate) fn get<T: SerializableItem>(
         &mut self,
         address: &PackFileAddress,
         etag: Option<&PackFileETag>,
@@ -4434,7 +4289,7 @@ impl PackFile {
         Some(Arc::new(value))
     }
 
-    pub(crate) fn prepare_restore<T: PackFileItem>(
+    pub(crate) fn prepare_restore<T: SerializableItem>(
         &mut self,
         address: &PackFileAddress,
         etag: Option<&PackFileETag>,
@@ -4443,7 +4298,7 @@ impl PackFile {
         if entry.etag.as_ref() != etag || entry.type_id != T::TYPE_ID {
             return None;
         }
-        if self.registry.codecs.get(&entry.type_id)?.codec_id() != entry.codec_id {
+        if !self.serializer.matches_codec(entry.type_id, entry.codec_id) {
             return None;
         }
         #[cfg(test)]
@@ -4456,7 +4311,7 @@ impl PackFile {
             self.reads.content_bytes_read += loaded.end.checked_sub(loaded.start)?;
         }
         Some(PackFileRestore {
-            registry: self.registry.clone(),
+            serializer: self.serializer.clone(),
             type_id: entry.type_id,
             codec_id: entry.codec_id,
             checksum: entry.content.checksum,
@@ -4556,14 +4411,14 @@ impl PackFile {
     #[cfg(test)]
     fn publish_items<T, I>(
         root: impl AsRef<Path>,
-        registry: &CodecRegistry,
+        serializer: &Serializer,
         items: I,
     ) -> io::Result<()>
     where
-        T: PackFileItem,
+        T: SerializableItem,
         I: IntoIterator<Item = (PackFileAddress, Option<PackFileETag>, T)>,
     {
-        publish_items(root.as_ref(), registry, items, PublishFault::None)
+        publish_items(root.as_ref(), serializer, items, PublishFault::None)
     }
 
     #[cfg(test)]
@@ -4619,25 +4474,25 @@ impl PackFile {
     #[cfg(test)]
     fn publish_resolve_records<I>(
         root: impl AsRef<Path>,
-        registry: &CodecRegistry,
+        serializer: &Serializer,
         records: I,
     ) -> io::Result<()>
     where
         I: IntoIterator<Item = (PackFileAddress, Option<PackFileETag>, ResolveRecordDto)>,
     {
-        Self::publish_items(root, registry, records)
+        Self::publish_items(root, serializer, records)
     }
 
     #[cfg(test)]
     fn publish_module_build_records<I>(
         root: impl AsRef<Path>,
-        registry: &CodecRegistry,
+        serializer: &Serializer,
         records: I,
     ) -> io::Result<()>
     where
         I: IntoIterator<Item = (PackFileAddress, Option<PackFileETag>, ModuleBuildRecordDto)>,
     {
-        Self::publish_items(root, registry, records)
+        Self::publish_items(root, serializer, records)
     }
 
     #[cfg(test)]
@@ -4648,14 +4503,14 @@ impl PackFile {
     #[cfg(test)]
     fn publish_resolve_records_with_fault<I>(
         root: impl AsRef<Path>,
-        registry: &CodecRegistry,
+        serializer: &Serializer,
         records: I,
         fault: PublishFault,
     ) -> io::Result<()>
     where
         I: IntoIterator<Item = (PackFileAddress, Option<PackFileETag>, ResolveRecordDto)>,
     {
-        publish_items(root.as_ref(), registry, records, fault)
+        publish_items(root.as_ref(), serializer, records, fault)
     }
 }
 
@@ -4669,12 +4524,12 @@ enum PublishFault {
 #[cfg(test)]
 fn publish_items<T, I>(
     root: &Path,
-    registry: &CodecRegistry,
+    serializer: &Serializer,
     items: I,
     fault: PublishFault,
 ) -> io::Result<()>
 where
-    T: PackFileItem,
+    T: SerializableItem,
     I: IntoIterator<Item = (PackFileAddress, Option<PackFileETag>, T)>,
 {
     let current = read_bounded(&root.join(INDEX_FILE), MAX_INDEX_BYTES)
@@ -4682,7 +4537,7 @@ where
         .unwrap_or_default();
     let mut batch = PackFileWriteBatch::new();
     for (address, etag, value) in items {
-        batch.insert(registry, address, etag, value)?;
+        batch.insert(serializer, address, etag, value)?;
     }
     let expected_revision = current.revision;
     publish_batch(

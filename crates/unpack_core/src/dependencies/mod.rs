@@ -1,0 +1,25 @@
+// Webpack source: https://github.com/webpack/webpack/tree/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/dependencies
+
+mod const_dependency;
+mod entry_dependency;
+mod harmony_export_expression_dependency;
+mod harmony_export_header_dependency;
+mod harmony_export_imported_specifier_dependency;
+mod harmony_export_specifier_dependency;
+mod harmony_import_side_effect_dependency;
+mod harmony_import_specifier_dependency;
+mod import_dependency;
+mod module_dependency;
+mod null_dependency;
+
+pub use const_dependency::ConstDependency;
+pub use entry_dependency::EntryDependency;
+pub use harmony_export_expression_dependency::HarmonyExportExpressionDependency;
+pub use harmony_export_header_dependency::HarmonyExportHeaderDependency;
+pub use harmony_export_imported_specifier_dependency::HarmonyExportImportedSpecifierDependency;
+pub use harmony_export_specifier_dependency::HarmonyExportSpecifierDependency;
+pub use harmony_import_side_effect_dependency::HarmonyImportSideEffectDependency;
+pub use harmony_import_specifier_dependency::HarmonyImportSpecifierDependency;
+pub use import_dependency::ImportDependency;
+pub use module_dependency::ModuleDependency;
+pub use null_dependency::NullDependency;

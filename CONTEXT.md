@@ -61,7 +61,7 @@ A webpack-shaped behavior, API, option, runtime helper, or internal compilation 
 _Avoid_: Future feature surface, proposed webpack surface
 
 **Webpack Internal Alignment**:
-The expectation that Unpack's internal bundler concepts use webpack names, phase ordering, responsibility boundaries, and source-layout boundaries where practical, while allowing Rust-native traits, enums, ownership, concurrency, dense handles, indexed storage, and bit sets. Implemented concepts should remain easy to locate from webpack's layout, but JavaScript object shapes, class inheritance, one-file-per-class structure, and hook storage should only be copied when they affect exposed plugin or loader behavior.
+The expectation that Unpack's internal bundler concepts use webpack names, phase ordering, responsibility boundaries, and source-layout boundaries where practical, while allowing Rust-native traits, enums, ownership, concurrency, dense handles, indexed storage, and bit sets. Implemented webpack units should map to the corresponding directory level and separate file boundary unless a documented Rust constraint requires otherwise. JavaScript object shapes, class inheritance, and hook storage should only be copied when they affect exposed plugin or loader behavior.
 _Avoid_: Rust-only terminology, unrelated source layout, copying webpack JavaScript classes by default
 
 **Mode**:
@@ -171,6 +171,14 @@ _Avoid_: Export snapshot, CommonJS export assignment
 **Exports Info**:
 The module graph metadata that records a module's known exports and how generated code should name them.
 _Avoid_: Export list, tree shaking table
+
+**Side Effects Flag Plugin**:
+The webpack-aligned optimization plugin that records whether modules may be skipped for evaluation and optimizes side-effect-free dependency connections.
+_Avoid_: Chunk graph side-effects check, Make-time package probe
+
+**Module Side Effects State**:
+Module Graph metadata describing whether evaluating a module may have observable effects, derived from declared package or rule metadata and, when enabled, source analysis.
+_Avoid_: Used export state, module reachability flag
 
 **Static ESM Dependency**:
 A dependency declared by an ECMAScript module import or re-export whose specifier is known before code execution.

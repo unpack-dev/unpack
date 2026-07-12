@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/CodeGenerationResults.js
+
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
@@ -13,7 +15,8 @@ use crate::{
     HarmonyExportImportedSpecifierDependency, HarmonyExportSpecifierDependency,
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency, Module,
     ModuleGraph, ModuleHandle, SourceRange,
-    build_cache::{BuildCache, CacheETag, CacheIdentifier, CacheKey},
+    cache::BuildCache,
+    cache_facade::{CacheETag, CacheIdentifier, CacheKey},
     cache_hash::StableHasher,
     code_generation_record::{
         CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
@@ -923,8 +926,11 @@ fn apply_harmony_import_side_effect_dependency(
     let target = module_graph
         .module_for_dependency(module_handle, None, dependency_index)
         .expect("Harmony import must have a Module Graph connection");
+    let Some(target_render_id) = module_render_ids.get(&target) else {
+        return;
+    };
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
-    let target_id = json_render_id(&module_render_ids[&target]);
+    let target_id = json_render_id(target_render_id);
     push_init_fragment(
         init_fragments,
         InitFragmentStage::HarmonyImport,
@@ -1025,9 +1031,12 @@ fn apply_harmony_export_imported_specifier_dependency(
 ) {
     let dependency_index =
         dependency_index.expect("Harmony re-export must have a Dependency Index");
-    module_graph
+    let target = module_graph
         .module_for_dependency(module_handle, None, dependency_index)
         .expect("Harmony re-export must have a Module Graph connection");
+    if !module_render_ids.contains_key(&target) {
+        return;
+    }
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
     if dep.is_star {
         push_init_fragment(
@@ -1051,7 +1060,6 @@ fn apply_harmony_export_imported_specifier_dependency(
             ),
         );
     }
-    let _ = module_render_ids;
 }
 
 fn apply_import_dependency(
@@ -1181,9 +1189,8 @@ mod tests {
     use crate::{
         CacheOptions, Compiler, CompilerOptions, ConstDependency, Dependency, Entry, Error,
         ModuleGraph, ModuleHandle, ModuleIdentity, SnapshotOptions, SourceRange,
-        build_cache::{
-            BuildCache, CacheIdentifier, CacheItemFamily, CacheItemWork, CacheKey, CacheNamespace,
-        },
+        cache::{BuildCache, CacheItemFamily, CacheItemWork},
+        cache_facade::{CacheIdentifier, CacheKey, CacheNamespace},
         id_assignment::{RenderId, assign_chunk_render_ids, assign_module_render_ids},
         runtime::RuntimeModule,
     };

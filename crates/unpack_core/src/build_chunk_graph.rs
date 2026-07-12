@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/buildChunkGraph.js
+
 use std::{
     cmp::Ordering,
     collections::{HashMap, VecDeque},
@@ -349,6 +351,7 @@ fn collect_static_reachable(module_graph: &ModuleGraph, start: ModuleHandle) -> 
         for connection in module_graph.outgoing_connections(module) {
             if connection.origin_block.is_none()
                 && connection.dependency.is_static_module_dependency()
+                && connection.is_active()
             {
                 queue.push_back(connection.module);
             }

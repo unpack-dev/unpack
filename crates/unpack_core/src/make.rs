@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Compilation.js
+
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
@@ -18,7 +20,8 @@ use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, DependencyKind,
     Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleHandle,
     ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
-    build_cache::{BuildCache, ModuleBuildCache, ModuleBuildRecord},
+    cache::{BuildCache, ModuleBuildRecord},
+    cache_facade::ModuleBuildCache,
     module::BuiltModuleContent,
     parser::{ParsedModule, parse_module_dependencies},
     snapshot::{FileSystemInfo, SnapshotCache},
@@ -197,7 +200,8 @@ pub(crate) async fn run(
             options.snapshot.resolve,
             snapshot_cache.clone(),
         )
-        .with_module_rules(options.module_rules.clone()),
+        .with_module_rules(options.module_rules.clone())
+        .with_side_effects(options.side_effects != crate::SideEffectsOption::Disabled),
         module_build_cache: build_cache.module_builds(),
         file_system_info,
         module_snapshot_strategy: options.snapshot.module,
@@ -379,6 +383,7 @@ impl AddTask {
                 let identity = factorized.identity;
                 let resource = factorized.resource;
                 let loader = factorized.loader;
+                let side_effect_free = factorized.side_effect_free;
                 let add_result = {
                     let mut state = state.lock().await;
                     state
@@ -390,7 +395,12 @@ impl AddTask {
                     state
                         .missing_dependencies
                         .extend(factorized.missing_dependencies.iter().cloned());
-                    state.add_or_connect(self.origin_module, self.dependencies, identity.clone())
+                    state.add_or_connect(
+                        self.origin_module,
+                        self.dependencies,
+                        identity.clone(),
+                        side_effect_free,
+                    )
                 };
 
                 if !add_result.is_new {
@@ -414,7 +424,7 @@ impl AddTask {
                 let mut state = state.lock().await;
                 state.missing_dependencies.insert(identity.resource.clone());
                 let add_result =
-                    state.add_or_connect(self.origin_module, self.dependencies, identity);
+                    state.add_or_connect(self.origin_module, self.dependencies, identity, None);
                 state.fail_module(add_result.module_handle, error, String::new())?;
                 Ok(Vec::new())
             }
@@ -646,7 +656,8 @@ fn process_dependencies_task(
 ) -> Option<MakeTask> {
     let issuer_context = issuer_context.to_path_buf();
     let mut dependencies = parsed
-        .dependencies
+        .dependencies_block
+        .dependencies()
         .iter()
         .cloned()
         .enumerate()
@@ -658,7 +669,7 @@ fn process_dependencies_task(
         })
         .collect::<Vec<_>>();
 
-    for (block_index, block) in parsed.blocks.iter().enumerate() {
+    for (block_index, block) in parsed.dependencies_block.blocks().iter().enumerate() {
         dependencies.extend(block.dependencies().iter().cloned().enumerate().map(
             |(dependency_index, dependency)| QueuedDependency {
                 entry_index: None,
@@ -727,12 +738,16 @@ impl MakeState {
         origin_module: Option<ModuleHandle>,
         dependencies: Vec<QueuedDependency>,
         identity: ModuleIdentity,
+        side_effect_free: Option<bool>,
     ) -> AddModuleResult {
         let (module_handle, is_new) =
             if let Some(module_handle) = self.modules_by_identity.get(&identity).copied() {
                 (module_handle, false)
             } else {
                 let module_handle = self.module_graph.add_module(identity.clone());
+                if let Some(module) = self.module_graph.module_mut(module_handle) {
+                    module.set_factory_side_effect_free(side_effect_free);
+                }
                 self.modules_by_identity.insert(identity, module_handle);
                 (module_handle, true)
             };

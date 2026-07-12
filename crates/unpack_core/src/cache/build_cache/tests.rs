@@ -1,11 +1,19 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Cache.js
+
 use std::{collections::BTreeSet, fs, io, path::Path, sync::Arc, time::Duration};
 
 use filetime::{FileTime, set_file_mtime};
 use tempfile::tempdir;
 
-use super::persistent::persistent_codec_registry;
 use super::*;
-use crate::{ModuleIdentity, pack_file::PackFile, snapshot::FileSystemInfo};
+use crate::cache::pack_file_cache_strategy::persistent_serializer;
+use crate::{
+    ModuleIdentity,
+    cache::pack_file::PackFile,
+    cache::{ResolveRecord, ResolveRequest},
+    cache_facade::{CacheETag, CacheIdentifier, CacheKey},
+    snapshot::FileSystemInfo,
+};
 
 #[derive(Debug, Clone)]
 struct TestCacheKey(&'static str);
@@ -603,7 +611,7 @@ fn pack_revision(options: &CacheOptions) -> u64 {
             .cache_location
             .as_ref()
             .expect("filesystem cache should have a location"),
-        persistent_codec_registry(),
+        persistent_serializer(),
     )
     .revision()
 }

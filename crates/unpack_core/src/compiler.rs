@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Compiler.js
+
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, Weak},
@@ -6,10 +8,11 @@ use std::{
 
 use crate::{
     CacheOptions, Compilation, CompilationHooks, InfrastructureLoggingOptions, LoaderRunner,
-    ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, build_cache::BuildCache,
+    ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver, cache::BuildCache,
     compilation::CompilationHookSet, flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
     flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
     module_computation_cache::ModuleComputationCache,
+    optimize::side_effects_flag_plugin::SideEffectsFlagPlugin,
 };
 use tracing::Instrument;
 
@@ -17,6 +20,13 @@ mod hooks;
 pub(crate) use hooks::CompilerHookSet;
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideEffectsOption {
+    Disabled,
+    Flag,
+    Analyze,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -48,6 +58,7 @@ pub struct CompilerOptions {
     pub sourcemap: bool,
     pub provided_exports: bool,
     pub used_exports: bool,
+    pub side_effects: SideEffectsOption,
 }
 
 impl CompilerOptions {
@@ -66,6 +77,7 @@ impl CompilerOptions {
             sourcemap: true,
             provided_exports: true,
             used_exports: true,
+            side_effects: SideEffectsOption::Flag,
         }
     }
 }
@@ -664,6 +676,11 @@ impl Compiler {
         if options.used_exports {
             FlagDependencyUsagePlugin.apply(&mut hooks);
         }
+        match options.side_effects {
+            SideEffectsOption::Disabled => {}
+            SideEffectsOption::Flag => SideEffectsFlagPlugin::new(false).apply(&mut hooks),
+            SideEffectsOption::Analyze => SideEffectsFlagPlugin::new(true).apply(&mut hooks),
+        }
         Self {
             options,
             build_cache,
@@ -790,8 +807,12 @@ mod tests {
     use super::*;
     use crate::{
         BuildDependency,
-        build_cache::{CacheItemFamily, CacheItemWork},
-        pack_file::{CodecRegistry, ModuleBuildRecordCodec, PackFile, ResolveRecordCodec},
+        cache::pack_file::{
+            ModuleBuildRecordCodec, ModuleBuildRecordDto, PackFile, ResolveRecordCodec,
+            ResolveRecordDto,
+        },
+        cache::{CacheItemFamily, CacheItemWork},
+        serialization::Serializer,
     };
 
     #[tokio::test]
@@ -1395,10 +1416,10 @@ mod tests {
         assert_eq!(settling.await?.diagnostic(), None);
         assert_eq!(running.await??.errors(), []);
         assert_eq!(compiler.settle_cache().await.diagnostic(), None);
-        let registry = CodecRegistry::new()
-            .with_resolve_record(ResolveRecordCodec::current())
-            .with_module_build_record(ModuleBuildRecordCodec::current());
-        assert_eq!(PackFile::open(&cache_location, registry).revision(), 2);
+        let serializer = Serializer::new()
+            .with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current())
+            .with_codec::<ModuleBuildRecordDto, _>(ModuleBuildRecordCodec::current());
+        assert_eq!(PackFile::open(&cache_location, serializer).revision(), 2);
         Ok(())
     }
 

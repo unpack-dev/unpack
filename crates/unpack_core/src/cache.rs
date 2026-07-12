@@ -1,18 +1,33 @@
-//! Cache coordinator for ordered Cache Layer lookup, promotion, storage, and work accounting.
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Cache.js
+
+//! Webpack-aligned Cache coordinator for ordered Cache Layer lookup, promotion, storage, and work accounting.
+
+mod build_cache;
+mod cache_items;
+mod memory_cache_plugin;
+mod memory_with_gc_cache_plugin;
+mod options;
+pub(crate) mod pack_file;
+mod pack_file_cache_strategy;
+
+pub use options::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
+
+pub(crate) use build_cache::BuildCache;
+pub(crate) use cache_items::{ModuleBuildRecord, ResolveRecord, ResolveRequest};
 
 use std::{any::Any, fmt, io, sync::Arc, time::Duration};
 
-use crate::pack_file::{AccessStamp, PackFileGuardDto};
+use self::pack_file::{AccessStamp, PackFileGuardDto};
 
-#[cfg(test)]
-use super::RestoreBarrier;
-use super::{
-    CacheDiagnostics,
-    facade::{CacheAddress, CacheETag},
-    memory::{MemoryCacheLayer, MemoryRetention},
-    options::{CacheKind, CacheOptions},
-    persistent::{PackFileCacheLayer, PersistentCachePreparation, PersistentRestore},
+use self::{
+    build_cache::CacheDiagnostics,
+    memory_cache_plugin::MemoryCacheLayer,
+    memory_with_gc_cache_plugin::MemoryWithGcCacheLayer,
+    pack_file_cache_strategy::{PackFileCacheLayer, PersistentCachePreparation, PersistentRestore},
 };
+use crate::cache_facade::{CacheAddress, CacheETag};
+#[cfg(test)]
+use build_cache::RestoreBarrier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CacheItemFamily {
@@ -107,6 +122,7 @@ pub(super) trait CacheLayer: fmt::Debug + Send + Sync {
 #[derive(Debug)]
 enum CacheLayerSlot {
     Memory(MemoryCacheLayer),
+    MemoryWithGc(MemoryWithGcCacheLayer),
     Persistent {
         writable: bool,
         layer: PackFileCacheLayer,
@@ -116,7 +132,7 @@ enum CacheLayerSlot {
 impl CacheLayerSlot {
     fn writable(&self) -> bool {
         match self {
-            Self::Memory(_) => true,
+            Self::Memory(_) | Self::MemoryWithGc(_) => true,
             Self::Persistent { writable, .. } => *writable,
         }
     }
@@ -124,35 +140,39 @@ impl CacheLayerSlot {
     fn layer_mut(&mut self) -> &mut dyn CacheLayer {
         match self {
             Self::Memory(layer) => layer,
+            Self::MemoryWithGc(layer) => layer,
             Self::Persistent { layer, .. } => layer,
         }
     }
 
     #[cfg(test)]
-    fn memory(&self) -> Option<&MemoryCacheLayer> {
+    fn memory_entry_count(&self, family: CacheItemFamily) -> Option<usize> {
         match self {
-            Self::Memory(layer) => Some(layer),
+            Self::Memory(layer) => Some(layer.entry_count(family)),
+            Self::MemoryWithGc(layer) => Some(layer.entry_count(family)),
             Self::Persistent { .. } => None,
         }
     }
 
-    fn memory_mut(&mut self) -> Option<&mut MemoryCacheLayer> {
+    #[cfg(test)]
+    fn evict_memory(&mut self, address: &CacheAddress) -> Option<bool> {
         match self {
-            Self::Memory(layer) => Some(layer),
+            Self::Memory(layer) => Some(layer.evict(address)),
+            Self::MemoryWithGc(layer) => Some(layer.evict(address)),
             Self::Persistent { .. } => None,
         }
     }
 
     fn persistent(&self) -> Option<&PackFileCacheLayer> {
         match self {
-            Self::Memory(_) => None,
+            Self::Memory(_) | Self::MemoryWithGc(_) => None,
             Self::Persistent { layer, .. } => Some(layer),
         }
     }
 
     fn persistent_mut(&mut self) -> Option<&mut PackFileCacheLayer> {
         match self {
-            Self::Memory(_) => None,
+            Self::Memory(_) | Self::MemoryWithGc(_) => None,
             Self::Persistent { layer, .. } => Some(layer),
         }
     }
@@ -192,11 +212,14 @@ impl<V> CacheGet<V> {
 impl Cache {
     pub(super) fn from_options(options: &CacheOptions, diagnostics: Arc<CacheDiagnostics>) -> Self {
         let mut layers = Vec::new();
-        let memory_retention = MemoryRetention::from_options(options);
-        if memory_retention != MemoryRetention::Disabled {
-            layers.push(CacheLayerSlot::Memory(MemoryCacheLayer::new(
-                memory_retention,
-            )));
+        if options.kind != CacheKind::Disabled {
+            match options.max_memory_generations {
+                Some(0) => {}
+                Some(generations) => layers.push(CacheLayerSlot::MemoryWithGc(
+                    MemoryWithGcCacheLayer::new(generations),
+                )),
+                None => layers.push(CacheLayerSlot::Memory(MemoryCacheLayer::new())),
+            }
         }
         if options.kind == CacheKind::Filesystem {
             layers.push(CacheLayerSlot::Persistent {
@@ -375,8 +398,8 @@ impl Cache {
         let evicted = self
             .layers
             .iter_mut()
-            .filter_map(CacheLayerSlot::memory_mut)
-            .any(|layer| layer.evict(address));
+            .filter_map(|layer| layer.evict_memory(address))
+            .any(|evicted| evicted);
         if evicted {
             self.work.for_family_mut(family).evictions += 1;
         }
@@ -386,8 +409,7 @@ impl Cache {
     pub(super) fn entry_count(&self, family: CacheItemFamily) -> usize {
         self.layers
             .iter()
-            .find_map(CacheLayerSlot::memory)
-            .map(|layer| layer.entry_count(family))
+            .find_map(|layer| layer.memory_entry_count(family))
             .unwrap_or_default()
     }
 
@@ -413,7 +435,7 @@ impl Cache {
 
     pub(super) fn on_compilation_completed(&mut self) {
         for slot in &mut self.layers {
-            let Some(layer) = slot.memory_mut() else {
+            let CacheLayerSlot::MemoryWithGc(layer) = slot else {
                 continue;
             };
             for family in layer.on_compilation_completed() {

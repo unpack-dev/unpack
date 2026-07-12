@@ -1,5 +1,10 @@
-//! Compiler-owned Build Cache composition root.
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Cache.js
+
+//! Compiler-owned Build Cache composition over the webpack-aligned Cache.
 //! It wires typed Cache Facades to Cache Layers and owns preparation and publication lifecycle.
+
+#[cfg(test)]
+mod tests;
 
 use std::{
     collections::BTreeSet,
@@ -15,41 +20,27 @@ use std::{
 use crate::{
     InfrastructureLogEvent, InfrastructureLogLevel, ModuleIdentity, SnapshotOptions,
     SnapshotStrategy, UnpackResolver,
+    cache::pack_file::{AccessStamp, PackFileGuardDto, SnapshotDto},
+    cache::{
+        Cache, CacheItemFamily, CacheItemWork, CacheWorkCounters,
+        options::{CacheKind, CacheOptions},
+        pack_file_cache_strategy::PersistentCachePreparation,
+    },
+    cache_facade::{
+        ASSET_RENDER_CACHE_NAMESPACE, CODE_GENERATION_CACHE_NAMESPACE, CacheFacade, CacheNamespace,
+        MODULE_BUILD_CACHE_NAMESPACE, ModuleBuildCache, NormalModuleFactoryCache,
+        RESOLVE_CACHE_NAMESPACE,
+    },
     code_generation_record::CodeGenerationRecord,
-    pack_file::{AccessStamp, PackFileGuardDto, SnapshotDto},
     rendered_source::RenderedSource,
     snapshot::{FileSystemInfo, Snapshot, SnapshotCache},
 };
-
-mod cache;
-mod facade;
-mod memory;
-mod options;
-mod persistent;
-mod records;
-#[cfg(test)]
-mod tests;
-
-pub use options::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
-
-use cache::Cache;
-pub(crate) use cache::{CacheItemFamily, CacheItemWork, CacheWorkCounters};
-use facade::{
-    ASSET_RENDER_CACHE_NAMESPACE, CODE_GENERATION_CACHE_NAMESPACE, MODULE_BUILD_CACHE_NAMESPACE,
-    RESOLVE_CACHE_NAMESPACE,
-};
-pub(crate) use facade::{
-    CacheETag, CacheFacade, CacheIdentifier, CacheKey, CacheNamespace, ModuleBuildCache,
-    NormalModuleFactoryCache,
-};
-use persistent::PersistentCachePreparation;
-pub(crate) use records::{ModuleBuildRecord, ResolveRecord, ResolveRequest};
 
 const CACHE_PROFILE_LOGGER: &str = "unpack.Cache.Profile";
 const CACHE_WRITER_LOGGER: &str = "unpack.Cache.Writer";
 
 #[derive(Debug)]
-struct CacheDiagnostics {
+pub(crate) struct CacheDiagnostics {
     profile: bool,
     events: Mutex<Vec<InfrastructureLogEvent>>,
 }
@@ -62,7 +53,7 @@ impl CacheDiagnostics {
         }
     }
 
-    fn profile(&self, message: impl Into<String>) {
+    pub(super) fn profile(&self, message: impl Into<String>) {
         if self.profile {
             self.events
                 .lock()
@@ -75,7 +66,7 @@ impl CacheDiagnostics {
         }
     }
 
-    fn warn(&self, message: impl Into<String>) {
+    pub(super) fn warn(&self, message: impl Into<String>) {
         self.events
             .lock()
             .expect("cache diagnostics mutex should not be poisoned")
@@ -98,19 +89,19 @@ impl CacheDiagnostics {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BuildCache {
-    options: CacheOptions,
+    pub(crate) options: CacheOptions,
     build_dependency_snapshot_strategy: SnapshotStrategy,
     resolve_build_dependency_snapshot_strategy: SnapshotStrategy,
     build_dependency_file_system_info: FileSystemInfo,
     diagnostics: Arc<CacheDiagnostics>,
-    clock: Arc<dyn CacheClock>,
-    inner: Arc<BuildCacheInner>,
+    pub(crate) clock: Arc<dyn CacheClock>,
+    pub(crate) inner: Arc<BuildCacheInner>,
 }
 
 #[derive(Debug)]
-struct BuildCacheInner {
+pub(crate) struct BuildCacheInner {
     // Operations that need both locks must acquire `cache` before `publication`.
-    cache: Mutex<Cache>,
+    pub(crate) cache: Mutex<Cache>,
     dirty_generation: AtomicU64,
     published_generation: AtomicU64,
     initial_store_pending: AtomicBool,
@@ -135,7 +126,7 @@ impl CachePublicationState {
     }
 }
 
-trait CacheClock: fmt::Debug + Send + Sync {
+pub(crate) trait CacheClock: fmt::Debug + Send + Sync {
     fn now(&self) -> AccessStamp;
 }
 
@@ -157,9 +148,9 @@ struct PublishBarrier {
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
-struct RestoreBarrier {
-    entered: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
+pub(crate) struct RestoreBarrier {
+    pub(super) entered: Arc<std::sync::Barrier>,
+    pub(super) release: Arc<std::sync::Barrier>,
 }
 
 #[cfg(test)]
@@ -213,7 +204,7 @@ impl BuildCacheInner {
         }
     }
 
-    fn mark_dirty(&self) {
+    pub(crate) fn mark_dirty(&self) {
         self.dirty_generation
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
                 Some(generation.saturating_add(1))
@@ -480,7 +471,7 @@ impl BuildCache {
         Ok(())
     }
 
-    fn is_writable_filesystem_cache(&self) -> bool {
+    pub(crate) fn is_writable_filesystem_cache(&self) -> bool {
         self.options.kind == CacheKind::Filesystem && !self.options.readonly
     }
 

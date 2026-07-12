@@ -1,3 +1,5 @@
+// Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/FlagDependencyUsagePlugin.js
+
 use std::collections::{BTreeSet, HashMap};
 
 use crate::{
@@ -83,9 +85,17 @@ fn flag_dependency_usage(compilation: &mut Compilation) {
                     target.0 = true;
                 } else {
                     let previous_len = target.1.len();
-                    target
-                        .1
-                        .extend(origin_usage.1.into_iter().filter(|name| name != "default"));
+                    let provided = compilation
+                        .module_graph()
+                        .module(connection.module)
+                        .and_then(|module| module.exports_info().provided_exports())
+                        .map(|exports| exports.map(str::to_string).collect::<BTreeSet<_>>());
+                    target.1.extend(origin_usage.1.into_iter().filter(|name| {
+                        name != "default"
+                            && provided
+                                .as_ref()
+                                .is_none_or(|exports| exports.contains(name))
+                    }));
                     changed |= target.1.len() != previous_len;
                 }
             }

@@ -97,8 +97,8 @@ copying webpack's `WeakTupleMap`, while preserving these boundaries:
    dependency invalidates the affected closure while an unrelated subgraph
    retains memoized computations.
 
-The repository's existing ADR also records cache-unaffected behavior as a
-model-backed exclusion, so exposing the options requires implementing this
-model or updating the ADR with a deliberate deviation:
+ADR 0130 originally recorded cache-unaffected behavior as a model-backed
+exclusion. The implemented model and its separation from Record Cache are
+captured by the superseding decision:
 
-- [`docs/adr/0130-align-public-cache-and-snapshot-contracts-with-webpack.md`](../adr/0130-align-public-cache-and-snapshot-contracts-with-webpack.md)
+- [`docs/adr/0139-keep-unaffected-module-computations-separate-from-record-cache.md`](../adr/0139-keep-unaffected-module-computations-separate-from-record-cache.md)

@@ -18,7 +18,7 @@ use crate::{
     code_generation_record::{
         CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationResult, CodeGenerationSource,
     },
-    id_assignment::RenderId,
+    id_assignment::{ChunkId, IdValue, ModuleId},
     output_filename::resolve_chunk_filename,
     rendered_source::RenderedSource,
     runtime::{RuntimeModule, RuntimeModuleContext, RuntimeRequirement, RuntimeRequirements},
@@ -32,7 +32,7 @@ pub struct Asset {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CodeGenerationResults {
-    module_render_ids: HashMap<ModuleHandle, RenderId>,
+    module_ids: HashMap<ModuleHandle, ModuleId>,
     results: HashMap<ModuleHandle, CodeGenerationResult>,
 }
 
@@ -55,7 +55,7 @@ struct CodeGenerationInput<'a> {
     module: &'a Module,
     module_graph: &'a ModuleGraph,
     chunk_graph: &'a ChunkGraph,
-    module_render_ids: &'a HashMap<ModuleHandle, RenderId>,
+    module_ids: &'a HashMap<ModuleHandle, ModuleId>,
 }
 
 fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
@@ -63,7 +63,7 @@ fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
         module,
         module_graph,
         chunk_graph,
-        module_render_ids,
+        module_ids,
     } = input;
     let mut hasher = StableHasher::default();
     hasher.write(b"unpack/code-generation/etag/2");
@@ -79,7 +79,7 @@ fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
         .code_generation_local_input_digest()
         .hash(&mut hasher);
     hash_used_export_names(module, &mut hasher);
-    module_render_ids.get(&module.handle()).hash(&mut hasher);
+    module_ids.get(&module.handle()).hash(&mut hasher);
 
     for dependency_index in 0..module.dependencies().len() {
         module_graph
@@ -88,7 +88,7 @@ fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
                 None,
                 DependencyIndex::new(dependency_index),
             )
-            .and_then(|target| module_render_ids.get(&target))
+            .and_then(|target| module_ids.get(&target))
             .hash(&mut hasher);
     }
 
@@ -100,7 +100,7 @@ fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
                     Some(AsyncDependenciesBlockIndex::new(block_index)),
                     DependencyIndex::new(dependency_index),
                 )
-                .and_then(|target| module_render_ids.get(&target))
+                .and_then(|target| module_ids.get(&target))
                 .hash(&mut hasher);
         }
         chunk_graph
@@ -114,7 +114,7 @@ fn code_generation_etag(input: &CodeGenerationInput<'_>) -> CacheETag {
                     .first()
             })
             .and_then(|chunk_handle| chunk_graph.chunk(*chunk_handle))
-            .map(Chunk::render_id)
+            .map(Chunk::expect_id)
             .hash(&mut hasher);
     }
 
@@ -174,19 +174,19 @@ enum AssetRenderManifest {
     InitialChunk {
         modules: Vec<ModuleRenderManifest>,
         runtime_modules: Vec<RenderedRuntimeModule>,
-        entry_id: RenderId,
-        chunk_id: RenderId,
+        entry_id: ModuleId,
+        chunk_id: ChunkId,
     },
     AsyncChunk {
         modules: Vec<ModuleRenderManifest>,
-        chunk_id: RenderId,
+        chunk_id: ChunkId,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModuleRenderManifest {
     module: ModuleHandle,
-    render_id: RenderId,
+    id: ModuleId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -198,7 +198,7 @@ struct RenderedRuntimeModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AssetRenderKey {
     kind: AssetRenderKind,
-    chunk_id: RenderId,
+    chunk_id: ChunkId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,21 +270,21 @@ fn generate_code_with(
         CodeGenerationInput<'_>,
     ) -> std::result::Result<CodeGenerationRecord, Error>,
 ) -> CodeGenerationOutcome {
-    let module_render_ids = module_graph
+    let module_ids = module_graph
         .modules()
         .iter()
         .filter(|module| !chunk_graph.module_chunks(module.handle()).is_empty())
         .map(|module| {
-            let render_id = chunk_graph
-                .module_render_id(module.handle())
+            let id = chunk_graph
+                .module_id(module.handle())
                 .unwrap_or_else(|| {
                     panic!(
-                        "module {:?} must have an assigned Render ID before code generation",
+                        "module {:?} must have an assigned ID before code generation",
                         module.handle()
                     )
                 })
                 .clone();
-            (module.handle(), render_id)
+            (module.handle(), id)
         })
         .collect::<HashMap<_, _>>();
     let mut results = HashMap::new();
@@ -298,7 +298,7 @@ fn generate_code_with(
             module,
             module_graph,
             chunk_graph,
-            module_render_ids: &module_render_ids,
+            module_ids: &module_ids,
         };
         let record = generate_module(input).unwrap_or_else(|error| {
             errors.push(error.clone());
@@ -319,7 +319,7 @@ fn generate_code_with(
 
     CodeGenerationOutcome {
         results: CodeGenerationResults {
-            module_render_ids,
+            module_ids,
             results,
         },
         errors,
@@ -369,11 +369,11 @@ pub(crate) fn create_render_manifest(
                 modules,
                 runtime_modules,
                 entry_id: code_generation_results
-                    .module_render_ids
+                    .module_ids
                     .get(&entry_module)
-                    .expect("Entry Module must have a Render ID before manifest creation")
+                    .expect("Entry Module must have an ID before manifest creation")
                     .clone(),
-                chunk_id: chunk.render_id().clone(),
+                chunk_id: chunk.expect_id().clone(),
             },
         });
     }
@@ -392,7 +392,7 @@ pub(crate) fn create_render_manifest(
             filename: resolve_chunk_filename(chunk),
             render: AssetRenderManifest::AsyncChunk {
                 modules: module_render_manifest(chunk_graph, chunk, code_generation_results),
-                chunk_id: chunk.render_id().clone(),
+                chunk_id: chunk.expect_id().clone(),
             },
         });
     }
@@ -482,7 +482,7 @@ fn hash_module_render_inputs(
 ) {
     modules.len().hash(hasher);
     for module in modules {
-        module.render_id.hash(hasher);
+        module.id.hash(hasher);
         module.module.hash(hasher);
         let result = code_generation_results
             .results
@@ -513,17 +513,17 @@ fn module_render_manifest(
             );
             ModuleRenderManifest {
                 module: *module_handle,
-                render_id: code_generation_results
-                    .module_render_ids
+                id: code_generation_results
+                    .module_ids
                     .get(module_handle)
                     .unwrap_or_else(|| {
-                        panic!("module {module_handle:?} must have a Render ID before rendering")
+                        panic!("module {module_handle:?} must have an ID before rendering")
                     })
                     .clone(),
             }
         })
         .collect::<Vec<_>>();
-    modules.sort_by(|left, right| left.render_id.cmp(&right.render_id));
+    modules.sort_by(|left, right| left.id.cmp(&right.id));
     modules
 }
 
@@ -579,11 +579,11 @@ fn emit_asset(filename: String, rendered: &RenderedSource, sourcemap: bool) -> V
 fn render_initial_asset(
     modules: &[ModuleRenderManifest],
     runtime_modules: &[RenderedRuntimeModule],
-    entry_id: &RenderId,
+    entry_id: &ModuleId,
     code_generation_results: &CodeGenerationResults,
 ) -> ConcatSource {
     let modules = render_module_table(modules, code_generation_results);
-    let entry_id = json_render_id(entry_id);
+    let entry_id = json_id(entry_id.value());
 
     let mut source = ConcatSource::default();
     source.add(RawStringSource::from(
@@ -623,11 +623,11 @@ function __webpack_require__(moduleId) {
 
 fn render_async_chunk_asset(
     modules: &[ModuleRenderManifest],
-    chunk_id: &RenderId,
+    chunk_id: &ChunkId,
     code_generation_results: &CodeGenerationResults,
 ) -> ConcatSource {
     let modules = render_module_table(modules, code_generation_results);
-    let chunk_id = json_render_id(chunk_id);
+    let chunk_id = json_id(chunk_id.value());
     let mut source = ConcatSource::default();
     source.add(RawStringSource::from(format!(
         r#""use strict";
@@ -664,7 +664,7 @@ fn render_module_table(
         }
         source.add(RawStringSource::from(format!(
             "{}: ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {{\n\"use strict\";\n",
-            json_render_id(&module.render_id),
+            json_id(module.id.value()),
         )));
         source.add(result.source().clone());
         source.add(RawStringSource::from("\n})".to_string()));
@@ -679,7 +679,7 @@ fn generate_module_code(
         module,
         module_graph,
         chunk_graph,
-        module_render_ids,
+        module_ids,
     } = input;
     if let Some(error) = module.build_error() {
         return Ok(CodeGenerationRecord::new(CodeGenerationSource::Raw {
@@ -688,12 +688,9 @@ fn generate_module_code(
     }
 
     let module_handle = module.handle();
-    let module_render_id = &module_render_ids[&module_handle];
-    let module_render_name = module_render_id.to_string();
-    let mut source = ReplaceSource::new(OriginalSource::new(
-        module.source(),
-        module_render_name.as_str(),
-    ));
+    let module_id = &module_ids[&module_handle];
+    let module_name = module_id.to_string();
+    let mut source = ReplaceSource::new(OriginalSource::new(module.source(), module_name.as_str()));
     let mut init_fragments = Vec::new();
     let mut runtime_requirements = RuntimeRequirements::default();
     if module.is_harmony() {
@@ -709,7 +706,7 @@ fn generate_module_code(
             module_graph,
             chunk_graph,
             module.exports_info(),
-            module_render_ids,
+            module_ids,
             &mut runtime_requirements,
             &mut source,
             &mut init_fragments,
@@ -724,7 +721,7 @@ fn generate_module_code(
             module_graph,
             chunk_graph,
             module.exports_info(),
-            module_render_ids,
+            module_ids,
             &mut runtime_requirements,
             &mut source,
             &mut init_fragments,
@@ -740,7 +737,7 @@ fn generate_module_code(
                 module_graph,
                 chunk_graph,
                 module.exports_info(),
-                module_render_ids,
+                module_ids,
                 &mut runtime_requirements,
                 &mut source,
                 &mut init_fragments,
@@ -754,7 +751,7 @@ fn generate_module_code(
             prefix: init,
             original_source_len: u32::try_from(module.source_len())
                 .expect("Module source length must fit the Code Generation cache format"),
-            original_name: module_render_name,
+            original_name: module_name,
             replacements: source
                 .replacements()
                 .iter()
@@ -811,7 +808,7 @@ fn apply_dependency_template(
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
     exports_info: &ExportsInfo,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
+    module_ids: &HashMap<ModuleHandle, ModuleId>,
     runtime_requirements: &mut RuntimeRequirements,
     source: &mut ReplaceSource,
     init_fragments: &mut Vec<InitFragment>,
@@ -844,7 +841,7 @@ fn apply_dependency_template(
                 module_handle,
                 dependency_index,
                 module_graph,
-                module_render_ids,
+                module_ids,
                 init_fragments,
             )
         }
@@ -853,7 +850,7 @@ fn apply_dependency_template(
             module_handle,
             dependency_index,
             module_graph,
-            module_render_ids,
+            module_ids,
             source,
         ),
         Dependency::HarmonyExportSpecifier(dep) => {
@@ -872,7 +869,7 @@ fn apply_dependency_template(
                 dependency_index,
                 module_graph,
                 exports_info,
-                module_render_ids,
+                module_ids,
                 init_fragments,
             )
         }
@@ -885,7 +882,7 @@ fn apply_dependency_template(
                 dependency_index,
                 module_graph,
                 chunk_graph,
-                module_render_ids,
+                module_ids,
                 runtime_requirements,
                 source,
             )
@@ -916,7 +913,7 @@ fn apply_harmony_import_side_effect_dependency(
     module_handle: ModuleHandle,
     dependency_index: Option<DependencyIndex>,
     module_graph: &ModuleGraph,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
+    module_ids: &HashMap<ModuleHandle, ModuleId>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
     let dependency_index = dependency_index.expect("Harmony import must have a Dependency Index");
@@ -924,7 +921,7 @@ fn apply_harmony_import_side_effect_dependency(
         .module_for_dependency(module_handle, None, dependency_index)
         .expect("Harmony import must have a Module Graph connection");
     let import_var = import_var(&dep.module.request, dep.module.source_order.unwrap_or(0));
-    let target_id = json_render_id(&module_render_ids[&target]);
+    let target_id = json_id(module_ids[&target].value());
     push_init_fragment(
         init_fragments,
         InitFragmentStage::HarmonyImport,
@@ -937,7 +934,7 @@ fn apply_harmony_import_specifier_dependency(
     module_handle: ModuleHandle,
     dependency_index: Option<DependencyIndex>,
     module_graph: &ModuleGraph,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
+    module_ids: &HashMap<ModuleHandle, ModuleId>,
     source: &mut ReplaceSource,
 ) {
     let dependency_index =
@@ -956,7 +953,7 @@ fn apply_harmony_import_specifier_dependency(
         expression
     };
     replace(source, dep.usage_range, expression);
-    let _ = module_render_ids;
+    let _ = module_ids;
 }
 
 fn apply_harmony_export_specifier_dependency(
@@ -1020,7 +1017,7 @@ fn apply_harmony_export_imported_specifier_dependency(
     dependency_index: Option<DependencyIndex>,
     module_graph: &ModuleGraph,
     exports_info: &ExportsInfo,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
+    module_ids: &HashMap<ModuleHandle, ModuleId>,
     init_fragments: &mut Vec<InitFragment>,
 ) {
     let dependency_index =
@@ -1051,7 +1048,7 @@ fn apply_harmony_export_imported_specifier_dependency(
             ),
         );
     }
-    let _ = module_render_ids;
+    let _ = module_ids;
 }
 
 fn apply_import_dependency(
@@ -1061,7 +1058,7 @@ fn apply_import_dependency(
     dependency_index: Option<DependencyIndex>,
     module_graph: &ModuleGraph,
     chunk_graph: &ChunkGraph,
-    module_render_ids: &HashMap<ModuleHandle, RenderId>,
+    module_ids: &HashMap<ModuleHandle, ModuleId>,
     runtime_requirements: &mut RuntimeRequirements,
     source: &mut ReplaceSource,
 ) {
@@ -1070,7 +1067,7 @@ fn apply_import_dependency(
     let target = module_graph
         .module_for_dependency(module_handle, Some(block_index), dependency_index)
         .expect("Dynamic import must have a Module Graph connection");
-    let target_id = json_render_id(&module_render_ids[&target]);
+    let target_id = json_id(module_ids[&target].value());
     let origin = AsyncBlockOrigin {
         module: module_handle,
         block: block_index,
@@ -1086,7 +1083,7 @@ fn apply_import_dependency(
         let chunk = chunk_graph
             .chunk(chunk_handle)
             .expect("Async Chunk must exist before Dynamic Import generation");
-        let chunk_id = json_render_id(chunk.render_id());
+        let chunk_id = json_id(chunk.expect_id().value());
         format!(
             "__webpack_require__.e({chunk_id}).then(__webpack_require__.bind(__webpack_require__, {target_id}))"
         )
@@ -1165,10 +1162,10 @@ fn json_string(value: &str) -> String {
     simd_json::to_string(value).expect("JavaScript string input must serialize as JSON")
 }
 
-fn json_render_id(render_id: &RenderId) -> String {
-    match render_id {
-        RenderId::String(value) => json_string(value),
-        RenderId::Number(value) => value.to_string(),
+fn json_id(id: &IdValue) -> String {
+    match id {
+        IdValue::String(value) => json_string(value),
+        IdValue::Number(value) => value.to_string(),
     }
 }
 
@@ -1184,7 +1181,7 @@ mod tests {
         build_cache::{
             BuildCache, CacheIdentifier, CacheItemFamily, CacheItemWork, CacheKey, CacheNamespace,
         },
-        id_assignment::{RenderId, assign_chunk_render_ids, assign_module_render_ids},
+        id_assignment::{assign_chunk_ids, assign_module_ids},
         runtime::RuntimeModule,
     };
 
@@ -1206,11 +1203,11 @@ mod tests {
 
         let initial = AssetRenderKey {
             kind: AssetRenderKind::Initial,
-            chunk_id: RenderId::String("main".to_string()),
+            chunk_id: "main".into(),
         };
         let asynchronous = AssetRenderKey {
             kind: AssetRenderKind::Async,
-            chunk_id: RenderId::String("main".to_string()),
+            chunk_id: "main".into(),
         };
         assert_eq!(
             initial.cache_identifier(),
@@ -1224,11 +1221,11 @@ mod tests {
         let module_handle = ModuleHandle::new(0);
         let module = ModuleRenderManifest {
             module: module_handle,
-            render_id: RenderId::String("./src/feature.js".to_string()),
+            id: "./src/feature.js".into(),
         };
         let render = AssetRenderManifest::AsyncChunk {
             modules: vec![module],
-            chunk_id: RenderId::String("src_feature_js".to_string()),
+            chunk_id: "src_feature_js".into(),
         };
         let mut results = CodeGenerationResults::default();
         results.results.insert(
@@ -1259,8 +1256,8 @@ mod tests {
                 module: RuntimeModule::GetChunkFilename,
                 source: "return feature.js".to_string(),
             }],
-            entry_id: RenderId::String("./src/index.js".to_string()),
-            chunk_id: RenderId::String("main".to_string()),
+            entry_id: "./src/index.js".into(),
+            chunk_id: "main".into(),
         };
         let changed_filename_map = AssetRenderManifest::InitialChunk {
             modules: Vec::new(),
@@ -1268,8 +1265,8 @@ mod tests {
                 module: RuntimeModule::GetChunkFilename,
                 source: "return renamed.js".to_string(),
             }],
-            entry_id: RenderId::String("./src/index.js".to_string()),
-            chunk_id: RenderId::String("main".to_string()),
+            entry_id: "./src/index.js".into(),
+            chunk_id: "main".into(),
         };
         assert_ne!(
             initial.cache_etag(&results),
@@ -1304,8 +1301,8 @@ mod tests {
                 );
             let mut chunk_graph =
                 crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
-            assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
-            assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
+            assign_module_ids(&options, &module_graph, &mut chunk_graph);
+            assign_chunk_ids(&options, &module_graph, &mut chunk_graph);
             (module_graph, chunk_graph, module)
         };
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
@@ -1354,13 +1351,13 @@ mod tests {
             .finish_build(Vec::new(), Vec::new(), Vec::new(), "éx".to_string(), 1);
         let mut chunk_graph =
             crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
-        assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
-        assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
-        let module_render_ids = HashMap::from([(
+        assign_module_ids(&options, &module_graph, &mut chunk_graph);
+        assign_chunk_ids(&options, &module_graph, &mut chunk_graph);
+        let module_ids = HashMap::from([(
             module,
             chunk_graph
-                .module_render_id(module)
-                .expect("fixture Module should have a Render ID")
+                .module_id(module)
+                .expect("fixture Module should have an ID")
                 .clone(),
         )]);
         let module_ref = module_graph
@@ -1370,7 +1367,7 @@ mod tests {
             module: module_ref,
             module_graph: &module_graph,
             chunk_graph: &chunk_graph,
-            module_render_ids: &module_render_ids,
+            module_ids: &module_ids,
         };
         let etag = super::code_generation_etag(&input);
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
@@ -1429,8 +1426,8 @@ mod tests {
             );
         let mut chunk_graph =
             crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
-        assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
-        assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
+        assign_module_ids(&options, &module_graph, &mut chunk_graph);
+        assign_chunk_ids(&options, &module_graph, &mut chunk_graph);
 
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
         for outcome in [

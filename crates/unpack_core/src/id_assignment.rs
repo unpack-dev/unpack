@@ -7,12 +7,12 @@ use std::{
 use crate::{ChunkGraph, CompilerOptions, ModuleGraph, cache_hash::stable_hash};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum RenderId {
+pub(crate) enum IdValue {
     String(String),
     Number(u32),
 }
 
-impl RenderId {
+impl IdValue {
     pub(crate) fn as_string(&self) -> Option<&str> {
         match self {
             Self::String(value) => Some(value),
@@ -45,7 +45,7 @@ impl<K> NamedIdCandidate<K> {
     }
 }
 
-impl fmt::Display for RenderId {
+impl fmt::Display for IdValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::String(value) => formatter.write_str(value),
@@ -54,7 +54,97 @@ impl fmt::Display for RenderId {
     }
 }
 
-pub(crate) fn assign_module_render_ids(
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModuleId(IdValue);
+
+impl ModuleId {
+    pub fn as_string(&self) -> Option<&str> {
+        self.0.as_string()
+    }
+
+    pub fn as_number(&self) -> Option<u32> {
+        self.0.as_number()
+    }
+
+    pub(crate) fn value(&self) -> &IdValue {
+        &self.0
+    }
+
+    pub(crate) fn from_value(value: IdValue) -> Self {
+        Self(value)
+    }
+}
+
+impl From<String> for ModuleId {
+    fn from(value: String) -> Self {
+        Self(IdValue::String(value))
+    }
+}
+
+impl From<&str> for ModuleId {
+    fn from(value: &str) -> Self {
+        Self(IdValue::String(value.to_string()))
+    }
+}
+
+impl From<u32> for ModuleId {
+    fn from(value: u32) -> Self {
+        Self(IdValue::Number(value))
+    }
+}
+
+impl fmt::Display for ModuleId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ChunkId(IdValue);
+
+impl ChunkId {
+    pub fn as_string(&self) -> Option<&str> {
+        self.0.as_string()
+    }
+
+    pub fn as_number(&self) -> Option<u32> {
+        self.0.as_number()
+    }
+
+    pub(crate) fn value(&self) -> &IdValue {
+        &self.0
+    }
+
+    pub(crate) fn from_value(value: IdValue) -> Self {
+        Self(value)
+    }
+}
+
+impl From<String> for ChunkId {
+    fn from(value: String) -> Self {
+        Self(IdValue::String(value))
+    }
+}
+
+impl From<&str> for ChunkId {
+    fn from(value: &str) -> Self {
+        Self(IdValue::String(value.to_string()))
+    }
+}
+
+impl From<u32> for ChunkId {
+    fn from(value: u32) -> Self {
+        Self(IdValue::Number(value))
+    }
+}
+
+impl fmt::Display for ChunkId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+pub(crate) fn assign_module_ids(
     options: &CompilerOptions,
     module_graph: &ModuleGraph,
     chunk_graph: &mut ChunkGraph,
@@ -71,12 +161,12 @@ pub(crate) fn assign_module_render_ids(
         })
         .collect();
 
-    for (module, render_id) in assign_named_ids(candidates) {
-        chunk_graph.set_module_render_id(module, render_id);
+    for (module, id) in assign_named_ids(candidates) {
+        chunk_graph.set_module_id(module, ModuleId::from_value(id));
     }
 }
 
-pub(crate) fn assign_chunk_render_ids(
+pub(crate) fn assign_chunk_ids(
     options: &CompilerOptions,
     module_graph: &ModuleGraph,
     chunk_graph: &mut ChunkGraph,
@@ -124,17 +214,14 @@ pub(crate) fn assign_chunk_render_ids(
     }
 
     let mut assignments = assign_named_ids(entry_candidates);
-    let reserved = assignments
-        .iter()
-        .map(|(_, render_id)| render_id.to_string())
-        .collect();
+    let reserved = assignments.iter().map(|(_, id)| id.to_string()).collect();
     assignments.extend(assign_named_ids_with_reserved(async_candidates, reserved));
-    for (chunk_handle, render_id) in assignments {
-        chunk_graph.set_chunk_render_id(chunk_handle, render_id);
+    for (chunk_handle, id) in assignments {
+        chunk_graph.set_chunk_id(chunk_handle, ChunkId::from_value(id));
     }
 }
 
-fn assign_named_ids<K>(candidates: Vec<NamedIdCandidate<K>>) -> Vec<(K, RenderId)>
+fn assign_named_ids<K>(candidates: Vec<NamedIdCandidate<K>>) -> Vec<(K, IdValue)>
 where
     K: Copy + Ord,
 {
@@ -144,7 +231,7 @@ where
 fn assign_named_ids_with_reserved<K>(
     candidates: Vec<NamedIdCandidate<K>>,
     mut used: HashSet<String>,
-) -> Vec<(K, RenderId)>
+) -> Vec<(K, IdValue)>
 where
     K: Copy + Ord,
 {
@@ -168,7 +255,7 @@ where
             continue;
         }
         if items.len() == 1 && used.insert(short_name.clone()) {
-            assigned.push((items[0].0, RenderId::String(short_name)));
+            assigned.push((items[0].0, IdValue::String(short_name)));
             continue;
         }
 
@@ -181,7 +268,7 @@ where
                 name = format!("{base}-{index}");
                 index += 1;
             }
-            assigned.push((item, RenderId::String(name)));
+            assigned.push((item, IdValue::String(name)));
         }
     }
 
@@ -194,7 +281,7 @@ where
             next += 1;
         }
         used.insert(next.to_string());
-        assigned.push((item, RenderId::Number(next)));
+        assigned.push((item, IdValue::Number(next)));
         next += 1;
     }
     assigned.sort_by_key(|(item, _)| *item);
@@ -339,7 +426,7 @@ mod tests {
 
         assert_eq!(
             assignments,
-            vec![(0, RenderId::Number(0)), (1, RenderId::Number(1))]
+            vec![(0, IdValue::Number(0)), (1, IdValue::Number(1))]
         );
     }
 
@@ -356,6 +443,34 @@ mod tests {
             readable_module_name(&context, &identity),
             "loaders/first.js!./src/value.js?one#alpha|layer:client"
         );
+    }
+
+    #[test]
+    fn assigned_ids_are_distinct_from_internal_handles() {
+        let context = Path::new("/project");
+        let options = CompilerOptions::new(context, vec![Entry::new("main", "./src/index")]);
+        let mut module_graph = ModuleGraph::default();
+        let module = add_built_module(
+            &mut module_graph,
+            ModuleIdentity::new(context.join("src/index.js")),
+            "entry",
+        );
+        let mut chunk_graph =
+            crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
+
+        assign_module_ids(&options, &module_graph, &mut chunk_graph);
+        assign_chunk_ids(&options, &module_graph, &mut chunk_graph);
+
+        let module_id: &ModuleId = chunk_graph
+            .module_id(module)
+            .expect("module ID should be assigned");
+        let chunk = &chunk_graph.chunks()[0];
+        let chunk_id: &ChunkId = chunk.id().expect("chunk ID should be assigned");
+
+        assert_eq!(module.index(), 0);
+        assert_eq!(module_id.as_string(), Some("./src/index.js"));
+        assert_eq!(chunk.handle().index(), 0);
+        assert_eq!(chunk_id.as_string(), Some("main"));
     }
 
     #[test]
@@ -376,8 +491,8 @@ mod tests {
         let module = add_built_module(&mut module_graph, ModuleIdentity::new(context), "unnamed");
         let mut chunk_graph =
             crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
-        assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
-        assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
+        assign_module_ids(&options, &module_graph, &mut chunk_graph);
+        assign_chunk_ids(&options, &module_graph, &mut chunk_graph);
 
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
         let results = generate_code(&module_graph, &chunk_graph).results;
@@ -423,8 +538,8 @@ mod tests {
             .collect::<Vec<_>>();
         let mut chunk_graph =
             crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &entries);
-        assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
-        assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
+        assign_module_ids(&options, &module_graph, &mut chunk_graph);
+        assign_chunk_ids(&options, &module_graph, &mut chunk_graph);
 
         let build_cache = BuildCache::new(CacheOptions::memory(), SnapshotOptions::default());
         let results = generate_code(&module_graph, &chunk_graph).results;

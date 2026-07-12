@@ -49,6 +49,7 @@ pub use dependency::{
 pub use error::{Error, Result};
 pub use exports_info::ExportsInfo;
 pub use hooks::{CompilationHooks, HookFuture};
+pub use id_assignment::{ChunkId, ModuleId};
 pub use loader::{LoaderFuture, LoaderRequest, LoaderRunner, MatchedLoader, ModuleRule};
 pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions};
 pub use module::{Module, ModuleHandle, ModuleIdentity, ModuleType};

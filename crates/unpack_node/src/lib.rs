@@ -214,8 +214,7 @@ pub struct NativeModuleGraphConnection {
 pub struct NativeChunk {
     pub handle: u32,
     pub name: Option<String>,
-    #[napi(js_name = "renderId")]
-    pub render_id: Option<Either<String, u32>>,
+    pub id: Option<Either<String, u32>>,
 }
 
 #[napi(object)]
@@ -295,7 +294,7 @@ impl NativeCompilation {
             .map(|chunk| NativeChunk {
                 handle: chunk.handle().index().try_into().unwrap_or(u32::MAX),
                 name: chunk.name().map(str::to_string),
-                render_id: native_render_id(chunk.render_id_string(), chunk.render_id_number()),
+                id: native_id(chunk.id_string(), chunk.id_number()),
             })
             .collect()
     }
@@ -333,9 +332,9 @@ impl NativeCompilation {
         if self.module_graph.module(module_handle).is_none() {
             return None;
         }
-        native_render_id(
-            self.chunk_graph.module_render_id_string(module_handle),
-            self.chunk_graph.module_render_id_number(module_handle),
+        native_id(
+            self.chunk_graph.module_id_string(module_handle),
+            self.chunk_graph.module_id_number(module_handle),
         )
     }
 }
@@ -804,10 +803,7 @@ async fn run_compiler_inner(
     }
 }
 
-fn native_render_id(
-    string_id: Option<&str>,
-    number_id: Option<u32>,
-) -> Option<Either<String, u32>> {
+fn native_id(string_id: Option<&str>, number_id: Option<u32>) -> Option<Either<String, u32>> {
     string_id
         .map(|value| Either::A(value.to_string()))
         .or_else(|| number_id.map(Either::B))

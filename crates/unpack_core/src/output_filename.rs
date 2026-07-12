@@ -6,6 +6,6 @@ pub(crate) fn resolve_chunk_filename(chunk: &Chunk) -> String {
     }
     match chunk.name() {
         Some(name) => format!("{name}.js"),
-        None => format!("{}.js", chunk.render_id()),
+        None => format!("{}.js", chunk.expect_id()),
     }
 }

@@ -482,8 +482,7 @@ interface NativeModuleGraphConnection {
 interface NativeChunk {
   handle: number;
   name?: string | null;
-  renderId?: string | number | null;
-  render_id?: string | number | null;
+  id?: string | number | null;
 }
 interface NativeRunResult {
   error?: {
@@ -1519,6 +1518,12 @@ class StatsImpl implements Stats {
   }
 }
 
+const MODULE_HANDLES = new WeakMap<Module, number>();
+
+function getModuleHandle(module: Module): number | undefined {
+  return MODULE_HANDLES.get(module);
+}
+
 class ModuleImpl implements Module {
   readonly #identifier: string;
   #moduleGraph: ModuleGraphImpl | undefined;
@@ -1528,7 +1533,7 @@ class ModuleImpl implements Module {
   allExportsUsed: boolean;
 
   constructor(
-    readonly nativeHandle: number,
+    handle: number,
     readonly resource: string,
     readonly type: string,
     providedExports: readonly string[] | null,
@@ -1536,6 +1541,7 @@ class ModuleImpl implements Module {
     allExportsUsed: boolean,
     identifier: string
   ) {
+    MODULE_HANDLES.set(this, handle);
     this.#identifier = identifier;
     this.providedExports = providedExports;
     this.usedExports = usedExports;
@@ -1779,9 +1785,10 @@ class ModuleGraphImpl implements ModuleGraph {
   #loadIncoming(module: Module): void {
     if (this.#loadedIncoming.has(module)) return;
     this.#loadedIncoming.add(module);
-    if (!(module instanceof ModuleImpl)) return;
+    const handle = getModuleHandle(module);
+    if (handle === undefined) return;
     for (const connection of
-      this.#nativeCompilation?.incomingConnections(module.nativeHandle) ?? []) {
+      this.#nativeCompilation?.incomingConnections(handle) ?? []) {
       this.#materializeConnection(connection);
     }
   }
@@ -1789,9 +1796,10 @@ class ModuleGraphImpl implements ModuleGraph {
   #loadOutgoing(module: Module): void {
     if (this.#loadedOutgoing.has(module)) return;
     this.#loadedOutgoing.add(module);
-    if (!(module instanceof ModuleImpl)) return;
+    const handle = getModuleHandle(module);
+    if (handle === undefined) return;
     for (const connection of
-      this.#nativeCompilation?.outgoingConnections(module.nativeHandle) ?? []) {
+      this.#nativeCompilation?.outgoingConnections(handle) ?? []) {
       this.#materializeConnection(connection);
     }
   }
@@ -1918,12 +1926,20 @@ class ModuleGraphImpl implements ModuleGraph {
   }
 }
 
+const CHUNK_HANDLES = new WeakMap<Chunk, number>();
+
+function getChunkHandle(chunk: Chunk): number | undefined {
+  return CHUNK_HANDLES.get(chunk);
+}
+
 class ChunkImpl implements Chunk {
   constructor(
-    readonly nativeHandle: number,
+    handle: number,
     readonly id: string | number | null,
     readonly name: string | undefined
-  ) {}
+  ) {
+    CHUNK_HANDLES.set(this, handle);
+  }
 }
 
 class SortableSetView<T> extends Set<T> {
@@ -1981,13 +1997,14 @@ class ChunkGraphImpl implements ChunkGraph {
   #loadModuleChunks(module: Module): SortableSetView<Chunk> {
     const loaded = this.#moduleChunkIterables.get(module);
     if (loaded) return loaded;
-    if (!(module instanceof ModuleImpl)) return EMPTY_CHUNK_ITERABLE;
+    const moduleHandle = getModuleHandle(module);
+    if (moduleHandle === undefined) return EMPTY_CHUNK_ITERABLE;
     const chunks = (
-      this.#nativeCompilation?.moduleChunks(module.nativeHandle) ?? []
+      this.#nativeCompilation?.moduleChunks(moduleHandle) ?? []
     ).flatMap((handle) => {
-        const chunk = this.#chunksByHandle.get(handle);
-        return chunk ? [chunk] : [];
-      });
+      const chunk = this.#chunksByHandle.get(handle);
+      return chunk ? [chunk] : [];
+    });
     const iterable = new SortableSetView<Chunk>(chunks);
     this.#moduleChunkIterables.set(module, iterable);
     this.#moduleChunks.set(module, chunks);
@@ -1997,8 +2014,9 @@ class ChunkGraphImpl implements ChunkGraph {
   #loadChunkModules(chunk: Chunk): SortableSetView<Module> {
     const loaded = this.#chunkModuleIterables.get(chunk);
     if (loaded) return loaded;
-    if (!(chunk instanceof ChunkImpl)) return EMPTY_MODULE_ITERABLE;
-    const modules = (this.#nativeCompilation?.chunkModules(chunk.nativeHandle) ?? [])
+    const chunkHandle = getChunkHandle(chunk);
+    if (chunkHandle === undefined) return EMPTY_MODULE_ITERABLE;
+    const modules = (this.#nativeCompilation?.chunkModules(chunkHandle) ?? [])
       .flatMap((handle) => {
         const module = this.#modulesByHandle.get(handle);
         return module ? [module] : [];
@@ -2011,9 +2029,11 @@ class ChunkGraphImpl implements ChunkGraph {
 
   getModuleId(module: Module): string | number | null {
     if (!this.#moduleIds.has(module)) {
-      const id = module instanceof ModuleImpl
-        ? this.#nativeCompilation?.moduleId(module.nativeHandle) ?? null
-        : null;
+      const moduleHandle = getModuleHandle(module);
+      const id =
+        moduleHandle === undefined
+          ? null
+          : this.#nativeCompilation?.moduleId(moduleHandle) ?? null;
       this.#moduleIds.set(module, id);
     }
     return this.#moduleIds.get(module) ?? null;
@@ -2136,10 +2156,10 @@ class CompilationImpl implements Compilation {
         this.#chunksByHandle.set(
           chunk.handle,
           new ChunkImpl(
-          chunk.handle,
-          chunk.renderId ?? chunk.render_id ?? null,
-          chunk.name ?? undefined
-        )
+            chunk.handle,
+            chunk.id ?? null,
+            chunk.name ?? undefined
+          )
         );
       }
     }

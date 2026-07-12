@@ -4,7 +4,7 @@ use crate::{
     ModuleHandle,
     chunk::{Chunk, ChunkHandle},
     chunk_group::{AsyncBlockOrigin, ChunkGroup, ChunkGroupHandle, ChunkGroupKind},
-    id_assignment::RenderId,
+    id_assignment::{ChunkId, ModuleId},
     runtime::{
         RuntimeModule, RuntimeRequirements, entry_startup_runtime_requirements,
         resolve_runtime_modules,
@@ -18,7 +18,7 @@ pub struct ChunkGraph {
     entrypoints: Vec<ChunkGroupHandle>,
     chunk_modules: Vec<Vec<ModuleHandle>>,
     module_chunks: Vec<Vec<ChunkHandle>>,
-    module_render_ids: Vec<Option<RenderId>>,
+    module_ids: Vec<Option<ModuleId>>,
     block_chunk_groups: HashMap<AsyncBlockOrigin, ChunkGroupHandle>,
     // Includes logical loading edges omitted from the materialized graph to break cycles.
     runtime_chunk_group_children: Vec<Vec<ChunkGroupHandle>>,
@@ -95,13 +95,14 @@ impl ChunkGraph {
     pub fn split_chunk(
         &mut self,
         chunk: ChunkHandle,
-        render_id: impl Into<String>,
+        id: impl Into<String>,
         filename: impl Into<String>,
     ) -> Option<ChunkHandle> {
         let original = self.chunks.get(chunk.index())?.clone();
-        let render_id = RenderId::String(render_id.into());
+        let id: String = id.into();
+        let id = ChunkId::from(id);
         let new_chunk = self.add_chunk(None, Vec::new());
-        self.chunks[new_chunk.index()].assign_render_id(render_id);
+        self.chunks[new_chunk.index()].assign_id(id);
         self.chunks[new_chunk.index()].set_filename_override(filename.into());
         original.split(&mut self.chunks[new_chunk.index()], &mut self.chunk_groups);
         Some(new_chunk)
@@ -110,8 +111,7 @@ impl ChunkGraph {
     pub(crate) fn connect_chunk_and_module(&mut self, chunk: ChunkHandle, module: ModuleHandle) {
         if self.module_chunks.len() <= module.index() {
             self.module_chunks.resize_with(module.index() + 1, Vec::new);
-            self.module_render_ids
-                .resize_with(module.index() + 1, || None);
+            self.module_ids.resize_with(module.index() + 1, || None);
             self.module_runtime_requirements
                 .resize_with(module.index() + 1, RuntimeRequirements::default);
         }
@@ -146,30 +146,27 @@ impl ChunkGraph {
             .unwrap_or(&[])
     }
 
-    pub(crate) fn module_render_id(&self, module: ModuleHandle) -> Option<&RenderId> {
-        self.module_render_ids
-            .get(module.index())
-            .and_then(Option::as_ref)
+    pub fn module_id(&self, module: ModuleHandle) -> Option<&ModuleId> {
+        self.module_ids.get(module.index()).and_then(Option::as_ref)
     }
 
-    pub fn module_render_id_string(&self, module: ModuleHandle) -> Option<&str> {
-        self.module_render_id(module).and_then(RenderId::as_string)
+    pub fn module_id_string(&self, module: ModuleHandle) -> Option<&str> {
+        self.module_id(module).and_then(ModuleId::as_string)
     }
 
-    pub fn module_render_id_number(&self, module: ModuleHandle) -> Option<u32> {
-        self.module_render_id(module).and_then(RenderId::as_number)
+    pub fn module_id_number(&self, module: ModuleHandle) -> Option<u32> {
+        self.module_id(module).and_then(ModuleId::as_number)
     }
 
-    pub(crate) fn set_module_render_id(&mut self, module: ModuleHandle, render_id: RenderId) {
-        if self.module_render_ids.len() <= module.index() {
-            self.module_render_ids
-                .resize_with(module.index() + 1, || None);
+    pub(crate) fn set_module_id(&mut self, module: ModuleHandle, id: ModuleId) {
+        if self.module_ids.len() <= module.index() {
+            self.module_ids.resize_with(module.index() + 1, || None);
         }
-        self.module_render_ids[module.index()] = Some(render_id);
+        self.module_ids[module.index()] = Some(id);
     }
 
-    pub(crate) fn set_chunk_render_id(&mut self, chunk: ChunkHandle, render_id: RenderId) {
-        self.chunks[chunk.index()].assign_render_id(render_id);
+    pub(crate) fn set_chunk_id(&mut self, chunk: ChunkHandle, id: ChunkId) {
+        self.chunks[chunk.index()].assign_id(id);
     }
 
     pub fn block_chunk_group(&self, origin: AsyncBlockOrigin) -> Option<ChunkGroupHandle> {

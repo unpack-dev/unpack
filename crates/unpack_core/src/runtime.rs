@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    ChunkGraph, ChunkHandle, id_assignment::RenderId, output_filename::resolve_chunk_filename,
+    ChunkGraph, ChunkHandle,
+    id_assignment::{ChunkId, IdValue},
+    output_filename::resolve_chunk_filename,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -274,7 +276,7 @@ __webpack_require__.e = function(chunkId) {
                     .chunk_graph
                     .chunk(context.runtime_chunk)
                     .expect("Require Chunk Loading must reference an existing runtime Chunk");
-                let chunk_id = json_render_id(runtime_chunk.render_id());
+                let chunk_id = json_chunk_id(runtime_chunk.expect_id());
                 format!(
                     r#"var installedChunks = {{
   {chunk_id}: 1
@@ -358,14 +360,14 @@ fn runtime_module_for_requirement(requirement: RuntimeRequirement) -> Option<Run
 fn render_chunk_filename_map(chunk_graph: &ChunkGraph) -> String {
     let mut entries = BTreeMap::new();
     for chunk in chunk_graph.chunks() {
-        entries.insert(chunk.render_id().clone(), resolve_chunk_filename(chunk));
+        entries.insert(chunk.expect_id().clone(), resolve_chunk_filename(chunk));
     }
     entries
         .into_iter()
         .map(|(chunk_id, filename)| {
             format!(
                 "{}: {}",
-                json_render_id(&chunk_id),
+                json_chunk_id(&chunk_id),
                 simd_json::to_string(&filename)
                     .expect("Chunk filename must serialize as a JavaScript string")
             )
@@ -374,11 +376,12 @@ fn render_chunk_filename_map(chunk_graph: &ChunkGraph) -> String {
         .join(", ")
 }
 
-fn json_render_id(render_id: &RenderId) -> String {
-    match render_id {
-        RenderId::String(value) => simd_json::to_string(value)
-            .expect("Chunk Render ID must serialize as a JavaScript string"),
-        RenderId::Number(value) => value.to_string(),
+fn json_chunk_id(id: &ChunkId) -> String {
+    match id.value() {
+        IdValue::String(value) => {
+            simd_json::to_string(value).expect("Chunk ID must serialize as a JavaScript string")
+        }
+        IdValue::Number(value) => value.to_string(),
     }
 }
 

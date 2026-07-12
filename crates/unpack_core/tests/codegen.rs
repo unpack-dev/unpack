@@ -35,7 +35,7 @@ async fn seal_orchestrates_post_make_phases() -> Result<(), Box<dyn std::error::
 }
 
 #[tokio::test]
-#[should_panic(expected = "Render IDs must be assigned before code generation")]
+#[should_panic(expected = "Module and Chunk IDs must be assigned before code generation")]
 async fn code_generation_rejects_an_unsealed_compilation() {
     let temp = tempfile::tempdir().expect("temp directory should be created");
     write(temp.path().join("src/index.js"), "export const value = 42;")
@@ -151,8 +151,7 @@ async fn entry_names_take_precedence_over_colliding_async_names()
 // Unpack does not expose loaders yet, so the public seam exercises the same
 // identity rule through resource queries and fragments.
 #[tokio::test]
-async fn module_render_ids_distinguish_queries_and_fragments()
--> Result<(), Box<dyn std::error::Error>> {
+async fn module_ids_distinguish_queries_and_fragments() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     write(
         temp.path().join("src/index.js"),
@@ -198,7 +197,7 @@ async fn module_render_ids_distinguish_queries_and_fragments()
 // Ported from webpack 5.108.1:
 // test/configCases/optimization/named-modules
 #[tokio::test]
-async fn renders_module_factories_in_render_id_order() -> Result<(), Box<dyn std::error::Error>> {
+async fn renders_module_factories_in_id_order() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     write(
         temp.path().join("src/index.js"),

@@ -1,7 +1,9 @@
-# E2E cases
+# Default cases
 
-Each child directory is one bundle execution case. Add source files exactly as
-they should appear in the fixture root, plus a `case.json` manifest:
+The existing end-to-end fixtures are the harness's default cases. Each child
+directory is one default case that uses the shared compiler options. Add source
+files exactly as they should appear in the fixture root, plus a `case.json`
+manifest:
 
 ```json
 {

@@ -31,46 +31,35 @@ export interface ConfigCaseTest {
 
 interface TestCase {
   category: string;
-  kind: "default" | "config";
   name: string;
   sourcePath: string;
   compiledPath: string;
 }
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
-const sourceTestDirectory = join(testDirectory, "..", "..", "test");
+const sourceCasesPath = join(testDirectory, "..", "..", "test", "configCases");
+const compiledCasesPath = join(testDirectory, "configCases");
 const require = createRequire(import.meta.url);
 
 export async function registerConfigCases(): Promise<void> {
-  const cases = (
-    await Promise.all([
-      discoverCases("default", "cases"),
-      discoverCases("config", "configCases")
-    ])
-  ).flat();
+  const cases = await discoverConfigCases();
 
   assert.notEqual(cases.length, 0, "expected at least one test case");
 
   for (const testCase of cases) {
-    test(`${testCase.kind} case ${testCase.category}/${testCase.name}`, async () => {
+    test(`config case ${testCase.category}/${testCase.name}`, async () => {
       await runCase(testCase);
     });
   }
 }
 
-async function discoverCases(
-  kind: TestCase["kind"],
-  directory: "cases" | "configCases"
-): Promise<TestCase[]> {
-  const sourceCasesPath = join(sourceTestDirectory, directory);
-  const compiledCasesPath = join(testDirectory, directory);
+async function discoverConfigCases(): Promise<TestCase[]> {
   const categories = await readDirectories(sourceCasesPath);
   const cases = await Promise.all(
     categories.map(async (category) => {
       const names = await readDirectories(join(sourceCasesPath, category));
       return names.map((name) => ({
         category,
-        kind,
         name,
         sourcePath: join(sourceCasesPath, category, name),
         compiledPath: join(compiledCasesPath, category, name)
@@ -139,10 +128,6 @@ async function runCase(testCase: TestCase): Promise<void> {
 }
 
 async function loadOptions(testCase: TestCase): Promise<ConfigCaseOptions> {
-  if (testCase.kind === "default") {
-    return {};
-  }
-
   const optionsModule = (await import(
     pathToFileURL(join(testCase.compiledPath, "webpack.config.js")).href
   )) as { default: ConfigCaseOptions };

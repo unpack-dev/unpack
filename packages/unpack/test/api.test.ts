@@ -99,6 +99,42 @@ test("optimization.sideEffects distinguishes source analysis from flag-only mode
   }
 });
 
+test("filesystem module cache isolates parser analysis plans", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import { used } from './barrel'; export const result = used;",
+    "src/barrel.js": "export { used } from './used'; export { unused } from './unused';",
+    "src/used.js": "export const used = 42;",
+    "src/unused.js": [
+      "const deferred = () => globalThis.DEFERRED_CACHE_MARKER;",
+      "export const unused = deferred;"
+    ].join("\n")
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/parser-plans");
+
+  try {
+    for (const [sideEffects, markerExpected] of [["flag", true], [true, false]] as const) {
+      const compiler = unpack({
+        context: fixture,
+        mode: "none",
+        entry: "./src/index.js",
+        output: { path: join(fixture, `dist-cache-${sideEffects}`) },
+        cache: { type: "filesystem", cacheLocation },
+        sourcemap: false,
+        optimization: { usedExports: true, sideEffects }
+      });
+      const { err, stats } = await runExistingCompiler(compiler);
+      await closeCompiler(compiler);
+
+      assert.equal(err, null);
+      assert.equal(stats?.hasErrors(), false);
+      const source = await readFile(join(fixture, `dist-cache-${sideEffects}/main.js`), "utf8");
+      assert.equal(source.includes("DEFERRED_CACHE_MARKER"), markerExpected);
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 // Ported from webpack 5.108.1:
 // test/configCases/side-effects/side-effects-values
 test("package sideEffects patterns retain matching modules and skip other unused modules", async () => {

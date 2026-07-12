@@ -125,6 +125,7 @@ impl Compilation {
                 self.resolver.clone(),
                 self.build_cache.clone(),
                 self.file_system_info.clone(),
+                self.hooks.javascript_parser.clone(),
                 Arc::clone(&state),
             )
             .await;

@@ -172,10 +172,6 @@ impl Module {
         self.factory_side_effect_free = side_effect_free;
     }
 
-    pub(crate) fn set_build_side_effect_free(&mut self, side_effect_free: bool) {
-        self.build_side_effect_free = Some(side_effect_free);
-    }
-
     #[cfg(test)]
     pub(crate) fn finish_build(
         &mut self,
@@ -189,6 +185,7 @@ impl Module {
             ParsedModule {
                 dependencies_block: crate::DependenciesBlock::new(dependencies, blocks),
                 presentational_dependencies,
+                build_meta: Default::default(),
             },
             source,
             source_hash,
@@ -197,6 +194,7 @@ impl Module {
 
     pub(crate) fn finish_build_content(&mut self, content: Arc<BuiltModuleContent>) {
         self.exports_info = ExportsInfo::default();
+        self.build_side_effect_free = content.parsed.build_meta.side_effect_free;
         self.harmony = content
             .parsed
             .dependencies_block
@@ -218,6 +216,7 @@ impl Module {
         self.exports_info = ExportsInfo::default();
         self.built_content = Arc::new(BuiltModuleContent::new(ParsedModule::default(), source));
         self.build_error = Some(error);
+        self.build_side_effect_free = None;
         self.harmony = false;
     }
 }

@@ -1056,11 +1056,6 @@ mod tests {
             third.chunk_graph().chunks().as_ptr()
         );
         for restored_module in second.module_graph().modules() {
-            let cached_record = second_compiler
-                .build_cache
-                .module_builds()
-                .get(restored_module.identity(), None)
-                .expect("restored Module Build Record should remain in Memory Cache");
             let rebuilt_module = third
                 .module_graph()
                 .modules()
@@ -1072,10 +1067,6 @@ mod tests {
                 !std::ptr::eq(restored_module, rebuilt_module),
                 "each Compilation must create a distinct Module object"
             );
-            assert!(Arc::ptr_eq(
-                restored_module.built_content(),
-                cached_record.built_content()
-            ));
             assert!(Arc::ptr_eq(
                 restored_module.built_content(),
                 rebuilt_module.built_content()

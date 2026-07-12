@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::{
@@ -22,7 +23,7 @@ use swc_experimental_ecma_ast::{
     OptChainBase, Pat, Prop, PropName, PropOrSpread, Stmt, Str, Tpl, UnaryOp, VarDeclKind,
     VarDeclOrExpr, VarDeclarator, Visit, VisitWith,
 };
-use swc_experimental_ecma_parser::{EsSyntax, Syntax, parse_file_as_module};
+use swc_experimental_ecma_parser::{EsSyntax, Syntax};
 
 const UNSUPPORTED_DYNAMIC_IMPORT_MESSAGE: &str =
     "only static string specifiers are supported; context modules are not supported yet";
@@ -31,6 +32,180 @@ const UNSUPPORTED_DYNAMIC_IMPORT_MESSAGE: &str =
 pub(crate) struct ParsedModule {
     pub dependencies_block: DependenciesBlock,
     pub presentational_dependencies: Vec<Dependency>,
+    pub build_meta: JavascriptBuildMeta,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct JavascriptBuildMeta {
+    pub side_effect_free: Option<bool>,
+}
+
+type ProgramTap = Arc<
+    dyn for<'ast, 'context> Fn(
+            &JavascriptParserContext<'ast, 'context>,
+            &Module<'ast>,
+            &mut ParsedModule,
+        ) + Send
+        + Sync,
+>;
+type StatementTap = Arc<
+    dyn for<'parser, 'ast, 'context> Fn(
+            &JavascriptParserStatement<'parser, 'ast, 'context>,
+            &mut ParsedModule,
+        ) + Send
+        + Sync,
+>;
+#[derive(Default, Clone)]
+pub(crate) struct JavascriptParserHookSet {
+    pub program: JavascriptParserModuleHook,
+    pub statement: JavascriptParserStatementHook,
+    pub finish: JavascriptParserModuleHook,
+    requires_pure_analysis: bool,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct JavascriptParserModuleHook {
+    taps: Vec<(&'static str, Vec<u8>, ProgramTap)>,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct JavascriptParserStatementHook {
+    taps: Vec<(&'static str, Vec<u8>, StatementTap)>,
+}
+
+pub(crate) struct JavascriptParserContext<'ast, 'context> {
+    pure_analysis: Option<&'context PureAnalysis<'context, 'ast>>,
+}
+
+pub(crate) struct JavascriptParserStatement<'parser, 'ast, 'context> {
+    parser: &'parser JavascriptParserContext<'ast, 'context>,
+    item: &'parser ModuleItem<'ast>,
+    comments_start: usize,
+}
+
+impl JavascriptParserContext<'_, '_> {
+    fn is_pure(&self, item: &ModuleItem<'_>, comments_start: usize) -> bool {
+        self.pure_analysis
+            .expect("parser plugin must request pure analysis before querying it")
+            .module_item_is_pure(item, comments_start)
+    }
+}
+
+impl JavascriptParserStatement<'_, '_, '_> {
+    #[allow(dead_code)]
+    pub(crate) fn item(&self) -> &ModuleItem<'_> {
+        self.item
+    }
+
+    pub(crate) fn is_pure(&self) -> bool {
+        self.parser.is_pure(self.item, self.comments_start)
+    }
+}
+
+impl JavascriptParserHookSet {
+    pub(crate) fn require_pure_analysis(&mut self) {
+        self.requires_pure_analysis = true;
+    }
+
+    pub(crate) fn cache_fingerprint(&self) -> Vec<u8> {
+        let mut fingerprint = b"unpack/javascript-parser-hooks/1".to_vec();
+        fn append_phase<'a>(
+            fingerprint: &mut Vec<u8>,
+            phase: &[u8],
+            taps: impl ExactSizeIterator<Item = (&'a str, &'a [u8])>,
+        ) {
+            fingerprint.extend_from_slice(&(phase.len() as u64).to_le_bytes());
+            fingerprint.extend_from_slice(phase);
+            fingerprint.extend_from_slice(&(taps.len() as u64).to_le_bytes());
+            for (name, cache_key) in taps {
+                fingerprint.extend_from_slice(&(name.len() as u64).to_le_bytes());
+                fingerprint.extend_from_slice(name.as_bytes());
+                fingerprint.extend_from_slice(&(cache_key.len() as u64).to_le_bytes());
+                fingerprint.extend_from_slice(cache_key);
+            }
+        }
+        append_phase(&mut fingerprint, b"program", self.program.cache_keys());
+        append_phase(&mut fingerprint, b"statement", self.statement.cache_keys());
+        append_phase(&mut fingerprint, b"finish", self.finish.cache_keys());
+        fingerprint.push(u8::from(self.requires_pure_analysis));
+        fingerprint
+    }
+}
+
+impl JavascriptParserModuleHook {
+    pub(crate) fn tap(
+        &mut self,
+        name: &'static str,
+        cache_key: impl AsRef<[u8]>,
+        tap: impl for<'ast, 'context> Fn(
+            &JavascriptParserContext<'ast, 'context>,
+            &Module<'ast>,
+            &mut ParsedModule,
+        ) + Send
+        + Sync
+        + 'static,
+    ) {
+        self.taps
+            .push((name, cache_key.as_ref().to_vec(), Arc::new(tap)));
+    }
+
+    fn call(
+        &self,
+        context: &JavascriptParserContext<'_, '_>,
+        module: &Module<'_>,
+        result: &mut ParsedModule,
+    ) {
+        for (_, _, tap) in &self.taps {
+            tap(context, module, result);
+        }
+    }
+
+    fn cache_keys(&self) -> impl ExactSizeIterator<Item = (&str, &[u8])> {
+        self.taps
+            .iter()
+            .map(|(name, cache_key, _)| (*name, cache_key.as_slice()))
+    }
+}
+
+impl JavascriptParserStatementHook {
+    pub(crate) fn tap(
+        &mut self,
+        name: &'static str,
+        cache_key: impl AsRef<[u8]>,
+        tap: impl for<'parser, 'ast, 'context> Fn(
+            &JavascriptParserStatement<'parser, 'ast, 'context>,
+            &mut ParsedModule,
+        ) + Send
+        + Sync
+        + 'static,
+    ) {
+        self.taps
+            .push((name, cache_key.as_ref().to_vec(), Arc::new(tap)));
+    }
+
+    fn call(&self, statement: &JavascriptParserStatement<'_, '_, '_>, result: &mut ParsedModule) {
+        for (_, _, tap) in &self.taps {
+            tap(statement, result);
+        }
+    }
+
+    fn cache_keys(&self) -> impl ExactSizeIterator<Item = (&str, &[u8])> {
+        self.taps
+            .iter()
+            .map(|(name, cache_key, _)| (*name, cache_key.as_slice()))
+    }
+}
+
+impl std::fmt::Debug for JavascriptParserHookSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JavascriptParserHookSet")
+            .field("program_taps", &self.program.taps.len())
+            .field("statement_taps", &self.statement.taps.len())
+            .field("finish_taps", &self.finish.taps.len())
+            .field("requires_pure_analysis", &self.requires_pure_analysis)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,10 +216,15 @@ struct ImportBinding {
     local: String,
 }
 
-pub(crate) fn parse_module_dependencies(path: &Path, source: &str) -> Result<ParsedModule> {
-    parse_module_dependencies_sync(path, source)
+pub(crate) fn parse_module_dependencies_with_hooks(
+    path: &Path,
+    source: &str,
+    hooks: &JavascriptParserHookSet,
+) -> Result<ParsedModule> {
+    parse_module_dependencies_sync(path, source, hooks)
 }
 
+#[cfg(test)]
 pub(crate) fn source_is_side_effect_free(path: &Path, source: &str) -> bool {
     let allocator = Allocator::new();
     let mut comments = Comments::new_in(&allocator);
@@ -85,6 +265,7 @@ impl<'comments, 'arena> PureAnalysis<'comments, 'arena> {
         }
     }
 
+    #[cfg(test)]
     fn module_is_pure(&self, module: &Module<'_>) -> bool {
         let mut comments_start = 0;
         module.body.iter().all(|item| {
@@ -986,14 +1167,20 @@ fn variable_scope_bindings(
     bindings
 }
 
-fn parse_module_dependencies_sync(path: &Path, source: &str) -> Result<ParsedModule> {
+fn parse_module_dependencies_sync(
+    path: &Path,
+    source: &str,
+    hooks: &JavascriptParserHookSet,
+) -> Result<ParsedModule> {
     let allocator = Allocator::new();
-    let module = parse_file_as_module(
+    let mut comments = Comments::new_in(&allocator);
+    let module = swc_experimental_ecma_parser::with_file_parser(
         &allocator,
         source,
         syntax_for_path(path),
         EsVersion::EsNext,
-        None,
+        Some(&mut comments),
+        |parser| parser.parse_module(),
     )
     .map_err(|error| {
         let diagnostic = error.into_diagnostic();
@@ -1004,6 +1191,13 @@ fn parse_module_dependencies_sync(path: &Path, source: &str) -> Result<ParsedMod
     })?;
 
     let mut parsed = ParsedModule::default();
+    let pure_analysis = hooks
+        .requires_pure_analysis
+        .then(|| PureAnalysis::new(&comments, &module));
+    let parser_context = JavascriptParserContext {
+        pure_analysis: pure_analysis.as_ref(),
+    };
+    hooks.program.call(&parser_context, &module, &mut parsed);
     let mut import_bindings = HashMap::new();
     collect_module_decl_dependencies(path, &module, &mut parsed, &mut import_bindings)?;
     collect_import_usages(
@@ -1012,6 +1206,17 @@ fn parse_module_dependencies_sync(path: &Path, source: &str) -> Result<ParsedMod
         &mut parsed.dependencies_block.dependencies,
     );
     collect_dynamic_import_dependencies(path, &module, &mut parsed)?;
+    let mut comments_start = 0;
+    for item in module.body.iter() {
+        let statement = JavascriptParserStatement {
+            parser: &parser_context,
+            item,
+            comments_start,
+        };
+        hooks.statement.call(&statement, &mut parsed);
+        comments_start = span_end(item.span());
+    }
+    hooks.finish.call(&parser_context, &module, &mut parsed);
 
     Ok(parsed)
 }
@@ -1722,12 +1927,78 @@ fn lit_span(lit: &Lit<'_>) -> swc_experimental_ecma_ast::Span {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{
+        path::Path,
+        sync::{Arc, Mutex},
+    };
 
-    use super::source_is_side_effect_free;
+    use super::{
+        JavascriptParserHookSet, parse_module_dependencies_with_hooks, source_is_side_effect_free,
+    };
 
     fn is_pure(source: &str) -> bool {
         source_is_side_effect_free(Path::new("module.js"), source)
+    }
+
+    #[test]
+    fn parser_hooks_share_one_parse_result_in_phase_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = JavascriptParserHookSet::default();
+        let program_events = Arc::clone(&events);
+        hooks
+            .program
+            .tap("program", b"program-test/1", move |_, _, result| {
+                program_events.lock().unwrap().push("program");
+                result.build_meta.side_effect_free = Some(true);
+            });
+        let statement_events = Arc::clone(&events);
+        hooks
+            .statement
+            .tap("statement", b"statement-test/1", move |_, _| {
+                statement_events.lock().unwrap().push("statement");
+            });
+        let finish_events = Arc::clone(&events);
+        hooks
+            .finish
+            .tap("finish", b"finish-test/1", move |_, _, result| {
+                finish_events.lock().unwrap().push("finish");
+                assert_eq!(result.build_meta.side_effect_free, Some(true));
+            });
+
+        let parsed = parse_module_dependencies_with_hooks(
+            Path::new("module.js"),
+            "const value = 1; export { value };",
+            &hooks,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.build_meta.side_effect_free, Some(true));
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["program", "statement", "statement", "finish"]
+        );
+    }
+
+    #[test]
+    fn parser_hook_plan_is_part_of_the_module_build_cache_identity() {
+        let baseline = JavascriptParserHookSet::default().cache_fingerprint();
+        let mut hooks = JavascriptParserHookSet::default();
+        hooks.program.tap("analysis", b"analysis/1", |_, _, _| {});
+        assert_ne!(hooks.cache_fingerprint(), baseline);
+
+        let first_version = hooks.cache_fingerprint();
+        hooks = JavascriptParserHookSet::default();
+        hooks.program.tap("analysis", b"analysis/2", |_, _, _| {});
+        assert_ne!(hooks.cache_fingerprint(), first_version);
+
+        let program_phase = hooks.cache_fingerprint();
+        hooks = JavascriptParserHookSet::default();
+        hooks.statement.tap("analysis", b"analysis/2", |_, _| {});
+        assert_ne!(hooks.cache_fingerprint(), program_phase);
+
+        let before_pure_analysis = hooks.cache_fingerprint();
+        hooks.require_pure_analysis();
+        assert_ne!(hooks.cache_fingerprint(), before_pure_analysis);
     }
 
     #[test]

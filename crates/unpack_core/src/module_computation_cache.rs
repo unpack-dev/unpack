@@ -9,7 +9,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{ExportsInfo, ModuleGraph, ModuleHandle, ModuleIdentity};
+use crate::{
+    ChunkGraph, ExportsInfo, ModuleGraph, ModuleHandle, ModuleIdentity,
+    chunk_graph::{ChunkGraphModuleReferences, ModuleHash},
+    runtime::RuntimeRequirements,
+};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ModuleComputationCache {
@@ -42,6 +46,20 @@ struct ModuleComputationEntry {
     signature: ModuleSignature,
     provided_exports: Option<ExportsInfo>,
     static_reachable: Option<Vec<ModuleIdentity>>,
+    chunk_graph: Option<ChunkGraphComputationEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChunkGraphSignature {
+    references: ChunkGraphModuleReferences,
+    exports_info: ExportsInfo,
+}
+
+#[derive(Debug)]
+struct ChunkGraphComputationEntry {
+    signature: ChunkGraphSignature,
+    runtime_requirements: Option<RuntimeRequirements>,
+    module_hash: Option<ModuleHash>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -51,6 +69,11 @@ pub(crate) struct ModuleComputationCacheStats {
     pub(crate) invalidated_modules: usize,
     pub(crate) static_reachable_hits: usize,
     pub(crate) static_reachable_misses: usize,
+    pub(crate) runtime_requirements_hits: usize,
+    pub(crate) runtime_requirements_misses: usize,
+    pub(crate) module_hash_hits: usize,
+    pub(crate) module_hash_misses: usize,
+    pub(crate) chunk_graph_invalidated_modules: usize,
 }
 
 impl ModuleComputationCache {
@@ -114,11 +137,15 @@ impl ModuleComputationCache {
                             signature: signature.clone(),
                             provided_exports: None,
                             static_reachable: None,
+                            chunk_graph: None,
                         });
                 if is_affected {
                     let provided_exports_invalidated = entry.provided_exports.take().is_some();
                     let static_reachable_invalidated = entry.static_reachable.take().is_some();
-                    let invalidated = provided_exports_invalidated || static_reachable_invalidated;
+                    let chunk_graph_invalidated = entry.chunk_graph.take().is_some();
+                    let invalidated = provided_exports_invalidated
+                        || static_reachable_invalidated
+                        || chunk_graph_invalidated;
                     entry.signature = signature;
                     invalidated
                 } else {
@@ -127,6 +154,43 @@ impl ModuleComputationCache {
             };
             if invalidated {
                 state.stats.invalidated_modules += 1;
+            }
+        }
+    }
+
+    pub(crate) fn prepare_chunk_graph(&self, module_graph: &ModuleGraph, chunk_graph: &ChunkGraph) {
+        let signatures = module_graph
+            .modules()
+            .iter()
+            .map(|module| {
+                (
+                    module.identity().clone(),
+                    chunk_graph_signature(module_graph, chunk_graph, module.handle()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut state = self
+            .state
+            .lock()
+            .expect("module computation cache mutex should not be poisoned");
+        for (identity, signature) in signatures {
+            let entry = state
+                .modules
+                .get_mut(&identity)
+                .expect("Module Computation Cache must be prepared after Make");
+            let changed = entry
+                .chunk_graph
+                .as_ref()
+                .is_some_and(|cached| cached.signature != signature);
+            if entry.chunk_graph.is_none() || changed {
+                entry.chunk_graph = Some(ChunkGraphComputationEntry {
+                    signature,
+                    runtime_requirements: None,
+                    module_hash: None,
+                });
+            }
+            if changed {
+                state.stats.chunk_graph_invalidated_modules += 1;
             }
         }
     }
@@ -213,12 +277,91 @@ impl ModuleComputationCache {
             .static_reachable = Some(identities);
     }
 
+    pub(crate) fn get_runtime_requirements(
+        &self,
+        identity: &ModuleIdentity,
+    ) -> Option<RuntimeRequirements> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("module computation cache mutex should not be poisoned");
+        let result = state
+            .modules
+            .get(identity)
+            .and_then(|entry| entry.chunk_graph.as_ref())
+            .and_then(|entry| entry.runtime_requirements);
+        if result.is_some() {
+            state.stats.runtime_requirements_hits += 1;
+        } else {
+            state.stats.runtime_requirements_misses += 1;
+        }
+        result
+    }
+
+    pub(crate) fn store_runtime_requirements(
+        &self,
+        identity: &ModuleIdentity,
+        runtime_requirements: RuntimeRequirements,
+    ) {
+        self.state
+            .lock()
+            .expect("module computation cache mutex should not be poisoned")
+            .modules
+            .get_mut(identity)
+            .and_then(|entry| entry.chunk_graph.as_mut())
+            .expect("Chunk Graph computation cache must be prepared before storing a memo")
+            .runtime_requirements = Some(runtime_requirements);
+    }
+
+    pub(crate) fn get_module_hash(&self, identity: &ModuleIdentity) -> Option<ModuleHash> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("module computation cache mutex should not be poisoned");
+        let result = state
+            .modules
+            .get(identity)
+            .and_then(|entry| entry.chunk_graph.as_ref())
+            .and_then(|entry| entry.module_hash);
+        if result.is_some() {
+            state.stats.module_hash_hits += 1;
+        } else {
+            state.stats.module_hash_misses += 1;
+        }
+        result
+    }
+
+    pub(crate) fn store_module_hash(&self, identity: &ModuleIdentity, module_hash: ModuleHash) {
+        self.state
+            .lock()
+            .expect("module computation cache mutex should not be poisoned")
+            .modules
+            .get_mut(identity)
+            .and_then(|entry| entry.chunk_graph.as_mut())
+            .expect("Chunk Graph computation cache must be prepared before storing a memo")
+            .module_hash = Some(module_hash);
+    }
+
     #[cfg(test)]
     pub(crate) fn stats(&self) -> ModuleComputationCacheStats {
         self.state
             .lock()
             .expect("module computation cache mutex should not be poisoned")
             .stats
+    }
+}
+
+fn chunk_graph_signature(
+    module_graph: &ModuleGraph,
+    chunk_graph: &ChunkGraph,
+    handle: ModuleHandle,
+) -> ChunkGraphSignature {
+    let module = module_graph
+        .module(handle)
+        .expect("a Module Graph handle should address a Module");
+    ChunkGraphSignature {
+        references: chunk_graph.module_references(module_graph, handle),
+        exports_info: module.exports_info().clone(),
     }
 }
 

@@ -172,6 +172,10 @@ _Avoid_: Asset, rendered bundle, compilation result
 The deterministic phase that assigns readable named Render IDs to modules and chunks, using stable identities and collision handling before code generation.
 _Avoid_: Filename generation, incidental map index
 
+**Module Hash**:
+A per-module digest of output-sensitive build, export, and Chunk Graph inputs recorded after ID Assignment for later compilation phases and in-process reuse.
+_Avoid_: Source hash, Cache ETag
+
 **Export Binding**:
 A generated runtime binding that exposes an ECMAScript module export through a getter so importers observe the current exported value.
 _Avoid_: Export snapshot, CommonJS export assignment

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    ModuleHandle,
+    ModuleGraph, ModuleHandle,
     chunk::{Chunk, ChunkHandle},
     chunk_group::{AsyncBlockOrigin, ChunkGroup, ChunkGroupHandle, ChunkGroupKind},
     id_assignment::RenderId,
@@ -13,6 +13,23 @@ use crate::{
     },
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ModuleHash(u64);
+
+impl ModuleHash {
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ChunkGraphModuleReferences {
+    pub(crate) module_render_id: Option<RenderId>,
+    pub(crate) chunk_render_ids: Vec<RenderId>,
+    pub(crate) outgoing_module_render_ids: Vec<Option<RenderId>>,
+    pub(crate) block_chunk_render_ids: Vec<Option<Vec<RenderId>>>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ChunkGraph {
     chunks: Vec<Chunk>,
@@ -21,6 +38,7 @@ pub struct ChunkGraph {
     chunk_modules: Vec<Vec<ModuleHandle>>,
     module_chunks: Vec<Vec<ChunkHandle>>,
     module_render_ids: Vec<Option<RenderId>>,
+    module_hashes: Vec<Option<ModuleHash>>,
     block_chunk_groups: HashMap<AsyncBlockOrigin, ChunkGroupHandle>,
     // Includes logical loading edges omitted from the materialized graph to break cycles.
     runtime_chunk_group_children: Vec<Vec<ChunkGroupHandle>>,
@@ -114,6 +132,7 @@ impl ChunkGraph {
             self.module_chunks.resize_with(module.index() + 1, Vec::new);
             self.module_render_ids
                 .resize_with(module.index() + 1, || None);
+            self.module_hashes.resize_with(module.index() + 1, || None);
             self.module_runtime_requirements
                 .resize_with(module.index() + 1, RuntimeRequirements::default);
         }
@@ -154,6 +173,60 @@ impl ChunkGraph {
             .and_then(Option::as_ref)
     }
 
+    pub(crate) fn module_references(
+        &self,
+        module_graph: &ModuleGraph,
+        handle: ModuleHandle,
+    ) -> ChunkGraphModuleReferences {
+        let module = module_graph
+            .module(handle)
+            .expect("a Module Graph handle should address a Module");
+        let mut chunk_render_ids = self
+            .module_chunks(handle)
+            .iter()
+            .map(|chunk| {
+                self.chunk(*chunk)
+                    .expect("a Module Chunk reference must address an existing Chunk")
+                    .render_id()
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        chunk_render_ids.sort();
+        let outgoing_module_render_ids = module_graph
+            .outgoing_connections(handle)
+            .map(|connection| self.module_render_id(connection.module).cloned())
+            .collect();
+        let block_chunk_render_ids = module
+            .blocks()
+            .iter()
+            .enumerate()
+            .map(|(block_index, _)| {
+                self.block_chunk_group(AsyncBlockOrigin {
+                    module: handle,
+                    block: crate::AsyncDependenciesBlockIndex::new(block_index),
+                })
+                .map(|group| {
+                    self.chunk_groups()[group.index()]
+                        .chunks()
+                        .iter()
+                        .map(|chunk| {
+                            self.chunk(*chunk)
+                                .expect("a Chunk Group must reference an existing Chunk")
+                                .render_id()
+                                .clone()
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+        ChunkGraphModuleReferences {
+            module_render_id: self.module_render_id(handle).cloned(),
+            chunk_render_ids,
+            outgoing_module_render_ids,
+            block_chunk_render_ids,
+        }
+    }
+
     pub fn module_render_id_string(&self, module: ModuleHandle) -> Option<&str> {
         self.module_render_id(module).and_then(RenderId::as_string)
     }
@@ -170,6 +243,18 @@ impl ChunkGraph {
         self.module_render_ids[module.index()] = Some(render_id);
     }
 
+    pub(crate) fn set_module_hash(&mut self, module: ModuleHandle, module_hash: ModuleHash) {
+        if self.module_hashes.len() <= module.index() {
+            self.module_hashes.resize_with(module.index() + 1, || None);
+        }
+        self.module_hashes[module.index()] = Some(module_hash);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn module_hash(&self, module: ModuleHandle) -> Option<ModuleHash> {
+        self.module_hashes.get(module.index()).copied().flatten()
+    }
+
     pub(crate) fn set_chunk_render_id(&mut self, chunk: ChunkHandle, render_id: RenderId) {
         self.chunks[chunk.index()].assign_render_id(render_id);
     }
@@ -182,7 +267,19 @@ impl ChunkGraph {
         self.chunks.get(handle.index())
     }
 
+    #[cfg(test)]
     pub(crate) fn process_runtime_requirements(
+        &mut self,
+        module_requirements: impl IntoIterator<Item = (ModuleHandle, RuntimeRequirements)>,
+    ) {
+        let processed = module_requirements
+            .into_iter()
+            .map(|(module, direct)| (module, resolve_runtime_modules(&direct).0))
+            .collect::<Vec<_>>();
+        self.set_module_runtime_requirements(processed);
+    }
+
+    pub(crate) fn set_module_runtime_requirements(
         &mut self,
         module_requirements: impl IntoIterator<Item = (ModuleHandle, RuntimeRequirements)>,
     ) {
@@ -191,12 +288,11 @@ impl ChunkGraph {
         for requirements in &mut self.module_runtime_requirements {
             *requirements = RuntimeRequirements::default();
         }
-        for (module, direct) in module_requirements {
+        for (module, processed) in module_requirements {
             assert!(
                 module.index() < self.module_runtime_requirements.len(),
                 "Runtime Requirements must reference a Module in the Chunk Graph"
             );
-            let (processed, _) = resolve_runtime_modules(&direct);
             self.module_runtime_requirements[module.index()] = processed;
         }
 

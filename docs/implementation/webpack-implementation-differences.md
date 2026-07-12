@@ -86,6 +86,13 @@ Items, options, and Pack File storage remain Rust-only helpers colocated with
 the webpack responsibility that owns them. There is no separate `BuildCache`
 type, file, or source hierarchy.
 
+Webpack's `moduleMemCaches` and `moduleMemCaches2` use per-Module
+`WeakTupleMap` values. Unpack represents their implemented computations as
+typed slots in one Compiler-owned Module Computation Cache. The second-stage
+slots are validated after ID Assignment from Render IDs, Chunk membership,
+Async Block Chunk references, and Exports Info, and currently have one
+effective runtime rather than webpack's Runtime Spec variants.
+
 Webpack wires these responsibilities through plugins and Tapable hooks. Unpack
 keeps its existing typed layers, explicit lifecycle methods, and closed Cache
 Item families under ADR 0131; the different Rust representation is deliberate,

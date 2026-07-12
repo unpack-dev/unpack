@@ -10,6 +10,7 @@ brotli = { workspace = true }
 dashmap = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
+mime_guess = { workspace = true }
 regex = { workspace = true }
 rspack_resolver = { workspace = true }
 rspack_sources = { workspace = true }

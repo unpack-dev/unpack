@@ -15,6 +15,7 @@ flate2 = "1.1.9"
 futures = "0.3.31"
 filetime = "0.2.26"
 mimalloc = { version = "0.1.48", default-features = false }
+mime_guess = "2.0.5"
 napi = "3.9.4"
 napi-build = "2.3.2"
 napi-derive = "3.5.7"

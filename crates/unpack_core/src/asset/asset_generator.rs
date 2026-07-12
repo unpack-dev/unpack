@@ -4,16 +4,16 @@ use std::{collections::BTreeMap, path::Path};
 
 use crate::{
     ChunkGraph, Module, ModuleGraph, ModuleType,
+    asset::asset_parser::effective_module_type,
     cache_hash::stable_hash,
     code_generation::Asset,
     code_generation_record::{CodeGenerationRecord, CodeGenerationSource},
     runtime::{RuntimeRequirement, RuntimeRequirements},
 };
 
-const DEFAULT_MAX_INLINE_SIZE: usize = 8 * 1024;
-
 pub(crate) fn generate(module: &Module) -> CodeGenerationRecord {
-    let module_type = effective_type(module.identity().module_type, module.source_bytes().len());
+    let module_type =
+        effective_module_type(module.identity().module_type, module.source_bytes().len());
     let value = match module_type {
         ModuleType::AssetResource => resource_url(module),
         ModuleType::AssetInline => data_uri(&module.identity().resource, module.source_bytes()),
@@ -40,7 +40,7 @@ pub(crate) fn render_resource_assets(
     let mut assets = BTreeMap::new();
     for module in module_graph.modules() {
         if chunk_graph.module_chunks(module.handle()).is_empty()
-            || effective_type(module.identity().module_type, module.source_bytes().len())
+            || effective_module_type(module.identity().module_type, module.source_bytes().len())
                 != ModuleType::AssetResource
         {
             continue;
@@ -57,14 +57,6 @@ pub(crate) fn render_resource_assets(
             binary_source: Some(binary_source),
         })
         .collect()
-}
-
-fn effective_type(module_type: ModuleType, size: usize) -> ModuleType {
-    match module_type {
-        ModuleType::Asset if size <= DEFAULT_MAX_INLINE_SIZE => ModuleType::AssetInline,
-        ModuleType::Asset => ModuleType::AssetResource,
-        module_type => module_type,
-    }
 }
 
 fn resource_filename(module: &Module) -> String {
@@ -92,30 +84,10 @@ fn resource_url(module: &Module) -> String {
 }
 
 fn data_uri(path: &Path, source: &[u8]) -> String {
-    format!("data:{};base64,{}", mime_type(path), encode_base64(source))
-}
-
-fn mime_type(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "gif" => "image/gif",
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "txt" => "text/plain",
-        "html" => "text/html",
-        "css" => "text/css",
-        "json" => "application/json",
-        _ => "application/octet-stream",
-    }
+    let mime_type = mime_guess::from_path(path)
+        .first_raw()
+        .unwrap_or("application/octet-stream");
+    format!("data:{mime_type};base64,{}", encode_base64(source))
 }
 
 fn encode_base64(source: &[u8]) -> String {
@@ -143,12 +115,26 @@ fn encode_base64(source: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_base64;
+    use std::path::Path;
+
+    use super::{data_uri, encode_base64};
 
     #[test]
     fn base64_encodes_complete_and_partial_groups() {
         assert_eq!(encode_base64(&[0, 1, 2, 250, 255]), "AAEC+v8=");
         assert_eq!(encode_base64(b"a"), "YQ==");
         assert_eq!(encode_base64(b"ab"), "YWI=");
+    }
+
+    #[test]
+    fn data_uri_uses_mime_database_and_binary_fallback() {
+        assert_eq!(
+            data_uri(Path::new("image.avif"), b"x"),
+            "data:image/avif;base64,eA=="
+        );
+        assert_eq!(
+            data_uri(Path::new("data.unknown"), b"x"),
+            "data:application/octet-stream;base64,eA=="
+        );
     }
 }

@@ -1,6 +1,6 @@
 // Webpack source: https://github.com/webpack/webpack/tree/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib
 
-mod asset_generator;
+mod asset;
 mod async_dependencies_block;
 mod build_chunk_graph;
 mod cache;
@@ -22,7 +22,7 @@ mod flag_dependency_exports_plugin;
 mod flag_dependency_usage_plugin;
 mod hooks;
 mod id_assignment;
-mod json_generator;
+mod json;
 mod loader;
 mod logging;
 mod make;

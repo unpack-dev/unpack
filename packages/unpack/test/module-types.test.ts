@@ -57,6 +57,15 @@ test("asset/inline exports a base64 data URI without emitting another asset", as
   }
 });
 
+test("asset/inline uses the resource MIME type", async () => {
+  const result = await compileAsset("asset/inline", Buffer.from("x"), "avif");
+  try {
+    assert.equal(result.exported, "data:image/avif;base64,eA==");
+  } finally {
+    await result.cleanup();
+  }
+});
+
 test("asset/source exports the resource text", async () => {
   const source = Buffer.from([0, 1, 2, 250, 255]);
   const result = await compileAsset("asset/source", source);
@@ -68,8 +77,8 @@ test("asset/source exports the resource text", async () => {
   }
 });
 
-test("asset inlines resources up to 8 KiB and emits larger resources", async () => {
-  const inline = await compileAsset("asset", Buffer.alloc(8 * 1024, 1));
+test("asset uses webpack's default 8096-byte inline threshold", async () => {
+  const inline = await compileAsset("asset", Buffer.alloc(8096, 1));
   try {
     assert.deepEqual(inline.files, ["main.js"]);
     assert.match(inline.exported, /^data:application\/octet-stream;base64,/);
@@ -77,11 +86,11 @@ test("asset inlines resources up to 8 KiB and emits larger resources", async () 
     await inline.cleanup();
   }
 
-  const resource = await compileAsset("asset", Buffer.alloc(8 * 1024 + 1, 1));
+  const resource = await compileAsset("asset", Buffer.alloc(8097, 1));
   try {
     assert.equal(resource.files.length, 2);
     assert.match(resource.exported, /^[a-f0-9]+[.]bin$/);
-    assert.equal((await readFile(join(resource.outputPath, resource.exported))).length, 8 * 1024 + 1);
+    assert.equal((await readFile(join(resource.outputPath, resource.exported))).length, 8097);
   } finally {
     await resource.cleanup();
   }
@@ -89,21 +98,22 @@ test("asset inlines resources up to 8 KiB and emits larger resources", async () 
 
 async function compileAsset(
   type: "asset" | "asset/inline" | "asset/source",
-  source: Buffer
+  source: Buffer,
+  extension = "bin"
 ) {
   const fixture = await mkdtemp(join(tmpdir(), "unpack-asset-module-"));
   const outputPath = join(fixture, "dist");
   await writeFile(
     join(fixture, "index.js"),
-    'import value from "./data.bin"; export { value };'
+    `import value from "./data.${extension}"; export { value };`
   );
-  await writeFile(join(fixture, "data.bin"), source);
+  await writeFile(join(fixture, `data.${extension}`), source);
   const { err, stats } = await runCompiler({
     context: fixture,
     entry: "./index.js",
     output: { path: outputPath },
     sourcemap: false,
-    module: { rules: [{ test: /[.]bin$/, type }] }
+    module: { rules: [{ test: /data[.]/, type }] }
   });
   assert.equal(err, null);
   assert.equal(stats?.hasErrors(), false);

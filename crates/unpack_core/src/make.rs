@@ -546,16 +546,11 @@ impl BuildTask {
         }
         let parsed = match match self.identity.module_type {
             ModuleType::JavaScriptAuto => parse_module_dependencies(&self.resource, &source),
-            ModuleType::Json => serde_json::from_str::<serde_json::Value>(&source)
-                .map(|_| ParsedModule::default())
-                .map_err(|error| Error::Parse {
-                    path: self.resource.clone(),
-                    message: error.to_string(),
-                }),
+            ModuleType::Json => crate::json::json_parser::parse(&self.resource, &source),
             ModuleType::Asset
             | ModuleType::AssetResource
             | ModuleType::AssetInline
-            | ModuleType::AssetSource => Ok(ParsedModule::default()),
+            | ModuleType::AssetSource => Ok(crate::asset::asset_parser::parse()),
         } {
             Ok(parsed) => parsed,
             Err(error) if error.is_compilation_error() => {

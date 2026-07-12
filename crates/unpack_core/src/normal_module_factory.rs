@@ -175,12 +175,7 @@ impl NormalModuleFactory {
             .iter()
             .filter(|rule| rule.matches(&factorized.resource));
         let Some(rule) = matching.next() else {
-            if factorized.side_effect_free.is_none()
-                && factorized.identity.module_type != crate::ModuleType::JavaScriptAuto
-            {
-                factorized.side_effect_free = Some(true);
-            }
-            return Ok(factorized);
+            return Ok(finalize_module_type_defaults(factorized));
         };
         if matching.next().is_some() {
             return Err(Error::LoaderRules {
@@ -200,12 +195,7 @@ impl NormalModuleFactory {
         if let Some(has_side_effects) = rule.side_effects() {
             factorized.side_effect_free = Some(!has_side_effects);
         }
-        if factorized.side_effect_free.is_none()
-            && factorized.identity.module_type != crate::ModuleType::JavaScriptAuto
-        {
-            factorized.side_effect_free = Some(true);
-        }
-        Ok(factorized)
+        Ok(finalize_module_type_defaults(factorized))
     }
 
     fn apply_factory_metadata(&self, mut factorized: FactorizedModule) -> Result<FactorizedModule> {
@@ -251,6 +241,15 @@ impl FactorizedModule {
             side_effect_free: None,
         }
     }
+}
+
+fn finalize_module_type_defaults(mut factorized: FactorizedModule) -> FactorizedModule {
+    if factorized.side_effect_free.is_none()
+        && factorized.identity.module_type != crate::ModuleType::JavaScriptAuto
+    {
+        factorized.side_effect_free = Some(true);
+    }
+    factorized
 }
 
 fn package_side_effects(resource: &Path) -> Result<Option<(PathBuf, String, serde_json::Value)>> {

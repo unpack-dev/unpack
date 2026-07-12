@@ -446,7 +446,7 @@ pub(crate) fn render_assets(
             options.sourcemap,
         ));
     }
-    assets.extend(crate::asset_generator::render_resource_assets(
+    assets.extend(crate::asset::asset_generator::render_resource_assets(
         module_graph,
         chunk_graph,
     ));
@@ -711,10 +711,10 @@ fn generate_module_code(
     }
 
     if module.identity().module_type == ModuleType::Json {
-        return Ok(crate::json_generator::generate(module.source()));
+        return Ok(crate::json::json_generator::generate(module.source()));
     }
     if module.identity().module_type.is_asset() {
-        return Ok(crate::asset_generator::generate(module));
+        return Ok(crate::asset::asset_generator::generate(module));
     }
 
     let module_handle = module.handle();

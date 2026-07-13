@@ -9,6 +9,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+unpack_paths = { path = "../unpack_paths" }
 brotli = { workspace = true }
 dashmap = { workspace = true }
 flate2 = { workspace = true }

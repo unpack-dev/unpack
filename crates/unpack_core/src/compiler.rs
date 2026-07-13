@@ -57,7 +57,6 @@ pub struct CompilerOptions {
     pub module_rules: Vec<ModuleRule>,
     pub loader_runner: Option<Arc<dyn LoaderRunner>>,
     pub compilation_hooks: Option<Arc<dyn CompilationHooks>>,
-    pub parallelism: Option<usize>,
     pub sourcemap: bool,
     pub provided_exports: bool,
     pub used_exports: bool,
@@ -79,7 +78,6 @@ impl CompilerOptions {
             module_rules: Vec::new(),
             loader_runner: None,
             compilation_hooks: None,
-            parallelism: None,
             sourcemap: true,
             provided_exports: true,
             used_exports: true,
@@ -892,9 +890,8 @@ mod tests {
     }
 
     #[test]
-    fn make_defaults_to_unbounded_parallelism_and_serial_rebuild_scheduling() {
+    fn make_defaults_to_serial_rebuild_scheduling() {
         let options = CompilerOptions::new(".", Vec::new());
-        assert_eq!(options.parallelism, None);
         assert!(options.serial_rebuild_make);
     }
 

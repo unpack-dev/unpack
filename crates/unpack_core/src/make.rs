@@ -12,7 +12,7 @@ use std::{
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use rustc_hash::{FxHashMap, FxHashSet};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Mutex;
 
 use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, EntryDependency,
@@ -48,7 +48,6 @@ struct MakeServices {
     snapshot_cache: SnapshotCache,
     loader_runner: Option<Arc<dyn LoaderRunner>>,
     metrics: Arc<MakeMetrics>,
-    semaphore: Option<Arc<Semaphore>>,
     module_types: ModuleTypeRegistry,
     unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
     watch_change_set: Option<crate::WatchChangeSet>,
@@ -239,9 +238,6 @@ pub(crate) async fn run(
         snapshot_cache,
         loader_runner: options.loader_runner.clone(),
         metrics: Arc::new(MakeMetrics::new()),
-        semaphore: options
-            .parallelism
-            .map(|parallelism| Arc::new(Semaphore::new(parallelism.max(1)))),
         module_types,
         unsafe_watch_cache,
         watch_change_set: make_options.watch_change_set.clone(),
@@ -365,17 +361,6 @@ async fn next_background_make_task(
         .expect("background queue should not be empty")
 }
 
-async fn acquire_make_permit(semaphore: &Option<Arc<Semaphore>>) -> Option<OwnedSemaphorePermit> {
-    let semaphore = semaphore.as_ref()?;
-    Some(
-        semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("make semaphore should stay open"),
-    )
-}
-
 impl MakeTask {
     fn is_background(&self) -> bool {
         matches!(self, Self::Factorize(_) | Self::Build(_))
@@ -408,8 +393,6 @@ impl MakeTask {
 
 impl FactorizeTask {
     async fn run(self, services: MakeServices) -> Result<Vec<MakeTask>> {
-        let _permit = acquire_make_permit(&services.semaphore).await;
-
         let dependency = self
             .dependencies
             .first()
@@ -497,8 +480,6 @@ impl BuildTask {
         services: MakeServices,
         state: Arc<Mutex<MakeState>>,
     ) -> Result<Vec<MakeTask>> {
-        let _permit = acquire_make_permit(&services.semaphore).await;
-
         let issuer_context = self
             .resource
             .parent()
@@ -944,19 +925,6 @@ mod tests {
 
     use super::*;
     use crate::{Entry, UnpackResolver};
-
-    #[tokio::test]
-    async fn make_permits_are_optional_and_enforce_finite_parallelism() {
-        assert!(acquire_make_permit(&None).await.is_none());
-
-        let semaphore = Arc::new(Semaphore::new(1));
-        let permit = acquire_make_permit(&Some(Arc::clone(&semaphore)))
-            .await
-            .expect("finite parallelism should acquire a permit");
-        assert!(semaphore.try_acquire().is_err());
-        drop(permit);
-        assert!(semaphore.try_acquire().is_ok());
-    }
 
     #[tokio::test]
     async fn process_dependencies_groups_factorization_by_resource_identifier()

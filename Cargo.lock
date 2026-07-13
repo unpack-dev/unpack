@@ -1422,6 +1422,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "unpack_paths",
 ]
 
 [[package]]
@@ -1437,6 +1438,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unpack_core",
+]
+
+[[package]]
+name = "unpack_paths"
+version = "0.1.0"
+dependencies = [
+ "rspack_resolver",
+ "rustc-hash",
 ]
 
 [[package]]

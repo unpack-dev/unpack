@@ -120,9 +120,8 @@ documented deviations or staged webpack scope.
 - **Approved shape**: ADR 0143 makes direct polling of rebuild Factorize and
   Build futures in Make's `FuturesUnordered` queue the default and permits an
   explicit `experiments.serialRebuildMake: false` to restore Tokio spawning.
-  Initial compilations retain Tokio task spawning. Make parallelism is unbounded
-  by default; an explicitly configured finite limit uses a semaphore in both
-  scheduling modes.
+  Initial compilations retain Tokio task spawning. Make parallelism is unbounded;
+  ADR 0144 removes the former Rust-only finite parallelism setting.
 - **Disable or refactor when**: direct polling changes Make phase ordering,
   error delivery, lifecycle behavior, or task responsibilities; the experiment
   must remain configurable unless measurements and a later decision remove one
@@ -178,7 +177,7 @@ The initial audit explicitly reviewed the following performance-relevant
 techniques. They do not require separate confirmation while their listed
 webpack responsibility remains intact:
 
-- `FuturesUnordered`, Tokio tasks, a semaphore, sharded maps, and atomics in
+- `FuturesUnordered`, Tokio tasks, sharded maps, and atomics in
   Make and Cache preserve factorize, add, build, process-dependencies, Cache,
   and Cache Facade responsibilities.
 - dense `ModuleHandle` storage, `IndexVec`, and `ModuleMask` preserve separate

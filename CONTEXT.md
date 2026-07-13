@@ -149,7 +149,7 @@ The webpack-shaped cache of successful resolver results, controlled by `resolve.
 _Avoid_: Resolver filesystem cache, unsafe resolver cache
 
 **Serial Rebuild Make**:
-The default Make scheduling mode for rebuilds, in which Factorize and Build futures are polled directly by the Make queue instead of being wrapped in Tokio tasks. It changes scheduling only; the Make task model remains intact, and an explicitly configured finite parallelism limit still applies.
+The default Make scheduling mode for rebuilds, in which Factorize and Build futures are polled directly by the Make queue instead of being wrapped in Tokio tasks. It changes scheduling only; the Make task model remains intact.
 _Avoid_: Single-threaded rebuild, disabled concurrency
 
 **Code Generation Phase**:

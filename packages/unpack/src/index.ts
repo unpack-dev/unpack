@@ -18,6 +18,7 @@ export type {
   ModuleRule,
   ModuleRuleType,
   OptimizationOptions,
+  ResolveOptions,
   SnapshotOptions,
   SnapshotPathPattern,
   SnapshotStrategyOptions,

@@ -36,5 +36,8 @@ jobs:
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Reject standard hash collections
+        run: cargo clippy --workspace --all-targets -- -D clippy::disallowed-types
+
       - name: Run tests
         run: pnpm test

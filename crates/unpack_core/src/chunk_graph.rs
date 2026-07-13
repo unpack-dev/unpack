@@ -1,6 +1,6 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/ChunkGraph.js
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     ModuleGraph, ModuleHandle,
@@ -39,12 +39,12 @@ pub struct ChunkGraph {
     module_chunks: Vec<Vec<ChunkHandle>>,
     module_render_ids: Vec<Option<RenderId>>,
     module_hashes: Vec<Option<ModuleHash>>,
-    block_chunk_groups: HashMap<AsyncBlockOrigin, ChunkGroupHandle>,
+    block_chunk_groups: FxHashMap<AsyncBlockOrigin, ChunkGroupHandle>,
     // Includes logical loading edges omitted from the materialized graph to break cycles.
     runtime_chunk_group_children: Vec<Vec<ChunkGroupHandle>>,
     module_runtime_requirements: Vec<RuntimeRequirements>,
     chunk_runtime_requirements: Vec<RuntimeRequirements>,
-    runtime_tree_requirements: HashMap<ChunkGroupHandle, RuntimeRequirements>,
+    runtime_tree_requirements: FxHashMap<ChunkGroupHandle, RuntimeRequirements>,
     chunk_runtime_modules: Vec<Vec<RuntimeModule>>,
 }
 
@@ -308,7 +308,7 @@ impl ChunkGraph {
         self.runtime_tree_requirements.clear();
         for entrypoint in self.entrypoints.iter().copied() {
             let mut requirements = RuntimeRequirements::default();
-            let mut visited = HashSet::new();
+            let mut visited = FxHashSet::default();
             let mut pending = vec![entrypoint];
             while let Some(group_handle) = pending.pop() {
                 if !visited.insert(group_handle) {

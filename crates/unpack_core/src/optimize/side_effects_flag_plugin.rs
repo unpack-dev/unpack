@@ -154,7 +154,7 @@ fn connection_rewrite(
                     Dependency::HarmonyImportSpecifier(dependency) => dependency.ids.first(),
                     _ => None,
                 })
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<rustc_hash::FxHashSet<_>>();
             if imported_names.len() != 1 {
                 return None;
             }
@@ -177,7 +177,7 @@ fn resolve_reexport_target(
 ) -> Option<(ModuleHandle, String)> {
     let mut export_name = export_name.to_string();
     let mut moved = false;
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = rustc_hash::FxHashSet::default();
     while visited.insert(module) && module_is_side_effect_free(module_graph, module) {
         let outgoing = module_graph
             .outgoing_connections(module)
@@ -271,7 +271,7 @@ fn module_is_side_effect_free(module_graph: &ModuleGraph, handle: ModuleHandle) 
     fn visit(
         module_graph: &ModuleGraph,
         handle: ModuleHandle,
-        visiting: &mut std::collections::HashSet<ModuleHandle>,
+        visiting: &mut rustc_hash::FxHashSet<ModuleHandle>,
     ) -> bool {
         let Some(module) = module_graph.module(handle) else {
             return false;
@@ -292,7 +292,7 @@ fn module_is_side_effect_free(module_graph: &ModuleGraph, handle: ModuleHandle) 
         dependencies_are_free
     }
 
-    visit(module_graph, handle, &mut std::collections::HashSet::new())
+    visit(module_graph, handle, &mut rustc_hash::FxHashSet::default())
 }
 
 fn glob_matches(module_name: &str, pattern: &str) -> bool {

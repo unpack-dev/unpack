@@ -1,11 +1,9 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/CodeGenerationResults.js
 
-use std::{
-    collections::HashMap,
-    hash::{Hash, Hasher},
-};
+use std::hash::{Hash, Hasher};
 
 use rspack_sources::{ConcatSource, RawStringSource, SourceMap};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -39,8 +37,8 @@ impl Asset {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CodeGenerationResults {
-    module_render_ids: HashMap<ModuleHandle, RenderId>,
-    results: HashMap<ModuleHandle, CodeGenerationResult>,
+    module_render_ids: FxHashMap<ModuleHandle, RenderId>,
+    results: FxHashMap<ModuleHandle, CodeGenerationResult>,
 }
 
 pub(crate) struct CodeGenerationOutcome {
@@ -284,8 +282,8 @@ fn generate_code_with(
                 .clone();
             (module.handle(), render_id)
         })
-        .collect::<HashMap<_, _>>();
-    let mut results = HashMap::new();
+        .collect::<FxHashMap<_, _>>();
+    let mut results = FxHashMap::default();
     let mut errors = Vec::new();
     for module in module_graph
         .modules()
@@ -623,9 +621,10 @@ fn render_failed_module_content(error: &Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs};
+    use std::fs;
 
     use rspack_sources::{ConcatSource, OriginalSource, ReplacementEnforce, Source};
+    use rustc_hash::FxHashMap;
 
     use crate::{
         CacheOptions, Compiler, CompilerOptions, ConstDependency, Dependency, Entry, Error,
@@ -859,7 +858,7 @@ mod tests {
             crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
         assign_chunk_render_ids(&options, &module_graph, &mut chunk_graph);
-        let module_render_ids = HashMap::from([(
+        let module_render_ids = FxHashMap::from_iter([(
             module,
             chunk_graph
                 .module_render_id(module)

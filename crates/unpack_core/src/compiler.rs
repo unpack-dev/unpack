@@ -864,7 +864,7 @@ fn normalize_context(context: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use rustc_hash::FxHashSet;
     use std::{
         collections::BTreeMap,
         fs,
@@ -1063,7 +1063,7 @@ mod tests {
                 CacheIdleReason::Ordinary,
                 true,
                 Some(crate::WatchChangeSet {
-                    modified_files: HashSet::from([std::fs::canonicalize(changed_path)?]),
+                    modified_files: FxHashSet::from_iter([std::fs::canonicalize(changed_path)?]),
                     ..Default::default()
                 }),
             )

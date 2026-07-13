@@ -1,12 +1,13 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/NormalModuleFactory.js
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use dashmap::DashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::OnceCell;
 
 use crate::{
@@ -53,7 +54,7 @@ pub(crate) struct ModuleGeneratorContext<'a> {
     pub module: &'a Module,
     pub module_graph: &'a ModuleGraph,
     pub chunk_graph: &'a crate::ChunkGraph,
-    pub module_render_ids: &'a HashMap<ModuleHandle, RenderId>,
+    pub module_render_ids: &'a FxHashMap<ModuleHandle, RenderId>,
 }
 
 #[derive(Clone, Default)]
@@ -428,9 +429,9 @@ impl NormalModuleFactory {
 pub struct FactorizedModule {
     pub identity: ModuleIdentity,
     pub resource: PathBuf,
-    pub file_dependencies: HashSet<PathBuf>,
-    pub context_dependencies: HashSet<PathBuf>,
-    pub missing_dependencies: HashSet<PathBuf>,
+    pub file_dependencies: FxHashSet<PathBuf>,
+    pub context_dependencies: FxHashSet<PathBuf>,
+    pub missing_dependencies: FxHashSet<PathBuf>,
     pub loader: Option<MatchedLoader>,
     pub side_effect_free: Option<bool>,
 }

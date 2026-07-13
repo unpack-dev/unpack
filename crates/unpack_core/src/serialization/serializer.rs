@@ -1,6 +1,8 @@
 //! Rust-native implementation of webpack's reusable Serializer responsibility.
 
-use std::{any::Any, collections::HashMap, fmt, io, sync::Arc};
+use std::{any::Any, fmt, io, sync::Arc};
+
+use rustc_hash::FxHashMap;
 
 pub(crate) const MAX_SERIALIZED_ITEM_BYTES: usize = 16 * 1024 * 1024;
 
@@ -81,7 +83,7 @@ where
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Serializer {
-    codecs: HashMap<StableTypeId, Arc<dyn ErasedItemCodec>>,
+    codecs: FxHashMap<StableTypeId, Arc<dyn ErasedItemCodec>>,
 }
 
 impl Serializer {

@@ -1,7 +1,6 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/javascript/JavascriptParser.js
 
 use std::{
-    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,6 +13,7 @@ use crate::{
     HarmonyImportSideEffectDependency, HarmonyImportSpecifierDependency, ImportDependency,
     ModuleType, Result, SourceRange,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use swc_experimental_allocator::Allocator;
 use swc_experimental_allocator::atom::Wtf8Atom;
@@ -274,7 +274,7 @@ pub(crate) fn source_is_side_effect_free(path: &Path, source: &str) -> bool {
 
 struct PureAnalysis<'comments, 'arena> {
     comments: &'comments Comments<'arena>,
-    pure_function_calls: HashSet<u32>,
+    pure_function_calls: FxHashSet<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -793,8 +793,8 @@ fn span_end(span: swc_experimental_ecma_ast::Span) -> usize {
     span.end.saturating_sub(1) as usize
 }
 
-fn no_side_effects_functions(comments: &Comments<'_>, module: &Module<'_>) -> HashSet<String> {
-    let mut candidates = HashSet::new();
+fn no_side_effects_functions(comments: &Comments<'_>, module: &Module<'_>) -> FxHashSet<String> {
+    let mut candidates = FxHashSet::default();
     let mut comments_start = 0;
     for item in module.body.iter() {
         let statement_start = span_start(item.span());
@@ -843,7 +843,7 @@ fn no_side_effects_functions(comments: &Comments<'_>, module: &Module<'_>) -> Ha
 
     let mut nested_var_collector = AnnotatedTopLevelVarCollector {
         comments,
-        names: HashSet::new(),
+        names: FxHashSet::default(),
     };
     module.visit_with(&mut nested_var_collector);
     candidates.extend(nested_var_collector.names);
@@ -856,7 +856,7 @@ fn collect_no_side_effects_declaration(
     declaration: &Decl<'_>,
     comments_start: usize,
     statement_start: usize,
-    candidates: &mut HashSet<String>,
+    candidates: &mut FxHashSet<String>,
 ) {
     match declaration {
         Decl::Fn(function) => {
@@ -897,7 +897,7 @@ fn collect_no_side_effects_declaration(
 
 struct AnnotatedTopLevelVarCollector<'comments, 'arena> {
     comments: &'comments Comments<'arena>,
-    names: HashSet<String>,
+    names: FxHashSet<String>,
 }
 
 impl<'a> Visit<'a> for AnnotatedTopLevelVarCollector<'_, '_> {
@@ -971,25 +971,25 @@ fn compiler_hint_matches(comment: &str, hint: &str) -> bool {
 
 struct PureFunctionCallCollector<'comments, 'arena, 'functions> {
     comments: &'comments Comments<'arena>,
-    pure_functions: &'functions HashSet<String>,
-    scopes: Vec<HashMap<String, bool>>,
-    calls: HashSet<u32>,
+    pure_functions: &'functions FxHashSet<String>,
+    scopes: Vec<FxHashMap<String, bool>>,
+    calls: FxHashSet<u32>,
 }
 
 impl<'comments, 'arena, 'functions> PureFunctionCallCollector<'comments, 'arena, 'functions> {
     fn new(
         comments: &'comments Comments<'arena>,
-        pure_functions: &'functions HashSet<String>,
+        pure_functions: &'functions FxHashSet<String>,
     ) -> Self {
         Self {
             comments,
             pure_functions,
             scopes: Vec::new(),
-            calls: HashSet::new(),
+            calls: FxHashSet::default(),
         }
     }
 
-    fn push_scope(&mut self, bindings: HashMap<String, bool>) {
+    fn push_scope(&mut self, bindings: FxHashMap<String, bool>) {
         self.scopes.push(bindings);
     }
 
@@ -1024,7 +1024,7 @@ impl<'a> Visit<'a> for PureFunctionCallCollector<'_, '_, '_> {
     fn visit_arrow_expr(&mut self, _: &ArrowExpr<'a>) {}
 
     fn visit_class_expr(&mut self, node: &ClassExpr<'a>) {
-        let mut bindings = HashMap::new();
+        let mut bindings = FxHashMap::default();
         if let Some(identifier) = &node.ident {
             bindings.insert(ident_to_string(identifier), false);
         }
@@ -1041,7 +1041,7 @@ impl<'a> Visit<'a> for PureFunctionCallCollector<'_, '_, '_> {
                 span_start(node.span),
                 span_start(declaration.span),
             ),
-            _ => HashMap::new(),
+            _ => FxHashMap::default(),
         };
         self.push_scope(bindings);
         node.visit_children_with(self);
@@ -1057,7 +1057,7 @@ impl<'a> Visit<'a> for PureFunctionCallCollector<'_, '_, '_> {
     }
 
     fn visit_switch_stmt(&mut self, node: &swc_experimental_ecma_ast::SwitchStmt<'a>) {
-        let mut bindings = HashMap::new();
+        let mut bindings = FxHashMap::default();
         for case in node.cases.iter() {
             bindings.extend(direct_statement_bindings(
                 self.comments,
@@ -1087,7 +1087,7 @@ impl PureFunctionCallCollector<'_, '_, '_> {
         head: &swc_experimental_ecma_ast::ForHead<'a>,
         visit: impl FnOnce(&mut Self),
     ) {
-        let mut bindings = HashMap::new();
+        let mut bindings = FxHashMap::default();
         match head {
             swc_experimental_ecma_ast::ForHead::VarDecl(declaration) => {
                 bindings.extend(variable_scope_bindings(
@@ -1098,13 +1098,13 @@ impl PureFunctionCallCollector<'_, '_, '_> {
                 ));
             }
             swc_experimental_ecma_ast::ForHead::Pat(pattern) => {
-                let mut names = HashSet::new();
+                let mut names = FxHashSet::default();
                 add_pat_bindings(pattern, &mut names);
                 bindings.extend(names.into_iter().map(|name| (name, false)));
             }
             swc_experimental_ecma_ast::ForHead::UsingDecl(declaration) => {
                 for declarator in declaration.decls.iter() {
-                    let mut names = HashSet::new();
+                    let mut names = FxHashSet::default();
                     add_pat_bindings(&declarator.name, &mut names);
                     bindings.extend(names.into_iter().map(|name| (name, false)));
                 }
@@ -1120,8 +1120,8 @@ fn direct_statement_bindings<'a>(
     comments: &Comments<'_>,
     statements: impl Iterator<Item = &'a Stmt<'a>>,
     mut comments_start: usize,
-) -> HashMap<String, bool> {
-    let mut bindings = HashMap::new();
+) -> FxHashMap<String, bool> {
+    let mut bindings = FxHashMap::default();
     for statement in statements {
         if let Stmt::Decl(declaration) = statement {
             match &**declaration {
@@ -1149,7 +1149,7 @@ fn direct_statement_bindings<'a>(
                 }
                 Decl::Using(declaration) => {
                     for declarator in declaration.decls.iter() {
-                        let mut names = HashSet::new();
+                        let mut names = FxHashSet::default();
                         add_pat_bindings(&declarator.name, &mut names);
                         bindings.extend(names.into_iter().map(|name| (name, false)));
                     }
@@ -1166,13 +1166,13 @@ fn variable_scope_bindings(
     declaration: &swc_experimental_ecma_ast::VarDecl<'_>,
     comments_start: usize,
     statement_start: usize,
-) -> HashMap<String, bool> {
-    let mut bindings = HashMap::new();
+) -> FxHashMap<String, bool> {
+    let mut bindings = FxHashMap::default();
     if declaration.kind == VarDeclKind::Var {
         return bindings;
     }
     for declarator in declaration.decls.iter() {
-        let mut names = HashSet::new();
+        let mut names = FxHashSet::default();
         add_pat_bindings(&declarator.name, &mut names);
         bindings.extend(names.into_iter().map(|name| (name, false)));
 
@@ -1228,7 +1228,7 @@ fn parse_module_dependencies_sync(
         pure_analysis: pure_analysis.as_ref(),
     };
     hooks.program.call(&parser_context, &module, &mut parsed);
-    let mut import_bindings = HashMap::new();
+    let mut import_bindings = FxHashMap::default();
     collect_module_decl_dependencies(path, &module, &mut parsed, &mut import_bindings)?;
     collect_import_usages(
         &module,
@@ -1255,7 +1255,7 @@ fn collect_module_decl_dependencies(
     path: &Path,
     module: &Module<'_>,
     parsed: &mut ParsedModule,
-    import_bindings: &mut HashMap<String, ImportBinding>,
+    import_bindings: &mut FxHashMap<String, ImportBinding>,
 ) -> Result<()> {
     let mut source_order = 0;
 
@@ -1563,7 +1563,7 @@ impl<'a> Visit<'a> for DynamicImportVisitor<'_> {
 
 fn collect_import_usages(
     module: &Module<'_>,
-    import_bindings: &HashMap<String, ImportBinding>,
+    import_bindings: &FxHashMap<String, ImportBinding>,
     dependencies: &mut Vec<Dependency>,
 ) {
     if import_bindings.is_empty() {
@@ -1573,16 +1573,16 @@ fn collect_import_usages(
     let mut visitor = ImportUsageVisitor {
         imports: import_bindings,
         dependencies: Vec::new(),
-        scopes: vec![HashSet::new()],
+        scopes: vec![FxHashSet::default()],
     };
     module.visit_with(&mut visitor);
     dependencies.extend(visitor.dependencies);
 }
 
 struct ImportUsageVisitor<'imports> {
-    imports: &'imports HashMap<String, ImportBinding>,
+    imports: &'imports FxHashMap<String, ImportBinding>,
     dependencies: Vec<Dependency>,
-    scopes: Vec<HashSet<String>>,
+    scopes: Vec<FxHashSet<String>>,
 }
 
 impl ImportUsageVisitor<'_> {
@@ -1597,7 +1597,7 @@ impl ImportUsageVisitor<'_> {
     }
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashSet::new());
+        self.scopes.push(FxHashSet::default());
     }
 
     fn pop_scope(&mut self) {
@@ -1757,7 +1757,7 @@ trait BindingCollector {
     fn collect_binding(&mut self, name: String);
 }
 
-impl BindingCollector for HashSet<String> {
+impl BindingCollector for FxHashSet<String> {
     fn collect_binding(&mut self, name: String) {
         self.insert(name);
     }

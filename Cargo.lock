@@ -1411,6 +1411,7 @@ dependencies = [
  "regex",
  "rspack_resolver",
  "rspack_sources",
+ "rustc-hash",
  "serde",
  "serde_json",
  "simd-json",

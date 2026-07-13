@@ -1883,7 +1883,7 @@ mod tests {
 // boundary exists so the storage contract can be exercised before the backend cutover.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
@@ -1894,6 +1894,7 @@ use std::{
 use brotli::{CompressorWriter, Decompressor};
 use flate2::{Compression as GzipLevel, read::GzDecoder, write::GzEncoder};
 use rspack_sources::ReplacementEnforce;
+use rustc_hash::FxHashMap;
 
 use crate::{
     AsyncDependenciesBlock, ConstDependency, DependenciesBlock, Dependency, EntryDependency,
@@ -4315,7 +4316,7 @@ pub(crate) struct PackFile {
     index: PackFileIndex,
     access_updates: BTreeMap<PackFileAddress, AccessStamp>,
     allow_collecting_memory: bool,
-    content_buffers: HashMap<PathBuf, RetainedContentPack>,
+    content_buffers: FxHashMap<PathBuf, RetainedContentPack>,
     #[cfg(test)]
     reads: PackFileReadStats,
 }
@@ -4382,7 +4383,7 @@ impl PackFile {
             index,
             access_updates: BTreeMap::new(),
             allow_collecting_memory: options.allow_collecting_memory,
-            content_buffers: HashMap::new(),
+            content_buffers: FxHashMap::default(),
             #[cfg(test)]
             reads: PackFileReadStats {
                 index_reads: usize::from(index_path.exists()),

@@ -2,7 +2,7 @@
 
 //! Webpack-aligned in-process Memory Cache Plugin.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 #[cfg(test)]
 use super::CacheItemFamily;
@@ -11,7 +11,7 @@ use crate::cache_facade::{CacheAddress, CacheETag};
 
 #[derive(Debug, Default)]
 pub(super) struct MemoryCacheLayer {
-    entries: HashMap<CacheAddress, CacheEntry>,
+    entries: FxHashMap<CacheAddress, CacheEntry>,
 }
 
 impl MemoryCacheLayer {

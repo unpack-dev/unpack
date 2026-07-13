@@ -1,9 +1,6 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/buildChunkGraph.js
 
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, VecDeque},
-};
+use std::{cmp::Ordering, collections::VecDeque};
 
 use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, ModuleGraph, ModuleHandle,
@@ -11,11 +8,12 @@ use crate::{
     chunk_group::{AsyncBlockOrigin, ChunkGroupHandle, ChunkGroupKind},
     module_computation_cache::ModuleComputationCache,
 };
+use rustc_hash::FxHashMap;
 
 const MODULES_PER_MASK_WORD: usize = u64::BITS as usize;
 
 // ModuleHandle values are dense arena handles, so webpack's available-module mask
-// maps directly to compact word-indexed storage without an ordinal HashMap.
+// maps directly to compact word-indexed storage without an ordinal FxHashMap.
 #[derive(Clone, PartialEq, Eq)]
 struct ModuleMask {
     words: Box<[u64]>,
@@ -92,7 +90,7 @@ struct AsyncChunkPlan {
     static_modules: Vec<ModuleHandle>,
     min_available_modules: ModuleMask,
     resulting_available_modules: ModuleMask,
-    parents: HashMap<LogicalChunkGroup, AsyncParentPlan>,
+    parents: FxHashMap<LogicalChunkGroup, AsyncParentPlan>,
 }
 
 impl AsyncChunkPlan {
@@ -113,7 +111,7 @@ impl AsyncChunkPlan {
             static_modules,
             min_available_modules,
             resulting_available_modules,
-            parents: HashMap::from([(
+            parents: FxHashMap::from_iter([(
                 parent,
                 AsyncParentPlan {
                     resulting_available_modules: parent_resulting_available_modules.clone(),
@@ -214,7 +212,7 @@ pub(crate) fn build_chunk_graph_with_cache(
     // The implemented staging model reuses one Async Chunk plan per target Module.
     // This is intentionally narrower than webpack's AsyncDependenciesBlock-first
     // ChunkGroupInfo model and is recorded in the implementation differences.
-    let mut async_chunk_plans = HashMap::<ModuleHandle, AsyncChunkPlan>::new();
+    let mut async_chunk_plans = FxHashMap::<ModuleHandle, AsyncChunkPlan>::default();
     let mut pending = (0..entrypoint_plans.len())
         .map(LogicalChunkGroup::Entrypoint)
         .collect::<VecDeque<_>>();
@@ -269,7 +267,7 @@ pub(crate) fn build_chunk_graph_with_cache(
     let mut ordered_targets = async_chunk_plans.keys().copied().collect::<Vec<_>>();
     ordered_targets.sort_by(|left, right| compare_module_identities(module_graph, *left, *right));
 
-    let mut chunk_groups_by_target = HashMap::new();
+    let mut chunk_groups_by_target = FxHashMap::default();
     for target in &ordered_targets {
         let plan = &async_chunk_plans[target];
         let origin = plan

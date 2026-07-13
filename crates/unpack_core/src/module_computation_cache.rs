@@ -5,7 +5,7 @@
 //! and live only as long as the Compiler.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     sync::{Arc, Mutex},
 };
 
@@ -14,6 +14,7 @@ use crate::{
     chunk_graph::{ChunkGraphModuleReferences, ModuleHash},
     runtime::RuntimeRequirements,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ModuleComputationCache {
@@ -22,8 +23,8 @@ pub(crate) struct ModuleComputationCache {
 
 #[derive(Debug, Default)]
 struct ModuleComputationCacheState {
-    modules: HashMap<ModuleIdentity, ModuleComputationEntry>,
-    current_handles: HashMap<ModuleIdentity, ModuleHandle>,
+    modules: FxHashMap<ModuleIdentity, ModuleComputationEntry>,
+    current_handles: FxHashMap<ModuleIdentity, ModuleHandle>,
     stats: ModuleComputationCacheStats,
 }
 
@@ -101,7 +102,7 @@ impl ModuleComputationCache {
         let current_identities = signatures
             .iter()
             .map(|(identity, _, _)| identity.clone())
-            .collect::<HashSet<_>>();
+            .collect::<FxHashSet<_>>();
         let mut state = self
             .state
             .lock()
@@ -123,7 +124,7 @@ impl ModuleComputationCache {
                     .is_some_and(|entry| entry.pre_chunk_graph.signature == *signature);
                 (!unchanged).then_some(*handle)
             })
-            .collect::<HashSet<_>>();
+            .collect::<FxHashSet<_>>();
         let mut queue = affected.iter().copied().collect::<VecDeque<_>>();
         while let Some(handle) = queue.pop_front() {
             for connection in module_graph.incoming_connections(handle) {

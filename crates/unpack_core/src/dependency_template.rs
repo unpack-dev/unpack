@@ -1,6 +1,6 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/DependencyTemplate.js
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use rspack_sources::ReplaceSource;
 
@@ -32,7 +32,7 @@ pub(crate) struct DependencyTemplateContext<'a> {
     pub(crate) module_graph: &'a ModuleGraph,
     pub(crate) chunk_graph: &'a ChunkGraph,
     pub(crate) exports_info: &'a ExportsInfo,
-    pub(crate) module_render_ids: &'a HashMap<ModuleHandle, RenderId>,
+    pub(crate) module_render_ids: &'a FxHashMap<ModuleHandle, RenderId>,
     pub(crate) runtime_requirements: &'a mut RuntimeRequirements,
     pub(crate) init_fragments: &'a mut Vec<InitFragment>,
 }

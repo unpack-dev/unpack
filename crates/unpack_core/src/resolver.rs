@@ -43,12 +43,12 @@ impl UnpackResolver {
         let file_dependencies = context
             .file_dependencies
             .into_iter()
-            .map(|path| normalize_resolver_dependency(path.as_path()))
+            .map(|path| unpack_paths::normalize(path.as_path()))
             .collect::<HashSet<_>>();
         let missing_dependencies = context
             .missing_dependencies
             .into_iter()
-            .map(|path| normalize_resolver_dependency(path.as_path()))
+            .map(|path| unpack_paths::normalize(path.as_path()))
             .collect::<HashSet<_>>();
         let context_dependencies = HashSet::new();
 
@@ -89,31 +89,6 @@ impl From<ResolvedResource> for ModuleIdentity {
     }
 }
 
-fn normalize_resolver_dependency(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir if normalized.pop() => {}
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    normalize_platform_path(normalized)
-}
-
-#[cfg(target_os = "macos")]
-fn normalize_platform_path(path: PathBuf) -> PathBuf {
-    if let Ok(relative) = path.strip_prefix("/var") {
-        return PathBuf::from("/private/var").join(relative);
-    }
-    path
-}
-
-#[cfg(not(target_os = "macos"))]
-fn normalize_platform_path(path: PathBuf) -> PathBuf {
-    path
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -140,7 +115,7 @@ mod tests {
         assert!(
             result
                 .file_dependencies
-                .contains(&normalize_resolver_dependency(&src.join("dep.js")))
+                .contains(&unpack_paths::normalize(&src.join("dep.js")))
         );
         assert!(result.context_dependencies.is_empty());
 

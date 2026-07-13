@@ -37,7 +37,6 @@ pub(crate) struct MakeState {
     modules_by_identity: FxHashMap<ModuleIdentity, ModuleHandle>,
 }
 
-#[derive(Clone)]
 struct MakeServices {
     normal_module_factory: NormalModuleFactory,
     module_build_cache: ModuleBuildCache,
@@ -214,7 +213,7 @@ pub(crate) async fn run(
     unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
 ) -> Result<()> {
     let snapshot_cache = SnapshotCache::default();
-    let services = MakeServices {
+    let services = Arc::new(MakeServices {
         normal_module_factory: NormalModuleFactory::new(
             resolver,
             cache.normal_module_factory(),
@@ -241,7 +240,7 @@ pub(crate) async fn run(
         module_types,
         unsafe_watch_cache,
         watch_change_set: make_options.watch_change_set.clone(),
-    };
+    });
 
     let mut main_queue = VecDeque::new();
     let mut background_queue = FuturesUnordered::new();
@@ -258,7 +257,7 @@ pub(crate) async fn run(
                     dependency: Dependency::Entry(EntryDependency::new(entry.request.clone())),
                 }],
             }),
-            services.clone(),
+            Arc::clone(&services),
             Arc::clone(&state),
             &mut main_queue,
             &mut background_queue,
@@ -268,12 +267,12 @@ pub(crate) async fn run(
 
     loop {
         while let Some(task) = main_queue.pop_front() {
-            match task.run(services.clone(), Arc::clone(&state)).await {
+            match task.run(Arc::clone(&services), Arc::clone(&state)).await {
                 Ok(children) => {
                     for child in children {
                         schedule_make_task(
                             child,
-                            services.clone(),
+                            Arc::clone(&services),
                             Arc::clone(&state),
                             &mut main_queue,
                             &mut background_queue,
@@ -303,7 +302,7 @@ pub(crate) async fn run(
         for child in children {
             schedule_make_task(
                 child,
-                services.clone(),
+                Arc::clone(&services),
                 Arc::clone(&state),
                 &mut main_queue,
                 &mut background_queue,
@@ -315,7 +314,7 @@ pub(crate) async fn run(
 
 fn schedule_make_task(
     task: MakeTask,
-    services: MakeServices,
+    services: Arc<MakeServices>,
     state: Arc<Mutex<MakeState>>,
     main_queue: &mut VecDeque<MakeTask>,
     background_queue: &mut FuturesUnordered<BackgroundMakeTask>,
@@ -335,7 +334,7 @@ fn schedule_make_task(
 
 fn background_make_task(
     task: MakeTask,
-    services: MakeServices,
+    services: Arc<MakeServices>,
     state: Arc<Mutex<MakeState>>,
     spawn_background_tasks: bool,
 ) -> BackgroundMakeTask {
@@ -368,7 +367,7 @@ impl MakeTask {
 
     async fn run(
         self,
-        services: MakeServices,
+        services: Arc<MakeServices>,
         state: Arc<Mutex<MakeState>>,
     ) -> Result<Vec<MakeTask>> {
         let metrics = Arc::clone(&services.metrics);
@@ -392,7 +391,7 @@ impl MakeTask {
 }
 
 impl FactorizeTask {
-    async fn run(self, services: MakeServices) -> Result<Vec<MakeTask>> {
+    async fn run(self, services: Arc<MakeServices>) -> Result<Vec<MakeTask>> {
         let dependency = self
             .dependencies
             .first()
@@ -477,7 +476,7 @@ impl AddTask {
 impl BuildTask {
     async fn run(
         self,
-        services: MakeServices,
+        services: Arc<MakeServices>,
         state: Arc<Mutex<MakeState>>,
     ) -> Result<Vec<MakeTask>> {
         let issuer_context = self

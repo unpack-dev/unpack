@@ -1,12 +1,12 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/ResolverFactory.js
 
 use std::{
-    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use crate::{Error, ModuleIdentity, Result};
+use rustc_hash::FxHashSet;
 
 pub use rspack_resolver::ResolveOptions;
 
@@ -44,13 +44,13 @@ impl UnpackResolver {
             .file_dependencies
             .into_iter()
             .map(|path| unpack_paths::normalize(path.as_path()))
-            .collect::<HashSet<_>>();
+            .collect::<FxHashSet<_>>();
         let missing_dependencies = context
             .missing_dependencies
             .into_iter()
             .map(|path| unpack_paths::normalize(path.as_path()))
-            .collect::<HashSet<_>>();
-        let context_dependencies = HashSet::new();
+            .collect::<FxHashSet<_>>();
+        let context_dependencies = FxHashSet::default();
 
         Ok(ResolveResult {
             resource: ResolvedResource {
@@ -68,9 +68,9 @@ impl UnpackResolver {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveResult {
     pub resource: ResolvedResource,
-    pub file_dependencies: HashSet<PathBuf>,
-    pub context_dependencies: HashSet<PathBuf>,
-    pub missing_dependencies: HashSet<PathBuf>,
+    pub file_dependencies: FxHashSet<PathBuf>,
+    pub context_dependencies: FxHashSet<PathBuf>,
+    pub missing_dependencies: FxHashSet<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,12 +1,13 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/ids/IdHelpers.js
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     fmt,
     path::{Path, PathBuf},
 };
 
 use crate::{ChunkGraph, CompilerOptions, ModuleGraph, cache_hash::stable_hash};
+use rustc_hash::FxHashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RenderId {
@@ -140,12 +141,12 @@ fn assign_named_ids<K>(candidates: Vec<NamedIdCandidate<K>>) -> Vec<(K, RenderId
 where
     K: Copy + Ord,
 {
-    assign_named_ids_with_reserved(candidates, HashSet::new())
+    assign_named_ids_with_reserved(candidates, FxHashSet::default())
 }
 
 fn assign_named_ids_with_reserved<K>(
     candidates: Vec<NamedIdCandidate<K>>,
-    mut used: HashSet<String>,
+    mut used: FxHashSet<String>,
 ) -> Vec<(K, RenderId)>
 where
     K: Copy + Ord,

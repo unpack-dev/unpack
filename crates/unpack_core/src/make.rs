@@ -1,7 +1,7 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/Compilation.js
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -11,6 +11,7 @@ use std::{
 };
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -30,10 +31,10 @@ pub(crate) struct MakeState {
     pub module_graph: ModuleGraph,
     pub entries: BTreeMap<usize, ModuleHandle>,
     pub errors: Vec<Error>,
-    pub file_dependencies: HashSet<PathBuf>,
-    pub context_dependencies: HashSet<PathBuf>,
-    pub missing_dependencies: HashSet<PathBuf>,
-    modules_by_identity: HashMap<ModuleIdentity, ModuleHandle>,
+    pub file_dependencies: FxHashSet<PathBuf>,
+    pub context_dependencies: FxHashSet<PathBuf>,
+    pub missing_dependencies: FxHashSet<PathBuf>,
+    modules_by_identity: FxHashMap<ModuleIdentity, ModuleHandle>,
 }
 
 #[derive(Clone)]

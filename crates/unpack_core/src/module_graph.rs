@@ -1,6 +1,6 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/ModuleGraph.js
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::index_vec::IndexVec;
 use crate::{
@@ -15,7 +15,7 @@ pub struct ModuleGraph {
     outgoing: IndexVec<ModuleHandle, Vec<ModuleGraphConnectionHandle>>,
     incoming: IndexVec<ModuleHandle, Vec<ModuleGraphConnectionHandle>>,
     outgoing_by_location:
-        IndexVec<ModuleHandle, HashMap<DependencyLocation, ModuleGraphConnectionHandle>>,
+        IndexVec<ModuleHandle, FxHashMap<DependencyLocation, ModuleGraphConnectionHandle>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -50,7 +50,7 @@ impl ModuleGraph {
         self.modules.push(Module::new(handle, identity));
         let outgoing_handle = self.outgoing.push(Vec::new());
         let incoming_handle = self.incoming.push(Vec::new());
-        let location_handle = self.outgoing_by_location.push(HashMap::new());
+        let location_handle = self.outgoing_by_location.push(FxHashMap::default());
         debug_assert_eq!(outgoing_handle, handle);
         debug_assert_eq!(incoming_handle, handle);
         debug_assert_eq!(location_handle, handle);

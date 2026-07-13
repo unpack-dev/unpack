@@ -3,7 +3,7 @@
 //! Webpack-aligned Pack File Cache Strategy, including restore, publication, and writer diagnostics.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -27,6 +27,7 @@ use crate::{
     serialization::Serializer,
     snapshot::{FileSystemInfo, Snapshot},
 };
+use rustc_hash::FxHashMap;
 
 #[cfg(test)]
 use super::RestoreBarrier;
@@ -173,7 +174,7 @@ pub(super) struct PackFileCacheLayer {
     open_options: PackFileOpenOptions,
     publication_base: PublicationBase,
     active: bool,
-    pending: HashMap<CacheAddress, CacheEntry>,
+    pending: FxHashMap<CacheAddress, CacheEntry>,
     diagnostics: Arc<CacheDiagnostics>,
     _writer_marker: Option<CacheWriterMarker>,
     #[cfg(test)]
@@ -339,7 +340,7 @@ impl PackFileCacheLayer {
             // work starts.  Standalone cache users have no such guard, and may safely
             // restore the legacy empty-guard PackFile directly.
             active: true,
-            pending: HashMap::new(),
+            pending: FxHashMap::default(),
             diagnostics,
             _writer_marker: writer_marker,
             #[cfg(test)]

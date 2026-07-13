@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -9,12 +8,13 @@ use crate::{
     cache::{ModuleBuildRecord, ResolveRecord, ResolveRequest},
     cache_facade::CacheETag,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WatchChangeSet {
-    pub modified_files: HashSet<PathBuf>,
-    pub removed_files: HashSet<PathBuf>,
-    pub changed_contexts: HashSet<PathBuf>,
+    pub modified_files: FxHashSet<PathBuf>,
+    pub removed_files: FxHashSet<PathBuf>,
+    pub changed_contexts: FxHashSet<PathBuf>,
 }
 
 impl WatchChangeSet {
@@ -41,10 +41,10 @@ pub(crate) struct UnsafeWatchCache {
 
 #[derive(Debug, Default)]
 struct UnsafeWatchCacheInner {
-    resolves: HashMap<ResolveRequest, Arc<ResolveRecord>>,
-    previous_resolves: HashMap<ResolveRequest, Arc<ResolveRecord>>,
-    module_builds: HashMap<ModuleIdentity, UnsafeModuleBuildRecord>,
-    previous_module_builds: HashMap<ModuleIdentity, UnsafeModuleBuildRecord>,
+    resolves: FxHashMap<ResolveRequest, Arc<ResolveRecord>>,
+    previous_resolves: FxHashMap<ResolveRequest, Arc<ResolveRecord>>,
+    module_builds: FxHashMap<ModuleIdentity, UnsafeModuleBuildRecord>,
+    previous_module_builds: FxHashMap<ModuleIdentity, UnsafeModuleBuildRecord>,
 }
 
 #[derive(Debug)]

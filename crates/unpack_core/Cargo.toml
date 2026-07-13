@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 unpack_paths = { path = "../unpack_paths" }
 brotli = { workspace = true }
@@ -15,6 +18,7 @@ mime_guess = { workspace = true }
 regex = { workspace = true }
 rspack_resolver = { workspace = true }
 rspack_sources = { workspace = true }
+rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 simd-json = { workspace = true }

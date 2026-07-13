@@ -2,7 +2,7 @@
 
 //! Webpack-aligned Memory Cache Plugin with generation-based garbage collection.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use super::{
     CacheItemFamily,
@@ -18,7 +18,7 @@ struct MemoryCacheEntry {
 
 #[derive(Debug)]
 pub(super) struct MemoryWithGcCacheLayer {
-    entries: HashMap<CacheAddress, MemoryCacheEntry>,
+    entries: FxHashMap<CacheAddress, MemoryCacheEntry>,
     max_unused_generations: u64,
     completed_generation: u64,
 }
@@ -26,7 +26,7 @@ pub(super) struct MemoryWithGcCacheLayer {
 impl MemoryWithGcCacheLayer {
     pub(super) fn new(max_unused_generations: u64) -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: FxHashMap::default(),
             max_unused_generations,
             completed_generation: 0,
         }

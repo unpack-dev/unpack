@@ -1,16 +1,15 @@
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::{
-    collections::{HashMap, HashSet},
     fmt,
-    hash::{BuildHasherDefault, Hash, Hasher},
+    hash::{Hash, Hasher},
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use rspack_resolver::ResolverPath;
-use rustc_hash::FxHasher;
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 
 /// An immutable, cheaply cloned path with a hash computed at construction.
 #[derive(Clone)]
@@ -136,26 +135,8 @@ impl From<ResolverPath> for ArcPath {
     }
 }
 
-/// A hasher for keys whose `Hash` implementation writes one precomputed `u64`.
-#[derive(Default)]
-pub struct PrecomputedHasher(u64);
-
-impl Hasher for PrecomputedHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, _bytes: &[u8]) {
-        panic!("PrecomputedHasher only accepts a precomputed u64")
-    }
-
-    fn write_u64(&mut self, value: u64) {
-        self.0 = value;
-    }
-}
-
-pub type ArcPathMap<V> = HashMap<ArcPath, V, BuildHasherDefault<PrecomputedHasher>>;
-pub type ArcPathSet = HashSet<ArcPath, BuildHasherDefault<PrecomputedHasher>>;
+pub type ArcPathMap<V> = FxHashMap<ArcPath, V>;
+pub type ArcPathSet = FxHashSet<ArcPath>;
 
 #[cfg(test)]
 mod tests {

@@ -1,9 +1,9 @@
 use std::{
-    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
 
+use rustc_hash::FxHashSet;
 use unpack_core::{Compiler, CompilerOptions, DependencyKind, Entry, Error, MakeOptions};
 
 #[tokio::test]
@@ -95,11 +95,11 @@ async fn make_constructs_static_esm_module_graph() -> Result<(), Box<dyn std::er
                     .expect("dependency should have request"),
             )
         })
-        .collect::<HashSet<_>>();
+        .collect::<FxHashSet<_>>();
 
     assert_eq!(
         outgoing,
-        HashSet::from([
+        FxHashSet::from_iter([
             (DependencyKind::StaticImport, "./side-effect"),
             (DependencyKind::StaticImport, "./dep"),
             (DependencyKind::StaticImport, "./reexport"),
@@ -172,11 +172,11 @@ async fn make_records_dynamic_import_split_points() -> Result<(), Box<dyn std::e
                     .expect("dependency should have request"),
             )
         })
-        .collect::<HashSet<_>>();
+        .collect::<FxHashSet<_>>();
 
     assert_eq!(
         outgoing,
-        HashSet::from([
+        FxHashSet::from_iter([
             (DependencyKind::StaticImport, "./eager"),
             (DependencyKind::DynamicImport, "./feature"),
             (DependencyKind::DynamicImport, "./template"),
@@ -200,11 +200,11 @@ async fn make_records_dynamic_import_split_points() -> Result<(), Box<dyn std::e
                     .expect("dependency should have request"),
             )
         })
-        .collect::<HashSet<_>>();
+        .collect::<FxHashSet<_>>();
 
     assert_eq!(
         feature_outgoing,
-        HashSet::from([(DependencyKind::StaticImport, "./shared")])
+        FxHashSet::from_iter([(DependencyKind::StaticImport, "./shared")])
     );
 
     Ok(())
@@ -275,12 +275,12 @@ async fn make_deduplicates_mixed_import_identity() -> Result<(), Box<dyn std::er
     let incoming = graph
         .incoming_connections(feature)
         .map(|connection| connection.dependency.kind())
-        .collect::<HashSet<_>>();
+        .collect::<FxHashSet<_>>();
 
     assert_eq!(graph.modules().len(), 2);
     assert_eq!(
         incoming,
-        HashSet::from([DependencyKind::StaticImport, DependencyKind::DynamicImport])
+        FxHashSet::from_iter([DependencyKind::StaticImport, DependencyKind::DynamicImport])
     );
 
     Ok(())
@@ -415,7 +415,7 @@ fn write(path: PathBuf, source: &str) -> std::io::Result<()> {
     fs::write(path, source)
 }
 
-fn relative_resources(root: &Path, graph: &unpack_core::ModuleGraph) -> HashSet<String> {
+fn relative_resources(root: &Path, graph: &unpack_core::ModuleGraph) -> FxHashSet<String> {
     let root = fs::canonicalize(root).expect("fixture root should exist");
     graph
         .modules()

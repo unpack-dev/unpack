@@ -1,11 +1,12 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/FlagDependencyUsagePlugin.js
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use crate::{
     Compilation, Dependency, ModuleHandle, compilation::CompilationHookSet,
     compiler::CompilerHookSet,
 };
+use rustc_hash::FxHashMap;
 
 pub(crate) struct FlagDependencyUsagePlugin;
 
@@ -23,7 +24,7 @@ impl FlagDependencyUsagePlugin {
 }
 
 fn flag_dependency_usage(compilation: &mut Compilation) {
-    let mut used: HashMap<ModuleHandle, (bool, BTreeSet<String>)> = compilation
+    let mut used: FxHashMap<ModuleHandle, (bool, BTreeSet<String>)> = compilation
         .module_graph()
         .modules()
         .iter()

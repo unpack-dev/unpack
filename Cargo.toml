@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/unpack_core", "crates/unpack_node"]
+members = ["crates/unpack_core", "crates/unpack_node", "crates/unpack_paths"]
 
 [workspace.package]
 edition = "2024"
@@ -20,6 +20,7 @@ napi = "3.9.4"
 napi-build = "2.3.2"
 napi-derive = "3.5.7"
 regex = "1.12.2"
+rustc-hash = "2.1.1"
 rspack_resolver = { version = "0.9.3", default-features = false }
 rspack_sources = "0.101.1"
 serde = { version = "1.0.228", features = ["derive"] }

@@ -223,7 +223,6 @@ pub(crate) async fn run(
             snapshot_cache.clone(),
             module_types.clone(),
         )
-        .with_resolve_cache(options.resolve_cache)
         .with_module_rules(options.module_rules.clone())
         .with_side_effects(options.side_effects != crate::SideEffectsOption::Disabled)
         .with_unsafe_watch_cache(

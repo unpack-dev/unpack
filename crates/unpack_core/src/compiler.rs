@@ -51,7 +51,6 @@ pub struct CompilerOptions {
     pub entries: Vec<Entry>,
     pub cache: CacheOptions,
     pub resolve: ResolveOptions,
-    pub resolve_cache: bool,
     pub snapshot: SnapshotOptions,
     pub infrastructure_logging: InfrastructureLoggingOptions,
     pub module_rules: Vec<ModuleRule>,
@@ -73,7 +72,6 @@ impl CompilerOptions {
             entries,
             cache: CacheOptions::default(),
             resolve: default_resolve_options(),
-            resolve_cache: true,
             snapshot: SnapshotOptions::default(),
             infrastructure_logging: InfrastructureLoggingOptions::disabled(),
             module_rules: Vec::new(),
@@ -1079,31 +1077,6 @@ mod tests {
         );
         assert_eq!(after.resolve_hits - before.resolve_hits, 0);
         assert_eq!(after.module_hits - before.module_hits, 0);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn disabled_resolve_cache_skips_resolve_record_storage_and_reuse()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        write(
-            temp.path().join("index.js"),
-            "import './dep'; export const value = 1;",
-        )?;
-        write(temp.path().join("dep.js"), "export const dep = 1;")?;
-
-        let mut options = CompilerOptions::new(temp.path(), vec![Entry::new("main", "./index")]);
-        options.resolve_cache = false;
-        let compiler = Compiler::new(options);
-        compiler.run().await?;
-        let before = compiler.cache.stats();
-        compiler.run().await?;
-        let after = compiler.cache.stats();
-
-        assert_eq!(after.resolve_hits - before.resolve_hits, 0);
-        assert_eq!(after.resolve_misses - before.resolve_misses, 0);
-        assert_eq!(after.resolve_entries - before.resolve_entries, 0);
-        assert!(after.module_hits > before.module_hits);
         Ok(())
     }
 

@@ -153,7 +153,6 @@ pub struct NormalModuleFactory {
     side_effects: bool,
     unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
     watch_change_set: Option<crate::WatchChangeSet>,
-    resolve_cache: bool,
 }
 
 // Per-compilation singleflight cache; separate from Cache so cache:false
@@ -190,7 +189,6 @@ impl NormalModuleFactory {
             side_effects: false,
             unsafe_watch_cache: None,
             watch_change_set: None,
-            resolve_cache: true,
         }
     }
 
@@ -201,11 +199,6 @@ impl NormalModuleFactory {
 
     pub(crate) fn with_side_effects(mut self, side_effects: bool) -> Self {
         self.side_effects = side_effects;
-        self
-    }
-
-    pub(crate) fn with_resolve_cache(mut self, enabled: bool) -> Self {
-        self.resolve_cache = enabled;
         self
     }
 
@@ -229,9 +222,7 @@ impl NormalModuleFactory {
             .expect("module dependency should have a request");
         let resolve_request = ResolveRequest::new(context, request);
         let mut skip_ordinary_cache = false;
-        if self.resolve_cache
-            && let (Some(cache), Some(changes)) = (&self.unsafe_watch_cache, &self.watch_change_set)
-        {
+        if let (Some(cache), Some(changes)) = (&self.unsafe_watch_cache, &self.watch_change_set) {
             match cache.get_resolve(&resolve_request, changes) {
                 crate::unsafe_watch_cache::UnsafeWatchCacheLookup::Reusable(record) => {
                     return self.apply_module_rules(
@@ -246,10 +237,7 @@ impl NormalModuleFactory {
                 crate::unsafe_watch_cache::UnsafeWatchCacheLookup::Miss => {}
             }
         }
-        if self.resolve_cache
-            && !skip_ordinary_cache
-            && let Some(record) = self.cache.get(&resolve_request, None)
-        {
+        if !skip_ordinary_cache && let Some(record) = self.cache.get(&resolve_request, None) {
             let valid = if self.resolve_snapshot_strategy.hash {
                 record
                     .is_valid_with_cache(
@@ -275,14 +263,8 @@ impl NormalModuleFactory {
             }
         }
 
-        let factorized = if self.resolve_cache {
-            self.factorize_with_runtime_cache(context, request, resolve_request)
-                .await
-        } else {
-            self.factorize_uncached(context, request, resolve_request)
-                .await
-        };
-        factorized
+        self.factorize_with_runtime_cache(context, request, resolve_request)
+            .await
             .and_then(|factorized| self.apply_factory_metadata(factorized))
             .and_then(|factorized| self.apply_module_rules(factorized))
     }
@@ -319,7 +301,7 @@ impl NormalModuleFactory {
             .await?;
         let identity = ModuleIdentity::from(resolved.resource);
         let resource = identity.resource.clone();
-        if !self.resolve_cache || !self.cache.is_enabled() {
+        if !self.cache.is_enabled() {
             return Ok(FactorizedModule {
                 identity,
                 resource,
@@ -634,37 +616,6 @@ mod tests {
         assert_eq!(cache.stats().resolve_entries, 0);
         assert_eq!(factory.runtime_factorize_cache.len(), 1);
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn disabled_resolve_cache_does_not_retain_completed_factorization()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;
-        fs::write(temp.path().join("dep.js"), "export const value = 1;")?;
-
-        let mut resolve_options = ResolveOptions::default();
-        resolve_options.extensions = vec![".js".to_string()];
-        let cache = Cache::new(CacheOptions::memory(), crate::SnapshotOptions::default());
-        let factory = NormalModuleFactory::new(
-            UnpackResolver::new(resolve_options),
-            cache.normal_module_factory(),
-            FileSystemInfo::new(),
-            SnapshotStrategy::timestamp(),
-            SnapshotCache::default(),
-            crate::compiler::test_compilation_hooks().normal_module_factory_hooks,
-        )
-        .with_resolve_cache(false);
-        let dependency = Dependency::HarmonyImportSideEffect(
-            HarmonyImportSideEffectDependency::new("./dep", 0, None),
-        );
-
-        let first = factory.factorize(temp.path(), &dependency).await?;
-        let second = factory.factorize(temp.path(), &dependency).await?;
-
-        assert_eq!(first, second);
-        assert!(factory.runtime_factorize_cache.is_empty());
-        assert_eq!(cache.stats().resolve_entries, 0);
         Ok(())
     }
 }

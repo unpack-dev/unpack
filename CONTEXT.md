@@ -144,10 +144,6 @@ _Avoid_: Entry chunk, main chunk
 The compilation stage that starts from entry modules, discovers their dependencies, and constructs the module graph before bundling.
 _Avoid_: Build phase, parse phase
 
-**Resolve Cache**:
-The webpack-shaped cache of successful resolver results, controlled by `resolve.cache`; entries remain subject to dependency Snapshot validation and are distinct from the resolver's internal filesystem and package-metadata memoization.
-_Avoid_: Resolver filesystem cache, unsafe resolver cache
-
 **Serial Rebuild Make**:
 The default Make scheduling mode for rebuilds, in which Factorize and Build futures are polled directly by the Make queue instead of being wrapped in Tokio tasks. It changes scheduling only; the Make task model remains intact, and an explicitly configured finite parallelism limit still applies.
 _Avoid_: Single-threaded rebuild, disabled concurrency

@@ -114,37 +114,6 @@ test("cache objects require a type, enforce the unaffected experiment gate, and 
   );
   assert.doesNotThrow(createCompiler({ type: "memory" }));
   assert.doesNotThrow(() =>
-    unpack({ entry: "./src/index.js", cache: true, resolve: { cache: true } })
-  );
-  assert.doesNotThrow(() =>
-    unpack({ entry: "./src/index.js", resolve: { cache: false } })
-  );
-  assert.throws(
-    () =>
-      unpack({
-        entry: "./src/index.js",
-        cache: false,
-        resolve: { cache: true }
-      }),
-    /options\.resolve\.cache requires an enabled cache/
-  );
-  assert.throws(
-    () =>
-      unpack({
-        entry: "./src/index.js",
-        resolve: { cache: "yes" as unknown as boolean }
-      }),
-    /options\.resolve\.cache must be a boolean/
-  );
-  assert.throws(
-    () =>
-      unpack({
-        entry: "./src/index.js",
-        resolve: { unknown: true } as never
-      }),
-    /options\.resolve contains unknown option 'unknown'/
-  );
-  assert.doesNotThrow(() =>
     unpack({
       entry: "./src/index.js",
       mode: "development",

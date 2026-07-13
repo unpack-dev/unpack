@@ -63,8 +63,6 @@ pub struct NativeCompilerOptions {
     #[napi(js_name = "outputPath")]
     pub output_path: String,
     pub cache: NativeCacheOptions,
-    #[napi(js_name = "resolveCache")]
-    pub resolve_cache: bool,
     pub snapshot: NativeSnapshotOptions,
     #[napi(js_name = "infrastructureLogging")]
     pub infrastructure_logging: NativeInfrastructureLoggingOptions,
@@ -959,7 +957,6 @@ impl NativeCompiler {
             .collect::<Vec<_>>();
         let mut compiler_options = CompilerOptions::new(context, entries);
         compiler_options.cache = cache_options_from_native(options.cache)?;
-        compiler_options.resolve_cache = options.resolve_cache;
         compiler_options.snapshot = snapshot_options_from_native(options.snapshot)?;
         compiler_options.infrastructure_logging =
             infrastructure_logging_options_from_native(options.infrastructure_logging);

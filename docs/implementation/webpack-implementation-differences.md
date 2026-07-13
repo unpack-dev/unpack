@@ -122,9 +122,8 @@ is rejected when the top-level Cache is disabled.
 The Unpack-only `experiments.serialRebuildMake` diagnostic option controls
 whether rebuild Factorize and Build futures are polled directly by Make or
 wrapped in Tokio tasks. It defaults to `true`, affects rebuild scheduling only,
-and preserves the Make task responsibilities and any explicitly configured
-finite parallelism limit described in ADR 0143. Make parallelism itself is
-unbounded by default.
+and preserves the Make task responsibilities described in ADR 0143. Make
+parallelism is unbounded, as recorded in ADR 0144.
 
 This layout change covers the cache-category alignment tracked by issue #217.
 The first serialization-layout slice moves generic Serializer identity,
@@ -162,7 +161,7 @@ Necessity:
 
 ## Make phase and errors
 
-Unpack uses `FuturesUnordered` to factorize, read, parse, and connect modules. Make parallelism is unbounded by default; Rust callers may configure a finite limit enforced by a semaphore. Module-attributable make errors are recorded in `Compilation::errors`; infrastructure failures still return `Err` and stop the run.
+Unpack uses `FuturesUnordered` to factorize, read, parse, and connect modules. Make parallelism is unbounded. Module-attributable make errors are recorded in `Compilation::errors`; infrastructure failures still return `Err` and stop the run.
 
 Webpack uses separate async queues for factorize, add, build, rebuild, and
 process-dependencies. Unpack uses Rust-native tasks but now follows the same

@@ -60,7 +60,7 @@ export async function runBenchmark(options = {}) {
   }
 
   return {
-    schema_version: 3,
+    schema_version: 4,
     generated_at: new Date().toISOString(),
     results
   };
@@ -86,14 +86,16 @@ export function toSummaryMarkdown(report, baselineReport) {
     : "";
   const watchMeasurementNote =
     "\n\n> `watch_build_ms` measures a development-mode rebuild with memory cache enabled and persistent cache disabled. The initial watch compilation is excluded; timing covers the same fixture mutation used by the warm build through completion of the resulting rebuild.";
+  const moduleCountNote =
+    "\n\n> `modules` is the cold build module count when the bundler exposes it reliably; otherwise it is left empty.";
 
-  return `${summary}${comparisonNote}${watchMeasurementNote}\n`;
+  return `${summary}${comparisonNote}${watchMeasurementNote}${moduleCountNote}\n`;
 }
 
 function toSummaryTable(results, baselines) {
   const lines = [
-    "| fixture | bundler | version/source | cold_build_ms | warm_build_ms | watch_build_ms | no_cache_build_ms | output_bytes | status |",
-    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"
+    "| fixture | bundler | version/source | modules | cold_build_ms | warm_build_ms | watch_build_ms | no_cache_build_ms | output_bytes | status |",
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
   ];
 
   for (const result of results) {
@@ -103,6 +105,7 @@ function toSummaryTable(results, baselines) {
         result.fixture,
         result.bundler,
         result.version_source ?? "",
+        formatNumber(result.module_count, 0),
         formatMeasurement(result.cold_build_ms, baseline?.cold_build_ms),
         formatMeasurement(result.warm_build_ms, baseline?.warm_build_ms),
         formatMeasurement(result.watch_build_ms, baseline?.watch_build_ms),
@@ -367,10 +370,15 @@ async function timedBuild({
   return {
     status: "success",
     build_ms: buildMs,
+    module_count: normalizeModuleCount(buildResult?.moduleCount),
     output_bytes: await outputBytes(outputDir),
     verify_ms: elapsed(verifyStarted),
     message: null
   };
+}
+
+function normalizeModuleCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 async function verifyBundle({ entryFile, outputDir, expectedChecksum }) {
@@ -438,6 +446,7 @@ function resultFromPhases({ fixture, bundler, versionSource, cold, watch, warm, 
     fixture: fixture.name,
     bundler,
     version_source: versionSource,
+    module_count: cold.status === "success" ? cold.module_count : null,
     cold_build_ms: cold.status === "success" ? cold.build_ms : null,
     warm_build_ms: warm?.status === "success" ? warm.build_ms : null,
     watch_build_ms: watch?.status === "success" ? watch.build_ms : null,
@@ -469,6 +478,7 @@ function emptyResult({ fixture, bundler, versionSource, status, message }) {
     fixture: fixture.name,
     bundler,
     version_source: versionSource,
+    module_count: null,
     cold_build_ms: null,
     warm_build_ms: null,
     watch_build_ms: null,

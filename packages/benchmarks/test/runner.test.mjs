@@ -41,6 +41,7 @@ test("summary renders loader results before a separate non-loader table", () => 
     summary,
     /watch_build_ms.*development-mode rebuild with memory cache enabled and persistent cache disabled/
   );
+  assert.match(summary, /`modules` is the cold build module count/);
 });
 
 test("summary compares measurements with matching latest main results", () => {
@@ -60,7 +61,7 @@ test("summary compares measurements with matching latest main results", () => {
   assert.doesNotMatch(summary, /delta_vs_main/);
   assert.match(
     summary,
-    /\| 10\.0 \(\+25\.0%\) \| 5\.0 \(\+100\.0%\) \| 3\.0 \(\+0\.0%\) \| 8\.0 \(-20\.0%\) \| 100 \(-50\.0%\) \| success \|/
+    /\| 42 \| 10\.0 \(\+25\.0%\) \| 5\.0 \(\+100\.0%\) \| 3\.0 \(\+0\.0%\) \| 8\.0 \(-20\.0%\) \| 100 \(-50\.0%\) \| success \|/
   );
   assert.match(summary, /`\+` means slower or larger; `−` means faster or smaller/);
 });
@@ -71,8 +72,17 @@ test("summary omits inline deltas when main has no matching result", () => {
     { results: [summaryResult({ fixture: "loader", bundler: "unpack" })] }
   );
 
-  assert.match(summary, /\| 10\.0 \| 5\.0 \| 3\.0 \| 8\.0 \| 100 \| success \|/);
+  assert.match(summary, /\| 42 \| 10\.0 \| 5\.0 \| 3\.0 \| 8\.0 \| 100 \| success \|/);
   assert.doesNotMatch(summary, /\([+-][\d.]+%\)/);
+});
+
+test("summary leaves modules empty when the adapter cannot report them", () => {
+  const result = summaryResult({ fixture: "large", bundler: "metro" });
+  result.module_count = null;
+
+  const summary = toSummaryMarkdown({ results: [result] });
+
+  assert.match(summary, /\| large \| metro \| metro@1\.0\.0 \|  \| 10\.0 \|/);
 });
 
 test("runner emits persistent-cache and no-cache measurements for a verified bundle", async () => {
@@ -89,7 +99,7 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
       }
     });
 
-    assert.equal(report.schema_version, 3);
+    assert.equal(report.schema_version, 4);
     assert.equal(report.results.length, 1);
     assert.equal(report.results[0].fixture, "large");
     assert.equal(report.results[0].bundler, "fake");
@@ -104,6 +114,7 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
     assert.equal(typeof report.results[0].watch_build_ms, "number");
     assert.equal(typeof report.results[0].no_cache_build_ms, "number");
     assert.ok(report.results[0].output_bytes > 0);
+    assert.equal(report.results[0].module_count, 42);
     assert.deepEqual(
       calls.map(({ phase, persistentCache, cacheReadonly }) => ({
         phase,
@@ -143,6 +154,7 @@ test("runner emits persistent-cache and no-cache measurements for a verified bun
     const summary = toSummaryMarkdown(report);
     assert.match(summary, /watch_build_ms/);
     assert.match(summary, /no_cache_build_ms/);
+    assert.match(summary, /\| modules \|/);
     assert.match(summary, /\\| large \\| fake \\| fake@1\\.0\\.0 \\|/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
@@ -298,6 +310,7 @@ test("webpack-compatible adapters build the loader benchmark fixture", async () 
       assert.ok(result.watch_build_ms > 0);
       assert.equal(result.no_cache_status, "success");
       assert.equal(result.verify_status, "success");
+      assert.ok(result.module_count > 0);
     }
 
     const loaderEntry = await readFile(
@@ -848,6 +861,7 @@ function summaryResult({ fixture, bundler }) {
     watch_build_ms: 3,
     no_cache_build_ms: 8,
     output_bytes: 100,
+    module_count: 42,
     status: "success"
   };
 }
@@ -868,7 +882,7 @@ function fakeAdapter({ checksumOffset = 0, error, calls, staleWarmChecksum = fal
         expectedChecksum: fixture.expectedChecksum
       });
       await writeFile(entryFile, `exports.checksum = ${fixture.expectedChecksum};\n`, "utf8");
-      return { entryFile, rebuildMs: 1 };
+      return { entryFile, rebuildMs: 1, moduleCount: 99 };
     },
     async build({ fixture, outputDir, phase, persistentCache, cacheReadonly }) {
       calls?.push({
@@ -893,7 +907,7 @@ function fakeAdapter({ checksumOffset = 0, error, calls, staleWarmChecksum = fal
         `exports.checksum = ${checksum + checksumOffset};\n`,
         "utf8"
       );
-      return { entryFile };
+      return { entryFile, moduleCount: 42 };
     }
   };
 }

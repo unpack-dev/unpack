@@ -89,6 +89,7 @@ export const adapters = {
           : false
       });
 
+      let moduleCount;
       try {
         const { err, stats } = await runUnpackCompiler(compiler);
         if (err) {
@@ -98,11 +99,12 @@ export const adapters = {
           const errors = stats.toJson().errors.map((error) => error.message).join("\n");
           throw new Error(errors || "Unpack reported compilation errors");
         }
+        moduleCount = stats?.compilation.modules.size;
       } finally {
         await closeUnpackCompiler(compiler);
       }
 
-      return { entryFile: join(outputDir, "main.js") };
+      return { entryFile: join(outputDir, "main.js"), moduleCount };
     }
   },
 
@@ -168,14 +170,16 @@ export const adapters = {
         plugins: [tracing.plugin]
       });
 
+      let moduleCount;
       try {
         const stats = await runWebpackCompiler(compiler);
         assertWebpackStats(stats, "webpack");
+        moduleCount = stats.compilation.modules.size;
       } finally {
         await tracing.close(compiler);
       }
 
-      return { entryFile: join(outputDir, "main.js") };
+      return { entryFile: join(outputDir, "main.js"), moduleCount };
     }
   },
 
@@ -246,14 +250,16 @@ export const adapters = {
         plugins: [tracing.plugin]
       });
 
+      let moduleCount;
       try {
         const stats = await runWebpackCompiler(compiler);
         assertWebpackStats(stats, "Rspack");
+        moduleCount = stats.compilation.modules.size;
       } finally {
         await tracing.close(compiler);
       }
 
-      return { entryFile: join(outputDir, "main.js") };
+      return { entryFile: join(outputDir, "main.js"), moduleCount };
     }
   },
 
@@ -269,8 +275,9 @@ export const adapters = {
         treeshake: false
       });
 
+      let output;
       try {
-        await bundle.write({
+        output = await bundle.write({
           dir: outputDir,
           format: "cjs",
           entryFileNames: "main.js",
@@ -282,7 +289,12 @@ export const adapters = {
         await bundle.close?.();
       }
 
-      return { entryFile: join(outputDir, "main.js") };
+      const moduleCount = new Set(
+        output.output.flatMap((item) =>
+          item.type === "chunk" ? Object.keys(item.modules) : []
+        )
+      ).size;
+      return { entryFile: join(outputDir, "main.js"), moduleCount };
     }
   },
 

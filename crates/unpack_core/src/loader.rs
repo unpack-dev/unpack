@@ -5,6 +5,7 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::Arc,
 };
 
 use regex::Regex;
@@ -92,9 +93,50 @@ pub struct LoaderRequest {
     pub resource: PathBuf,
     pub source: String,
     pub options: String,
+    pub module_runner: Arc<dyn LoaderModuleRunner>,
 }
 
-pub type LoaderFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
+#[derive(Debug, Clone)]
+pub struct LoadedLoaderModule {
+    pub source: String,
+    pub resource: PathBuf,
+    pub identifier: String,
+    pub file_dependencies: Vec<PathBuf>,
+    pub dependency_requests: Vec<String>,
+}
+
+pub type LoaderModuleFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<LoadedLoaderModule>> + Send + 'a>>;
+
+pub trait LoaderModuleRunner: Debug + Send + Sync {
+    fn load(
+        &self,
+        request: String,
+        kind: LoaderRequestKind,
+        context: Option<PathBuf>,
+    ) -> LoaderModuleFuture<'_>;
+}
+
+#[derive(Debug, Clone)]
+pub struct LoaderResult {
+    pub source: String,
+    pub requests: Vec<LoaderModuleRequest>,
+    pub file_dependencies: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoaderModuleRequest {
+    pub kind: LoaderRequestKind,
+    pub request: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoaderRequestKind {
+    Load,
+    Import,
+}
+
+pub type LoaderFuture<'a> = Pin<Box<dyn Future<Output = Result<LoaderResult>> + Send + 'a>>;
 
 pub trait LoaderRunner: Debug + Send + Sync {
     fn run(&self, request: LoaderRequest) -> LoaderFuture<'_>;

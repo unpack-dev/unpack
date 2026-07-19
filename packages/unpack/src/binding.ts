@@ -128,8 +128,9 @@ export interface NativeBinding {
       loader: string,
       resource: string,
       source: string,
-      options: string
-    ) => Promise<string>,
+      options: string,
+      context: NativeLoaderContext
+    ) => Promise<LoaderRunResult>,
     compilation?: (compilation: NativeCompilation) => Promise<void>,
     finishModules?: (compilation: NativeCompilation) => Promise<void>,
     processAssets?: (assets: NativeAssets) => Promise<void>
@@ -179,9 +180,50 @@ export type LoaderFunction = (
     sourceMap: false;
     getOptions(): Record<string, unknown>;
     async(): (error: unknown, source?: unknown) => void;
+    loadModule(
+      request: string,
+      callback: (error: Error | null, source?: string, sourceMap?: null, module?: LoaderModule) => void
+    ): void;
+    importModule(
+      request: string,
+      options?: Record<string, unknown>,
+      callback?: (error: Error | null, exports?: unknown) => void
+    ): Promise<unknown> | void;
   },
   source: string
 ) => unknown;
+
+export interface LoaderModule {
+  readonly resource: string;
+  identifier(): string;
+}
+
+export interface LoaderRunResult {
+  source: string;
+  requests: LoaderModuleRequest[];
+  fileDependencies: string[];
+}
+
+export interface LoaderModuleRequest {
+  kind: "load" | "import";
+  request: string;
+}
+
+export interface NativeLoaderContext {
+  loadModule(
+    request: string,
+    kind: "load" | "import",
+    context?: string
+  ): Promise<NativeLoadedLoaderModule>;
+}
+
+export interface NativeLoadedLoaderModule {
+  source: string;
+  resource: string;
+  identifier: string;
+  fileDependencies: string[];
+  dependencyRequests: string[];
+}
 
 export type LoaderState =
   | { failed: false; loader: LoaderFunction }

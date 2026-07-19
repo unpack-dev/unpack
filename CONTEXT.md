@@ -224,6 +224,18 @@ _Avoid_: Template prefix, runtime snippet
 A dependency declared by an ECMAScript `import()` expression whose specifier is known before code execution.
 _Avoid_: Lazy import, runtime import
 
+**Loader Module Request**:
+A module request issued while a loader is running through `this.loadModule` or
+`this.importModule`. It is resolved from the current resource, participates in
+the same Compilation's Module Graph and dependency snapshots, and may itself be
+transformed by a matching configured loader.
+_Avoid_: Loader filesystem read, detached import
+
+**Build-Time Module Execution**:
+Execution requested by a loader through `this.importModule` so the loader can
+consume a requested module's exports while building the current module.
+_Avoid_: Runtime dynamic import, Node require
+
 **Async Split Point**:
 A module graph edge introduced by a dynamic import dependency where the target module should belong to asynchronously loaded bundle output.
 _Avoid_: Lazy boundary, chunk trigger

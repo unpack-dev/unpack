@@ -47,7 +47,9 @@ impl ExportsInfo {
                 | Dependency::HarmonyExportHeader(_)
                 | Dependency::Null(_)
                 | Dependency::Const(_)
-                | Dependency::Import(_) => {}
+                | Dependency::Import(_)
+                | Dependency::Loader(_)
+                | Dependency::LoaderImport(_) => {}
             }
         }
         exports_info

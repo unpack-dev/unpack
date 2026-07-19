@@ -154,6 +154,25 @@ loads and invokes configured CommonJS loaders for the internal N-API bridge.
 It is an internal host-transport boundary rather than a separate webpack public
 surface or a replacement for the Normal Module Factory responsibility.
 
+The loader context exposes the first `loadModule` and `importModule` slice.
+Both ask the Rust Make Phase to resolve requests relative to the current
+resource, apply matching configured loaders, add dedicated Loader Dependency
+records to the current Compilation's Module Graph,
+and propagate the loaded resource and loader files into watch dependencies and
+Module Build Record snapshots. `loadModule` uses webpack's asynchronous
+callback shape and returns transformed text, a null source map, and a minimal
+module facade. `importModule` supports both Promise and callback forms and
+returns an ECMAScript module namespace.
+
+Loader Dependency connections are excluded from runtime Chunk membership.
+This slice deliberately rejects inline loader request syntax and non-empty
+`importModule` options. Build-Time Module Execution currently uses Node's ESM
+evaluator for transformed JavaScript text after recursively asking Make to
+build static ESM dependencies, and does not yet provide webpack's execution runtime, emitted assets,
+CommonJS execution, layer/publicPath/baseUri behavior, or source maps. Those
+surfaces require a Compilation-owned code-generation runtime before they can be
+exposed.
+
 Webpack's `NormalModuleFactory` owns a large part of public configurability: hooks, scheme-specific resolution, rule matching, loader resolution, parser/generator selection, layers, import attributes, dependency categories, file/missing/context dependency tracking, and ignored modules.
 
 Necessity:

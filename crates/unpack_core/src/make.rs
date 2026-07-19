@@ -12,12 +12,13 @@ use std::{
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use rustc_hash::{FxHashMap, FxHashSet};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, EntryDependency,
-    Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleHandle,
-    ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
+    Error, FactorizedModule, LoaderDependency, LoaderImportDependency, LoaderRequest, LoaderRunner,
+    MatchedLoader, ModuleHandle, ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy,
+    UnpackResolver,
     cache::{Cache, ModuleBuildRecord},
     cache_facade::{CacheETag, ModuleBuildCache},
     module::BuiltModuleContent,
@@ -36,6 +37,8 @@ pub(crate) struct MakeState {
     pub context_dependencies: FxHashSet<PathBuf>,
     pub missing_dependencies: FxHashSet<PathBuf>,
     modules_by_identity: FxHashMap<ModuleIdentity, ModuleHandle>,
+    building_modules: FxHashMap<ModuleHandle, watch::Sender<bool>>,
+    loader_waits: FxHashMap<ModuleHandle, ModuleHandle>,
 }
 
 struct MakeServices {
@@ -51,6 +54,147 @@ struct MakeServices {
     module_types: ModuleTypeRegistry,
     unsafe_watch_cache: Option<crate::unsafe_watch_cache::UnsafeWatchCache>,
     watch_change_set: Option<crate::WatchChangeSet>,
+}
+
+struct MakeLoaderModuleRunner {
+    services: Arc<MakeServices>,
+    state: Arc<Mutex<MakeState>>,
+    origin_module: ModuleHandle,
+    context: PathBuf,
+}
+
+impl std::fmt::Debug for MakeLoaderModuleRunner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MakeLoaderModuleRunner")
+    }
+}
+
+impl crate::LoaderModuleRunner for MakeLoaderModuleRunner {
+    fn load(
+        &self,
+        request: String,
+        kind: crate::LoaderRequestKind,
+        context: Option<PathBuf>,
+    ) -> crate::LoaderModuleFuture<'_> {
+        Box::pin(async move {
+            let context = context.as_deref().unwrap_or(&self.context);
+            let dependency = match kind {
+                crate::LoaderRequestKind::Load => {
+                    Dependency::Loader(LoaderDependency::new(request))
+                }
+                crate::LoaderRequestKind::Import => {
+                    Dependency::LoaderImport(LoaderImportDependency::new(request))
+                }
+            };
+            let factorized = self
+                .services
+                .normal_module_factory
+                .factorize(context, &dependency)
+                .await?;
+            let resource = factorized.resource.clone();
+            let identity = factorized.identity.clone();
+            let (add_result, mut build_waiter, creates_cycle) = {
+                let mut state = self.state.lock().await;
+                state
+                    .file_dependencies
+                    .extend(factorized.file_dependencies.iter().cloned());
+                state
+                    .context_dependencies
+                    .extend(factorized.context_dependencies.iter().cloned());
+                state
+                    .missing_dependencies
+                    .extend(factorized.missing_dependencies.iter().cloned());
+                let add_result = state.add_or_connect(
+                    None,
+                    Vec::new(),
+                    identity.clone(),
+                    factorized.side_effect_free,
+                );
+                let build_waiter = if add_result.is_new {
+                    None
+                } else {
+                    state
+                        .building_modules
+                        .get(&add_result.module_handle)
+                        .map(watch::Sender::subscribe)
+                };
+                let creates_cycle =
+                    state.loader_wait_creates_cycle(self.origin_module, add_result.module_handle);
+                if !creates_cycle {
+                    state
+                        .loader_waits
+                        .insert(self.origin_module, add_result.module_handle);
+                }
+                (add_result, build_waiter, creates_cycle)
+            };
+
+            if creates_cycle {
+                return Err(Error::MakeTask {
+                    message: format!(
+                        "There is a circular build dependency involving {}",
+                        identity.resource.to_string_lossy()
+                    ),
+                });
+            }
+
+            if let Some(waiter) = build_waiter.as_mut() {
+                while !*waiter.borrow_and_update() {
+                    waiter.changed().await.map_err(|_| Error::MakeTask {
+                        message: format!(
+                            "build waiter closed before {} completed",
+                            identity.resource.to_string_lossy()
+                        ),
+                    })?;
+                }
+            }
+
+            if add_result.is_new {
+                let mut queue = VecDeque::from([MakeTask::Build(BuildTask {
+                    module_handle: add_result.module_handle,
+                    identity: identity.clone(),
+                    resource: resource.clone(),
+                    loader: factorized.loader,
+                })]);
+                while let Some(task) = queue.pop_front() {
+                    queue.extend(
+                        task.run(Arc::clone(&self.services), Arc::clone(&self.state))
+                            .await?,
+                    );
+                }
+            }
+
+            let mut state = self.state.lock().await;
+            state.loader_waits.remove(&self.origin_module);
+            let module = state
+                .module_graph
+                .module(add_result.module_handle)
+                .ok_or(Error::MissingModule(add_result.module_handle))?;
+            if let Some(error) = module.build_error() {
+                return Err(error.clone());
+            }
+            Ok(crate::LoadedLoaderModule {
+                source: module.source().to_string(),
+                resource,
+                identifier: module.identity().identifier(),
+                // Loader results may embed any transitive build input. Until Module Build Info
+                // owns dependency sets per Module, conservatively snapshot the Compilation's
+                // complete file dependency set to prevent stale loader output.
+                file_dependencies: state.file_dependencies.iter().cloned().collect(),
+                dependency_requests: module
+                    .dependencies()
+                    .iter()
+                    .chain(
+                        module
+                            .blocks()
+                            .iter()
+                            .flat_map(|block| block.dependencies()),
+                    )
+                    .filter_map(Dependency::request)
+                    .map(str::to_string)
+                    .collect(),
+            })
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -584,6 +728,8 @@ impl BuildTask {
                 return Ok(Vec::new());
             }
         };
+        let mut loader_module_requests = Vec::new();
+        let mut loader_file_dependencies = Vec::new();
         let source = if let Some(loader) = self.loader.as_ref() {
             let Some(loader_runner) = services.loader_runner.as_ref() else {
                 let error = Error::Loader {
@@ -603,10 +749,20 @@ impl BuildTask {
                     resource: self.resource.clone(),
                     source: raw_source.clone(),
                     options: loader.options.clone(),
+                    module_runner: Arc::new(MakeLoaderModuleRunner {
+                        services: Arc::clone(&services),
+                        state: Arc::clone(&state),
+                        origin_module: self.module_handle,
+                        context: issuer_context.clone(),
+                    }),
                 })
                 .await
             {
-                Ok(source) => source,
+                Ok(result) => {
+                    loader_module_requests = result.requests;
+                    loader_file_dependencies = result.file_dependencies;
+                    result.source
+                }
                 Err(error) if error.is_compilation_error() => {
                     state
                         .lock()
@@ -624,7 +780,7 @@ impl BuildTask {
         } else {
             raw_bytes.as_slice()
         };
-        let parsed = match services.module_types.parse(ModuleParserContext {
+        let mut parsed = match services.module_types.parse(ModuleParserContext {
             module_type: self.identity.module_type,
             resource: &self.resource,
             source: &source,
@@ -641,6 +797,21 @@ impl BuildTask {
             }
             Err(error) => return Err(error),
         };
+        parsed
+            .dependencies_block
+            .dependencies
+            .extend(
+                loader_module_requests
+                    .into_iter()
+                    .map(|request| match request.kind {
+                        crate::LoaderRequestKind::Load => {
+                            Dependency::Loader(LoaderDependency::new(request.request))
+                        }
+                        crate::LoaderRequestKind::Import => {
+                            Dependency::LoaderImport(LoaderImportDependency::new(request.request))
+                        }
+                    }),
+            );
         let process_dependencies =
             process_dependencies_task(self.module_handle, &issuer_context, &parsed);
 
@@ -677,6 +848,21 @@ impl BuildTask {
                 services
                     .file_system_info
                     .create_file_snapshot(loader, &loader_source, services.module_snapshot_strategy)
+                    .await?,
+            );
+        }
+        for dependency in loader_file_dependencies {
+            let dependency_source = tokio::fs::read(&dependency)
+                .await
+                .map_err(|error| Error::read(&dependency, error))?;
+            snapshots.push(
+                services
+                    .file_system_info
+                    .create_file_snapshot_bytes(
+                        &dependency,
+                        &dependency_source,
+                        services.module_snapshot_strategy,
+                    )
                     .await?,
             );
         }
@@ -852,6 +1038,21 @@ fn normalize_missing_resource(path: PathBuf) -> PathBuf {
 }
 
 impl MakeState {
+    fn loader_wait_creates_cycle(&self, origin: ModuleHandle, target: ModuleHandle) -> bool {
+        let mut current = target;
+        let mut visited = FxHashSet::default();
+        while visited.insert(current) {
+            if current == origin {
+                return true;
+            }
+            let Some(next) = self.loader_waits.get(&current).copied() else {
+                return false;
+            };
+            current = next;
+        }
+        false
+    }
+
     fn add_or_connect(
         &mut self,
         origin_module: Option<ModuleHandle>,
@@ -867,6 +1068,8 @@ impl MakeState {
                     .module_graph
                     .add_module(identity.clone(), side_effect_free);
                 self.modules_by_identity.insert(identity, module_handle);
+                let (sender, _) = watch::channel(false);
+                self.building_modules.insert(module_handle, sender);
                 (module_handle, true)
             };
 
@@ -895,7 +1098,11 @@ impl MakeState {
         built_content: Arc<BuiltModuleContent>,
     ) -> Result<()> {
         self.module_graph
-            .finish_module_build(module_handle, built_content)
+            .finish_module_build(module_handle, built_content)?;
+        if let Some(sender) = self.building_modules.remove(&module_handle) {
+            let _ = sender.send(true);
+        }
+        Ok(())
     }
 
     fn fail_module(
@@ -906,6 +1113,9 @@ impl MakeState {
     ) -> Result<()> {
         self.module_graph
             .fail_module(module_handle, error.clone(), source)?;
+        if let Some(sender) = self.building_modules.remove(&module_handle) {
+            let _ = sender.send(true);
+        }
         self.errors.push(error);
         Ok(())
     }

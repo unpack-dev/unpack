@@ -154,6 +154,10 @@ impl ModuleGraph {
 }
 
 impl BuildingModuleGraph {
+    pub(crate) fn module(&self, handle: ModuleHandle) -> Option<&BuildingModule> {
+        self.storage.modules.get(handle.index())
+    }
+
     pub(crate) fn add_module(
         &mut self,
         identity: ModuleIdentity,

@@ -171,6 +171,30 @@ impl BuildingModule {
         self.data.handle
     }
 
+    pub(crate) fn identity(&self) -> &ModuleIdentity {
+        &self.data.identity
+    }
+
+    pub(crate) fn source(&self) -> &str {
+        self.data.built_content.source()
+    }
+
+    pub(crate) fn build_error(&self) -> Option<&Error> {
+        self.data.build_error.as_ref()
+    }
+
+    pub(crate) fn dependencies(&self) -> &[Dependency] {
+        self.data
+            .built_content
+            .parsed
+            .dependencies_block
+            .dependencies()
+    }
+
+    pub(crate) fn blocks(&self) -> &[AsyncDependenciesBlock] {
+        self.data.built_content.parsed.dependencies_block.blocks()
+    }
+
     pub(crate) fn set_factory_side_effect_free(&mut self, side_effect_free: Option<bool>) {
         self.data.factory_side_effect_free = side_effect_free;
     }
@@ -316,6 +340,29 @@ impl ModuleIdentity {
             layer: None,
             loaders: Vec::new(),
         }
+    }
+
+    pub fn identifier(&self) -> String {
+        let resource = format!(
+            "{}{}{}",
+            self.resource.to_string_lossy(),
+            self.query.as_deref().unwrap_or_default(),
+            self.fragment.as_deref().unwrap_or_default()
+        );
+        let request = if self.loaders.is_empty() {
+            resource
+        } else {
+            format!("{}!{resource}", self.loaders.join("!"))
+        };
+        let module_type = match self.module_type {
+            ModuleType::JavaScriptAuto => "javascript/auto",
+            ModuleType::Json => "json",
+            ModuleType::Asset => "asset",
+            ModuleType::AssetResource => "asset/resource",
+            ModuleType::AssetInline => "asset/inline",
+            ModuleType::AssetSource => "asset/source",
+        };
+        format!("{module_type}|{request}")
     }
 }
 

@@ -61,7 +61,7 @@ impl DependencyTemplate<HarmonyImportSideEffectDependency>
         {
             context.add_init_fragment(
                 InitFragmentStage::Import,
-                format!("{}();\n", scope.init_name(target)),
+                format!("{}();\n", scope.init_expression(target)),
             );
             return;
         }

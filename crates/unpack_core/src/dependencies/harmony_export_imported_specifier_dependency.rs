@@ -83,7 +83,7 @@ impl DependencyTemplate<HarmonyExportImportedSpecifierDependency>
                         dependency.module.source_order.unwrap_or(0),
                     )
                 },
-                |scope| scope.exports_name(target),
+                |scope| scope.exports_expression(target),
             );
         let exports_argument = context.exports_argument();
         if dependency.is_star {

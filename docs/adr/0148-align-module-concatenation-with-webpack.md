@@ -40,7 +40,10 @@ for that rename pass. The current `ConcatenatedModule` therefore emits one
 module-table factory with configuration-local namespace objects and guarded
 initializers. Internal Harmony imports call those initializers instead of
 `__webpack_require__`; export getters, cyclic initialization, static import
-order, Runtime Requirements, and each Original Source remain preserved.
+order, Runtime Requirements, and each Original Source remain preserved. A
+configuration-local require facade carries namespace and initializer tables so
+dependency templates do not inject free generated identifiers into user
+module scopes.
 
 Direct scope flattening is a follow-up trigger once the parser retains the
 required binding metadata. It must remain owned by `ConcatenatedModule`, and it

@@ -143,7 +143,8 @@ documented deviations or staged webpack scope.
   `docs/implementation/webpack-implementation-differences.md` document the
   dense-handle and Code Generation boundaries. Public webpack comparison tests
   cover Chunk membership, live bindings, cycles, import order, re-exports,
-  cross-Chunk bailouts, source maps, and rebuild invalidation.
+  cross-Chunk bailouts, generated-name collision avoidance, source maps, and
+  rebuild invalidation.
 - **Refactor when**: optimization-created Modules can receive stable
   compilation-local handles or the parser retains complete resolved top-level
   symbol/reference metadata. Preserve the plugin phase, candidate selection,

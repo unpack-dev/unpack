@@ -65,7 +65,7 @@ impl DependencyTemplate<HarmonyImportSpecifierDependency>
             && scope.contains(target)
         {
             crate::dependency_template::export_access_expression(
-                &scope.exports_name(target),
+                &scope.exports_expression(target),
                 &dependency.ids,
             )
         } else {

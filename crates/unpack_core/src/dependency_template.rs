@@ -49,10 +49,7 @@ impl DependencyTemplateContext<'_> {
     }
 
     pub(crate) fn exports_argument(&self) -> String {
-        self.concatenation_scope.map_or_else(
-            || "__webpack_exports__".to_string(),
-            |scope| scope.exports_name(self.module),
-        )
+        "__webpack_exports__".to_string()
     }
 
     fn validate_source_ranges(
@@ -83,13 +80,12 @@ impl DependencyTemplateContext<'_> {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ConcatenationScope<'a> {
-    root: ModuleHandle,
     modules: &'a [ModuleHandle],
 }
 
 impl<'a> ConcatenationScope<'a> {
-    pub(crate) fn new(root: ModuleHandle, modules: &'a [ModuleHandle]) -> Self {
-        Self { root, modules }
+    pub(crate) fn new(modules: &'a [ModuleHandle]) -> Self {
+        Self { modules }
     }
 
     pub(crate) fn contains(&self, module: ModuleHandle) -> bool {
@@ -103,16 +99,18 @@ impl<'a> ConcatenationScope<'a> {
             .expect("a Concatenation Scope must contain the requested Module")
     }
 
-    pub(crate) fn exports_name(&self, module: ModuleHandle) -> String {
-        if module == self.root {
-            "__webpack_exports__".to_string()
-        } else {
-            format!("__webpack_exports__{}", self.ordinal(module))
-        }
+    pub(crate) fn exports_expression(&self, module: ModuleHandle) -> String {
+        format!(
+            "__webpack_require__.__unpack_concatenation_exports__[{}]",
+            self.ordinal(module)
+        )
     }
 
-    pub(crate) fn init_name(&self, module: ModuleHandle) -> String {
-        format!("__webpack_init__{}", self.ordinal(module))
+    pub(crate) fn init_expression(&self, module: ModuleHandle) -> String {
+        format!(
+            "__webpack_require__.__unpack_concatenation_initializers__[{}]",
+            self.ordinal(module)
+        )
     }
 }
 

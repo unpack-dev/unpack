@@ -84,6 +84,36 @@ test("concatenated modules preserve cyclic live bindings through namespace reexp
   }
 });
 
+test("concatenated modules do not capture user bindings that resemble generated names", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-concatenate-bindings-"));
+  try {
+    await writeFixture(fixture, {
+      "src/index.js": [
+        "import { value } from './value.js';",
+        "const __webpack_init__1 = 'user init';",
+        "const __webpack_exports__1 = 'user exports';",
+        "globalThis.CONCATENATE_MODULES_RESULT = `${value}:${__webpack_init__1}:${__webpack_exports__1}`;",
+        "export { value };"
+      ].join("\n"),
+      "src/value.js": "export const value = 42;"
+    });
+
+    const unpackObservation = await runStringResultUnpack(
+      fixture,
+      join(fixture, "dist-unpack")
+    );
+    const webpackObservation = await runStringResultWebpack(
+      fixture,
+      join(fixture, "dist-webpack")
+    );
+    assert.equal(unpackObservation, webpackObservation);
+    assert.equal(unpackObservation, "42:user init:user exports");
+  } finally {
+    delete (globalThis as { CONCATENATE_MODULES_RESULT?: string }).CONCATENATE_MODULES_RESULT;
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("concatenated modules retain each original source in sourcemaps", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "unpack-concatenate-sourcemap-"));
   try {

@@ -273,11 +273,13 @@ Module Handle arena, and its parser does not yet retain webpack's complete
 top-level symbol/reference metadata. The current Rust adaptation records the
 `ConcatenatedModule` plan on the Chunk Graph under the existing Root handle and
 generates guarded configuration-local initializers and namespace objects inside
-one factory. This preserves static evaluation order, cyclic live bindings,
-re-export chains, Runtime Requirements, and per-module Original Sources, but it
-does not yet expose webpack's synthetic Module identity or eliminate all
-function and namespace boundaries. ADR 0148 records this boundary and the
-direct-scope-flattening refactor trigger.
+one factory. Internal dependency templates reach those tables through a
+configuration-local require facade, avoiding generated free-name capture in
+user module scopes. This preserves static evaluation order, cyclic live
+bindings, re-export chains, Runtime Requirements, and per-module Original
+Sources, but it does not yet expose webpack's synthetic Module identity or
+eliminate all function and namespace boundaries. ADR 0148 records this boundary
+and the direct-scope-flattening refactor trigger.
 
 ## Runtime and asset generation
 

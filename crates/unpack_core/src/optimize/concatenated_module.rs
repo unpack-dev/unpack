@@ -61,7 +61,7 @@ impl ConcatenatedModule {
         chunk_graph: &ChunkGraph,
         module_render_ids: &FxHashMap<ModuleHandle, RenderId>,
     ) -> Result<CodeGenerationResult, Error> {
-        let scope = ConcatenationScope::new(self.root_module, &self.modules);
+        let scope = ConcatenationScope::new(&self.modules);
         let mut generated_modules = Vec::with_capacity(self.modules.len());
         let mut runtime_requirements = RuntimeRequirements::default();
         for handle in &self.modules {
@@ -91,27 +91,40 @@ impl ConcatenatedModule {
         source.add(RawStringSource::from(
             "// webpack-style concatenated module\n".to_string(),
         ));
-        for inner in self.inner_modules() {
-            source.add(RawStringSource::from(format!(
-                "var {} = {{}};\n",
-                scope.exports_name(inner)
-            )));
+        source.add(RawStringSource::from(
+            "var __webpack_concatenation_exports__ = [".to_string(),
+        ));
+        for (index, module) in self.modules.iter().enumerate() {
+            if index > 0 {
+                source.add(RawStringSource::from(", ".to_string()));
+            }
+            source.add(RawStringSource::from(
+                if *module == self.root_module {
+                    "__webpack_exports__"
+                } else {
+                    "{}"
+                }
+                .to_string(),
+            ));
         }
+        source.add(RawStringSource::from("];\n".to_string()));
+        source.add(RawStringSource::from(format!(
+            "var __webpack_concatenation_initialized__ = Array({length}).fill(false);\nvar __webpack_concatenation_initializers__ = Array({length});\nvar __webpack_concatenation_require__ = (...args) => __webpack_require__(...args);\nObject.setPrototypeOf(__webpack_concatenation_require__, __webpack_require__);\n__webpack_concatenation_require__.__unpack_concatenation_exports__ = __webpack_concatenation_exports__;\n__webpack_concatenation_require__.__unpack_concatenation_initializers__ = __webpack_concatenation_initializers__;\n",
+            length = self.modules.len(),
+        )));
         for (handle, result) in &generated_modules {
-            let exports_name = scope.exports_name(*handle);
+            let index = scope.ordinal(*handle);
             source.add(RawStringSource::from(format!(
-                "var __webpack_initialized__{index} = false;\nvar {init} = () => {{\n  if (__webpack_initialized__{index}) return {exports_name};\n  __webpack_initialized__{index} = true;\n",
-                index = scope.ordinal(*handle),
-                init = scope.init_name(*handle),
+                "__webpack_concatenation_initializers__[{index}] = () => {{\n  if (__webpack_concatenation_initialized__[{index}]) return __webpack_concatenation_exports__[{index}];\n  __webpack_concatenation_initialized__[{index}] = true;\n  return ((__webpack_exports__, __webpack_require__) => {{\n",
             )));
             source.add(result.source().clone());
             source.add(RawStringSource::from(format!(
-                "\n  return {exports_name};\n}};\n"
+                "\n    return __webpack_exports__;\n  }})(__webpack_concatenation_exports__[{index}], __webpack_concatenation_require__);\n}};\n"
             )));
         }
         source.add(RawStringSource::from(format!(
-            "{}();\n",
-            scope.init_name(self.root_module)
+            "__webpack_concatenation_initializers__[{}]();\n",
+            scope.ordinal(self.root_module)
         )));
         Ok(CodeGenerationResult::from_parts(
             source,
@@ -159,11 +172,19 @@ mod tests {
         let root = handles["root.js"];
         let concatenated =
             ConcatenatedModule::new(root, handles.values().copied().collect(), &module_graph);
-        let scope = ConcatenationScope::new(root, concatenated.modules());
+        let scope = ConcatenationScope::new(concatenated.modules());
 
         handles
             .into_iter()
-            .map(|(name, handle)| (name, (scope.exports_name(handle), scope.init_name(handle))))
+            .map(|(name, handle)| {
+                (
+                    name,
+                    (
+                        scope.exports_expression(handle),
+                        scope.init_expression(handle),
+                    ),
+                )
+            })
             .collect()
     }
 }

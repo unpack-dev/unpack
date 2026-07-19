@@ -40,14 +40,10 @@ pub(crate) fn generate_with_concatenation_scope(
     let mut runtime_requirements = RuntimeRequirements::default();
     if module.is_harmony() {
         runtime_requirements.insert(RuntimeRequirement::MakeNamespaceObject);
-        let exports_argument = concatenation_scope.map_or_else(
-            || "__webpack_exports__".to_string(),
-            |scope| scope.exports_name(module_handle),
-        );
         init_fragments.push(InitFragment::new(
             InitFragmentStage::Compatibility,
             init_fragments.len(),
-            format!("__webpack_require__.r({exports_argument});\n"),
+            "__webpack_require__.r(__webpack_exports__);\n".to_string(),
         ));
     }
 

@@ -148,6 +148,10 @@ _Avoid_: Entry chunk, main chunk
 The compilation stage that starts from entry modules, discovers their dependencies, and constructs the module graph before bundling.
 _Avoid_: Build phase, parse phase
 
+**Finished Modules Boundary**:
+The compilation boundary reached after Make has produced the Module Graph and all `finishModules` work has completed. Make-owned Building Modules become immutable Modules before this boundary; later graph analysis and sealing may mutate Module Graph metadata such as Exports Info, but not Module build state.
+_Avoid_: Module freeze hook, immutable compilation
+
 **Resolve Cache**:
 The webpack-shaped cache of successful resolver results, controlled by `resolve.cache`; entries remain subject to dependency Snapshot validation and are distinct from the resolver's internal filesystem and package-metadata memoization.
 _Avoid_: Resolver filesystem cache, unsafe resolver cache

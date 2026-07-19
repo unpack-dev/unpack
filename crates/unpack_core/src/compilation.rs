@@ -181,7 +181,7 @@ impl Compilation {
             .await;
 
             let mut state = state.lock().await;
-            self.module_graph = std::mem::take(&mut state.module_graph);
+            self.module_graph = std::mem::take(&mut state.module_graph).finish();
             self.entries = std::mem::take(&mut state.entries).into_values().collect();
             self.errors = std::mem::take(&mut state.errors);
             self.watch_dependencies = WatchDependencies {
@@ -435,7 +435,8 @@ fn compute_module_hash(
                 .flat_map(|block| block.dependencies()),
         )
     {
-        dependency.update_code_generation_hash(module.exports_info(), &mut hasher);
+        dependency
+            .update_code_generation_hash(module_graph.exports_info(module.handle()), &mut hasher);
     }
     let references = chunk_graph.module_references(module_graph, module.handle());
     references.module_render_id.hash(&mut hasher);

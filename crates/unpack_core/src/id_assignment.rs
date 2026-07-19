@@ -304,7 +304,7 @@ fn normalize_path(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::{
-        CacheOptions, CompilerOptions, Entry, ModuleGraph, ModuleIdentity, SnapshotOptions,
+        CacheOptions, CompilerOptions, Entry, ModuleIdentity, SnapshotOptions,
         cache::Cache,
         code_generation::{create_render_manifest, generate_code, render_assets},
     };
@@ -375,8 +375,13 @@ mod tests {
     fn emitted_unnamed_module_consumes_numeric_fallback() {
         let context = Path::new("/project");
         let options = CompilerOptions::new(context, vec![Entry::new("main", "./index")]);
-        let mut module_graph = ModuleGraph::default();
-        let module = add_built_module(&mut module_graph, ModuleIdentity::new(context), "unnamed");
+        let mut building_module_graph = crate::module_graph::BuildingModuleGraph::default();
+        let module = add_built_module(
+            &mut building_module_graph,
+            ModuleIdentity::new(context),
+            "unnamed",
+        );
+        let module_graph = building_module_graph.finish();
         let mut chunk_graph =
             crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
@@ -423,17 +428,18 @@ mod tests {
                 .map(|name| Entry::new(*name, format!("./{name}")))
                 .collect(),
         );
-        let mut module_graph = ModuleGraph::default();
+        let mut building_module_graph = crate::module_graph::BuildingModuleGraph::default();
         let mut modules_by_name = BTreeMap::new();
         for name in insertion_order {
             let identity = ModuleIdentity::new(context.join(format!("{name}.js")));
-            let module = add_built_module(&mut module_graph, identity, name);
+            let module = add_built_module(&mut building_module_graph, identity, name);
             modules_by_name.insert(*name, module);
         }
         let entries = entry_names
             .iter()
             .map(|name| modules_by_name[name])
             .collect::<Vec<_>>();
+        let module_graph = building_module_graph.finish();
         let mut chunk_graph =
             crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &entries);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
@@ -460,22 +466,24 @@ mod tests {
     }
 
     fn add_built_module(
-        module_graph: &mut ModuleGraph,
+        module_graph: &mut crate::module_graph::BuildingModuleGraph,
         identity: ModuleIdentity,
         value: &str,
     ) -> crate::ModuleHandle {
-        let module = module_graph.add_module(identity);
+        let module = module_graph.add_module(identity, None);
         let source = format!("const value = {value:?};");
         module_graph
-            .module_mut(module)
-            .expect("synthetic module should exist")
-            .finish_build(
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                source.clone(),
-                stable_hash(&source),
-            );
+            .finish_module_build(
+                module,
+                crate::module::BuiltModuleContent::from_test_parts(
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    source.clone(),
+                    stable_hash(&source),
+                ),
+            )
+            .expect("synthetic module should exist");
         module
     }
 }

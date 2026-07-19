@@ -243,8 +243,8 @@ fn connection_is_active(
             dependency.name.as_ref().is_some_and(|name| {
                 connection.origin_module.is_some_and(|origin| {
                     module_graph
-                        .module(origin)
-                        .and_then(|module| module.exports_info().get_used_name(name))
+                        .exports_info(origin)
+                        .get_used_name(name)
                         .is_some()
                 })
             }) || (dependency.is_star && module_exports_are_used(module_graph, connection.module))
@@ -254,13 +254,11 @@ fn connection_is_active(
 }
 
 fn module_exports_are_used(module_graph: &ModuleGraph, handle: ModuleHandle) -> bool {
-    module_graph.module(handle).is_some_and(|module| {
-        module.exports_info().are_all_exports_used()
-            || module
-                .exports_info()
-                .used_exports()
-                .is_some_and(|mut used| used.next().is_some())
-    })
+    let exports_info = module_graph.exports_info(handle);
+    exports_info.are_all_exports_used()
+        || exports_info
+            .used_exports()
+            .is_some_and(|mut used| used.next().is_some())
 }
 
 fn module_has_side_effects(module_graph: &ModuleGraph, handle: ModuleHandle) -> bool {

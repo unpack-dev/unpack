@@ -357,11 +357,11 @@ impl Drop for NativeCompilation {
 impl NativeCompilation {
     #[napi]
     pub fn modules(&self) -> Result<Vec<NativeModule>> {
-        Ok(self
-            .module_graph()?
+        let module_graph = self.module_graph()?;
+        Ok(module_graph
             .modules()
             .iter()
-            .map(native_module)
+            .map(|module| native_module(module_graph, module))
             .collect())
     }
 
@@ -1310,7 +1310,7 @@ fn native_module_graph_connection(
     }
 }
 
-fn native_module(module: &Module) -> NativeModule {
+fn native_module(module_graph: &unpack_core::ModuleGraph, module: &Module) -> NativeModule {
     let identity = module.identity();
     let resource = format!(
         "{}{}{}",
@@ -1331,21 +1331,20 @@ fn native_module(module: &Module) -> NativeModule {
         ModuleType::AssetInline => "asset/inline",
         ModuleType::AssetSource => "asset/source",
     };
+    let exports_info = module_graph.exports_info(module.handle());
 
     NativeModule {
         handle: native_module_handle(module.handle()),
         identifier: format!("{module_type}|{request}"),
         resource,
         module_type: module_type.to_string(),
-        provided_exports: module
-            .exports_info()
+        provided_exports: exports_info
             .provided_exports()
             .map(|exports| exports.map(str::to_string).collect()),
-        used_exports: module
-            .exports_info()
+        used_exports: exports_info
             .used_exports()
             .map(|exports| exports.map(str::to_string).collect()),
-        all_exports_used: module.exports_info().are_all_exports_used(),
+        all_exports_used: exports_info.are_all_exports_used(),
     }
 }
 

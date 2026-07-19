@@ -33,8 +33,8 @@ fn flag_dependency_usage(compilation: &mut Compilation) {
     for entry in compilation.entries() {
         let provided = compilation
             .module_graph()
-            .module(*entry)
-            .and_then(|module| module.exports_info().provided_exports())
+            .exports_info(*entry)
+            .provided_exports()
             .map(|exports| exports.map(str::to_string).collect::<Vec<_>>());
         let entry_usage = used.entry(*entry).or_default();
         if let Some(provided) = provided {
@@ -88,8 +88,8 @@ fn flag_dependency_usage(compilation: &mut Compilation) {
                     let previous_len = target.1.len();
                     let provided = compilation
                         .module_graph()
-                        .module(connection.module)
-                        .and_then(|module| module.exports_info().provided_exports())
+                        .exports_info(connection.module)
+                        .provided_exports()
                         .map(|exports| exports.map(str::to_string).collect::<BTreeSet<_>>());
                     target.1.extend(origin_usage.1.into_iter().filter(|name| {
                         name != "default"
@@ -107,12 +107,11 @@ fn flag_dependency_usage(compilation: &mut Compilation) {
     }
 
     for (handle, (all, names)) in used {
-        if let Some(module) = compilation.module_graph_mut().module_mut(handle) {
-            if all {
-                module.exports_info_mut().set_all_exports_used();
-            } else {
-                module.exports_info_mut().set_used_exports(Some(names));
-            }
+        let exports_info = compilation.module_graph_mut().exports_info_mut(handle);
+        if all {
+            exports_info.set_all_exports_used();
+        } else {
+            exports_info.set_used_exports(Some(names));
         }
     }
 }

@@ -80,7 +80,7 @@ fn code_generation_etag(input: &ModuleGeneratorContext<'_>) -> CacheETag {
     module
         .code_generation_local_input_digest()
         .hash(&mut hasher);
-    hash_used_export_names(module, &mut hasher);
+    hash_used_export_names(module, module_graph, &mut hasher);
     module_render_ids.get(&module.handle()).hash(&mut hasher);
 
     for dependency_index in 0..module.dependencies().len() {
@@ -123,7 +123,7 @@ fn code_generation_etag(input: &ModuleGeneratorContext<'_>) -> CacheETag {
     CacheETag::new(hasher.finish().to_le_bytes())
 }
 
-fn hash_used_export_names(module: &Module, hasher: &mut StableHasher) {
+fn hash_used_export_names(module: &Module, module_graph: &ModuleGraph, hasher: &mut StableHasher) {
     for dependency in module
         .presentational_dependencies()
         .iter()
@@ -135,7 +135,7 @@ fn hash_used_export_names(module: &Module, hasher: &mut StableHasher) {
                 .flat_map(|block| block.dependencies()),
         )
     {
-        dependency.update_code_generation_hash(module.exports_info(), hasher);
+        dependency.update_code_generation_hash(module_graph.exports_info(module.handle()), hasher);
     }
 }
 
@@ -628,7 +628,7 @@ mod tests {
 
     use crate::{
         CacheOptions, Compiler, CompilerOptions, ConstDependency, Dependency, Entry, Error,
-        ModuleGraph, ModuleHandle, ModuleIdentity, SnapshotOptions, SourceRange,
+        ModuleHandle, ModuleIdentity, SnapshotOptions, SourceRange,
         cache::{Cache, CacheItemFamily, CacheItemWork},
         cache_facade::{CacheIdentifier, CacheKey, CacheNamespace},
         id_assignment::{RenderId, assign_chunk_render_ids, assign_module_render_ids},
@@ -787,21 +787,25 @@ mod tests {
     fn code_generation_cache_invalidates_template_inputs_when_source_is_unchanged() {
         let options = CompilerOptions::new("/project", vec![Entry::new("main", "./index")]);
         let build = |expression: &str| {
-            let mut module_graph = ModuleGraph::default();
-            let module = module_graph.add_module(ModuleIdentity::new("/project/index.js"));
-            module_graph
-                .module_mut(module)
-                .expect("fixture Module should exist")
-                .finish_build(
-                    Vec::new(),
-                    Vec::new(),
-                    vec![Dependency::Const(ConstDependency::new(
-                        expression,
-                        SourceRange::new(0, 5),
-                    ))],
-                    "value".to_string(),
-                    1,
-                );
+            let mut building_module_graph = crate::module_graph::BuildingModuleGraph::default();
+            let module =
+                building_module_graph.add_module(ModuleIdentity::new("/project/index.js"), None);
+            building_module_graph
+                .finish_module_build(
+                    module,
+                    crate::module::BuiltModuleContent::from_test_parts(
+                        Vec::new(),
+                        Vec::new(),
+                        vec![Dependency::Const(ConstDependency::new(
+                            expression,
+                            SourceRange::new(0, 5),
+                        ))],
+                        "value".to_string(),
+                        1,
+                    ),
+                )
+                .expect("fixture Module should exist");
+            let module_graph = building_module_graph.finish();
             let mut chunk_graph =
                 crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
             assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
@@ -848,12 +852,22 @@ mod tests {
     #[test]
     fn incompatible_cached_replacement_recipe_is_regenerated() {
         let options = CompilerOptions::new("/project", vec![Entry::new("main", "./index")]);
-        let mut module_graph = ModuleGraph::default();
-        let module = module_graph.add_module(ModuleIdentity::new("/project/index.js"));
-        module_graph
-            .module_mut(module)
-            .expect("fixture Module should exist")
-            .finish_build(Vec::new(), Vec::new(), Vec::new(), "éx".to_string(), 1);
+        let mut building_module_graph = crate::module_graph::BuildingModuleGraph::default();
+        let module =
+            building_module_graph.add_module(ModuleIdentity::new("/project/index.js"), None);
+        building_module_graph
+            .finish_module_build(
+                module,
+                crate::module::BuiltModuleContent::from_test_parts(
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    "éx".to_string(),
+                    1,
+                ),
+            )
+            .expect("fixture Module should exist");
+        let module_graph = building_module_graph.finish();
         let mut chunk_graph =
             crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);
@@ -919,21 +933,25 @@ mod tests {
     #[test]
     fn module_attributable_generation_errors_become_throwing_results() {
         let options = CompilerOptions::new("/project", vec![Entry::new("main", "./index")]);
-        let mut module_graph = ModuleGraph::default();
-        let module = module_graph.add_module(ModuleIdentity::new("/project/index.js"));
-        module_graph
-            .module_mut(module)
-            .expect("fixture Module should exist")
-            .finish_build(
-                Vec::new(),
-                Vec::new(),
-                vec![Dependency::Const(ConstDependency::new(
-                    "replacement",
-                    SourceRange::new(0, 99),
-                ))],
-                "value".to_string(),
-                1,
-            );
+        let mut building_module_graph = crate::module_graph::BuildingModuleGraph::default();
+        let module =
+            building_module_graph.add_module(ModuleIdentity::new("/project/index.js"), None);
+        building_module_graph
+            .finish_module_build(
+                module,
+                crate::module::BuiltModuleContent::from_test_parts(
+                    Vec::new(),
+                    Vec::new(),
+                    vec![Dependency::Const(ConstDependency::new(
+                        "replacement",
+                        SourceRange::new(0, 99),
+                    ))],
+                    "value".to_string(),
+                    1,
+                ),
+            )
+            .expect("fixture Module should exist");
+        let module_graph = building_module_graph.finish();
         let mut chunk_graph =
             crate::build_chunk_graph::build_chunk_graph(&options, &module_graph, &[module]);
         assign_module_render_ids(&options, &module_graph, &mut chunk_graph);

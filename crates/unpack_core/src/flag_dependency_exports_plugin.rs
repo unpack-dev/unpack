@@ -28,18 +28,21 @@ fn flag_dependency_exports(compilation: &mut Compilation) {
         .map(|module| module.handle())
         .collect::<Vec<_>>();
     for handle in handles {
-        if let Some(module) = compilation.module_graph_mut().module_mut(handle) {
-            if let Some(exports_info) = module_computation_cache
-                .as_ref()
-                .and_then(|cache| cache.get_provided_exports(module.identity()))
-            {
-                *module.exports_info_mut() = exports_info;
-                continue;
-            }
-            module.analyze_provided_exports();
+        let module = compilation
+            .module_graph()
+            .module(handle)
+            .expect("a Module Graph handle should address a Module");
+        let identity = module.identity().clone();
+        let cached_exports_info = module_computation_cache
+            .as_ref()
+            .and_then(|cache| cache.get_provided_exports(&identity));
+        let exports_info = cached_exports_info.unwrap_or_else(|| {
+            let exports_info = module.provided_exports();
             if let Some(cache) = &module_computation_cache {
-                cache.store_provided_exports(module.identity(), module.exports_info().clone());
+                cache.store_provided_exports(&identity, exports_info.clone());
             }
-        }
+            exports_info
+        });
+        *compilation.module_graph_mut().exports_info_mut(handle) = exports_info;
     }
 }

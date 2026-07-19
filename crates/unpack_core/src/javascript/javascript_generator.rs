@@ -49,7 +49,7 @@ pub(crate) fn generate(context: ModuleGeneratorContext<'_>) -> Result<CodeGenera
                     dependency_index,
                     module_graph,
                     chunk_graph,
-                    exports_info: module.exports_info(),
+                    exports_info: module_graph.exports_info(module_handle),
                     module_render_ids,
                     runtime_requirements: &mut runtime_requirements,
                     init_fragments: &mut init_fragments,

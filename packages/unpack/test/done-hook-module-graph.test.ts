@@ -236,9 +236,10 @@ test("module graph access after finishModules rejects an expired native lease", 
   }
 });
 
-test("plugin setTimeout can access the module graph during finishModules", async () => {
+test("plugin setTimeout rejects a graph lease released after finishModules", async () => {
   const fixture = await createGraphFixture();
-  let delayedAccessCompleted = false;
+  const stopBeforeRebind = new Error("stop before final module graph rebind");
+  let delayedAccess: Promise<Error | undefined> | undefined;
   const compiler = unpack({
     context: fixture,
     entry: "./src/index.js",
@@ -247,24 +248,24 @@ test("plugin setTimeout can access the module graph during finishModules", async
     plugins: [{
       apply(compiler) {
         compiler.hooks.compilation.tap("register delayed graph access", (compilation) => {
-          compilation.hooks.finishModules.tapAsync(
-            "access module graph from timer",
-            (modules, done) => {
-              const entry = findModule(modules, "/src/index.js");
+          compilation.hooks.finishModules.tap("schedule detached graph access", (modules) => {
+            const entry = findModule(modules, "/src/index.js");
+            delayedAccess = new Promise((resolve) => {
               setTimeout(() => {
                 try {
-                  assert.equal(
-                    compilation.moduleGraph.getOutgoingConnections(entry).size > 0,
-                    true
-                  );
-                  delayedAccessCompleted = true;
-                  done();
+                  compilation.moduleGraph.getOutgoingConnections(entry);
+                  resolve(undefined);
                 } catch (error) {
-                  done(error instanceof Error ? error : new Error(String(error)));
+                  resolve(error instanceof Error ? error : new Error(String(error)));
                 }
               }, 0);
-            }
-          );
+            });
+          });
+          // Prevent the final Compilation from rebinding the graph before the
+          // timer runs, so this deterministically covers the released window.
+          compilation.hooks.finishModules.tap("stop before graph rebind", () => {
+            throw stopBeforeRebind;
+          });
         });
       }
     }]
@@ -272,8 +273,12 @@ test("plugin setTimeout can access the module graph during finishModules", async
   assert.ok(compiler);
 
   try {
-    await runCompiler(compiler);
-    assert.equal(delayedAccessCompleted, true);
+    const observation = await observeCompilerRun(compiler);
+    assert.equal(observation.error, stopBeforeRebind);
+    assert.equal(observation.stats, undefined);
+    assert.ok(delayedAccess);
+    const error = await delayedAccess;
+    assert.match(error?.message ?? "", /module graph lease has been released/i);
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });

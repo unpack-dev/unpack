@@ -236,6 +236,44 @@ test("module graph access after finishModules rejects an expired native lease", 
   }
 });
 
+test("plugin setTimeout can access the rebound module graph after done", async () => {
+  const fixture = await createGraphFixture();
+  let delayedAccess: Promise<number> | undefined;
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist") },
+    sourcemap: false,
+    plugins: [{
+      apply(compiler) {
+        compiler.hooks.done.tap("schedule delayed graph access", (stats) => {
+          const { moduleGraph, modules } = stats.compilation;
+          const entry = findModule(modules, "/src/index.js");
+          delayedAccess = new Promise((resolve, reject) => {
+            setTimeout(() => {
+              try {
+                resolve(moduleGraph.getOutgoingConnections(entry).size);
+              } catch (error) {
+                reject(error);
+              }
+            }, 0);
+          });
+        });
+      }
+    }]
+  });
+  assert.ok(compiler);
+
+  try {
+    await runCompiler(compiler);
+    assert.ok(delayedAccess);
+    assert.equal((await delayedAccess) > 0, true);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("done refreshes connections materialized before seal", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "unpack-module-graph-rewrite-"));
   await writeFixtureFile(join(fixture, "package.json"), JSON.stringify({ sideEffects: false }));

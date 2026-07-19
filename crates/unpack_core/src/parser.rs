@@ -33,6 +33,7 @@ const UNSUPPORTED_DYNAMIC_IMPORT_MESSAGE: &str =
 pub(crate) struct ParsedModule {
     pub dependencies_block: DependenciesBlock,
     pub presentational_dependencies: Vec<Dependency>,
+    pub identifiers: Vec<String>,
     pub data: ParsedModuleData,
     pub build_meta: JavascriptBuildMeta,
 }
@@ -1221,6 +1222,10 @@ fn parse_module_dependencies_sync(
     })?;
 
     let mut parsed = ParsedModule::default();
+    let mut identifier_collector = IdentifierCollector::default();
+    module.visit_with(&mut identifier_collector);
+    parsed.identifiers = identifier_collector.identifiers.into_iter().collect();
+    parsed.identifiers.sort();
     let pure_analysis = hooks
         .requires_pure_analysis
         .then(|| PureAnalysis::new(&comments, &module));
@@ -1249,6 +1254,17 @@ fn parse_module_dependencies_sync(
     hooks.finish.call(&parser_context, &module, &mut parsed);
 
     Ok(parsed)
+}
+
+#[derive(Default)]
+struct IdentifierCollector {
+    identifiers: FxHashSet<String>,
+}
+
+impl<'a> Visit<'a> for IdentifierCollector {
+    fn visit_ident(&mut self, node: &Ident<'a>) {
+        self.identifiers.insert(ident_to_string(node));
+    }
 }
 
 fn collect_module_decl_dependencies(
@@ -2007,6 +2023,18 @@ mod tests {
             *events.lock().unwrap(),
             ["program", "statement", "statement", "finish"]
         );
+    }
+
+    #[test]
+    fn parsed_identifiers_include_normalized_bindings_and_free_references() {
+        let parsed = parse_module_dependencies_with_hooks(
+            Path::new("module.js"),
+            r"const \u0061lpha = 1; export const read = () => alpha + freeValue;",
+            &JavascriptParserHookSet::default(),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.identifiers, ["alpha", "freeValue", "read"]);
     }
 
     #[test]

@@ -90,9 +90,9 @@ test("concatenated modules do not capture user bindings that resemble generated 
     await writeFixture(fixture, {
       "src/index.js": [
         "import { value } from './value.js';",
-        "const __webpack_init__1 = 'user init';",
-        "const __webpack_exports__1 = 'user exports';",
-        "globalThis.CONCATENATE_MODULES_RESULT = `${value}:${__webpack_init__1}:${__webpack_exports__1}`;",
+        "const __webpack_concatenation_initialized__0 = 'user init';",
+        "const __webpack_concatenation_exports__0 = 'user exports';",
+        "globalThis.CONCATENATE_MODULES_RESULT = `${value}:${__webpack_concatenation_initialized__0}:${__webpack_concatenation_exports__0}`;",
         "export { value };"
       ].join("\n"),
       "src/value.js": "export const value = 42;"
@@ -108,6 +108,38 @@ test("concatenated modules do not capture user bindings that resemble generated 
     );
     assert.equal(unpackObservation, webpackObservation);
     assert.equal(unpackObservation, "42:user init:user exports");
+  } finally {
+    delete (globalThis as { CONCATENATE_MODULES_RESULT?: string }).CONCATENATE_MODULES_RESULT;
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("concatenated modules preserve free-name lookup and the runtime require identity", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-concatenate-runtime-require-"));
+  try {
+    await writeFixture(fixture, {
+      "src/index.js": [
+        "import { runtimeRequire, setProbe } from './runtime.js';",
+        "setProbe();",
+        "globalThis.CONCATENATE_MODULES_RESULT = `${typeof __webpack_concatenation_exports__0}:${runtimeRequire === __webpack_require__}:${__webpack_require__.__concatenation_probe__}`;",
+        "export { runtimeRequire };"
+      ].join("\n"),
+      "src/runtime.js": [
+        "export const runtimeRequire = __webpack_require__;",
+        "export const setProbe = () => { __webpack_require__.__concatenation_probe__ = 42; };"
+      ].join("\n")
+    });
+
+    const unpackObservation = await runStringResultUnpack(
+      fixture,
+      join(fixture, "dist-unpack")
+    );
+    const webpackObservation = await runStringResultWebpack(
+      fixture,
+      join(fixture, "dist-webpack")
+    );
+    assert.equal(unpackObservation, webpackObservation);
+    assert.equal(unpackObservation, "undefined:true:42");
   } finally {
     delete (globalThis as { CONCATENATE_MODULES_RESULT?: string }).CONCATENATE_MODULES_RESULT;
     await rm(fixture, { recursive: true, force: true });

@@ -1,7 +1,7 @@
 // Webpack source: https://github.com/webpack/webpack/blob/da91761ed92c8e133ee321c7db4ad6c4698cae0a/lib/optimize/ConcatenatedModule.js
 
 use rspack_sources::{ConcatSource, RawStringSource};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     ChunkGraph, Error, ModuleGraph, ModuleHandle, code_generation_record::CodeGenerationResult,
@@ -61,7 +61,18 @@ impl ConcatenatedModule {
         chunk_graph: &ChunkGraph,
         module_render_ids: &FxHashMap<ModuleHandle, RenderId>,
     ) -> Result<CodeGenerationResult, Error> {
-        let scope = ConcatenationScope::new(&self.modules);
+        let identifiers = self
+            .modules
+            .iter()
+            .flat_map(|handle| {
+                module_graph
+                    .module(*handle)
+                    .expect("a Concatenated Module must reference Modules in the Module Graph")
+                    .identifiers()
+            })
+            .cloned()
+            .collect::<FxHashSet<_>>();
+        let scope = ConcatenationScope::new(&self.modules, &identifiers);
         let mut generated_modules = Vec::with_capacity(self.modules.len());
         let mut runtime_requirements = RuntimeRequirements::default();
         for handle in &self.modules {
@@ -91,9 +102,10 @@ impl ConcatenatedModule {
         source.add(RawStringSource::from(
             "// webpack-style concatenated module\n".to_string(),
         ));
-        source.add(RawStringSource::from(
-            "var __webpack_concatenation_exports__ = [".to_string(),
-        ));
+        source.add(RawStringSource::from(format!(
+            "var {} = [",
+            scope.exports_name()
+        )));
         for (index, module) in self.modules.iter().enumerate() {
             if index > 0 {
                 source.add(RawStringSource::from(", ".to_string()));
@@ -109,22 +121,29 @@ impl ConcatenatedModule {
         }
         source.add(RawStringSource::from("];\n".to_string()));
         source.add(RawStringSource::from(format!(
-            "var __webpack_concatenation_initialized__ = Array({length}).fill(false);\nvar __webpack_concatenation_initializers__ = Array({length});\nvar __webpack_concatenation_require__ = (...args) => __webpack_require__(...args);\nObject.setPrototypeOf(__webpack_concatenation_require__, __webpack_require__);\n__webpack_concatenation_require__.__unpack_concatenation_exports__ = __webpack_concatenation_exports__;\n__webpack_concatenation_require__.__unpack_concatenation_initializers__ = __webpack_concatenation_initializers__;\n",
+            "var {initialized} = Array({length}).fill(false);\nvar {initializers} = Array({length});\n",
+            initialized = scope.initialized_name(),
+            initializers = scope.initializers_name(),
             length = self.modules.len(),
         )));
         for (handle, result) in &generated_modules {
             let index = scope.ordinal(*handle);
             source.add(RawStringSource::from(format!(
-                "__webpack_concatenation_initializers__[{index}] = () => {{\n  if (__webpack_concatenation_initialized__[{index}]) return __webpack_concatenation_exports__[{index}];\n  __webpack_concatenation_initialized__[{index}] = true;\n  return ((__webpack_exports__, __webpack_require__) => {{\n",
+                "{initializers}[{index}] = () => {{\n  if ({initialized}[{index}]) return {exports}[{index}];\n  {initialized}[{index}] = true;\n  return ((__webpack_exports__, __webpack_require__) => {{\n",
+                initializers = scope.initializers_name(),
+                initialized = scope.initialized_name(),
+                exports = scope.exports_name(),
             )));
             source.add(result.source().clone());
             source.add(RawStringSource::from(format!(
-                "\n    return __webpack_exports__;\n  }})(__webpack_concatenation_exports__[{index}], __webpack_concatenation_require__);\n}};\n"
+                "\n    return __webpack_exports__;\n  }})({exports}[{index}], __webpack_require__);\n}};\n",
+                exports = scope.exports_name(),
             )));
         }
         source.add(RawStringSource::from(format!(
-            "__webpack_concatenation_initializers__[{}]();\n",
-            scope.ordinal(self.root_module)
+            "{}[{}]();\n",
+            scope.initializers_name(),
+            scope.ordinal(self.root_module),
         )));
         Ok(CodeGenerationResult::from_parts(
             source,
@@ -172,7 +191,7 @@ mod tests {
         let root = handles["root.js"];
         let concatenated =
             ConcatenatedModule::new(root, handles.values().copied().collect(), &module_graph);
-        let scope = ConcatenationScope::new(concatenated.modules());
+        let scope = ConcatenationScope::new(concatenated.modules(), &FxHashSet::default());
 
         handles
             .into_iter()

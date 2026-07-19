@@ -78,14 +78,39 @@ impl DependencyTemplateContext<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ConcatenationScope<'a> {
     modules: &'a [ModuleHandle],
+    exports_name: String,
+    initialized_name: String,
+    initializers_name: String,
 }
 
 impl<'a> ConcatenationScope<'a> {
-    pub(crate) fn new(modules: &'a [ModuleHandle]) -> Self {
-        Self { modules }
+    pub(crate) fn new(
+        modules: &'a [ModuleHandle],
+        identifiers: &rustc_hash::FxHashSet<String>,
+    ) -> Self {
+        let mut suffix = 0_u32;
+        loop {
+            let exports_name = format!("__webpack_concatenation_exports__{suffix}");
+            let initialized_name = format!("__webpack_concatenation_initialized__{suffix}");
+            let initializers_name = format!("__webpack_concatenation_initializers__{suffix}");
+            if !identifiers.contains(&exports_name)
+                && !identifiers.contains(&initialized_name)
+                && !identifiers.contains(&initializers_name)
+            {
+                return Self {
+                    modules,
+                    exports_name,
+                    initialized_name,
+                    initializers_name,
+                };
+            }
+            suffix = suffix
+                .checked_add(1)
+                .expect("a Concatenation Scope must have an available generated name");
+        }
     }
 
     pub(crate) fn contains(&self, module: ModuleHandle) -> bool {
@@ -100,17 +125,23 @@ impl<'a> ConcatenationScope<'a> {
     }
 
     pub(crate) fn exports_expression(&self, module: ModuleHandle) -> String {
-        format!(
-            "__webpack_require__.__unpack_concatenation_exports__[{}]",
-            self.ordinal(module)
-        )
+        format!("{}[{}]", self.exports_name, self.ordinal(module))
     }
 
     pub(crate) fn init_expression(&self, module: ModuleHandle) -> String {
-        format!(
-            "__webpack_require__.__unpack_concatenation_initializers__[{}]",
-            self.ordinal(module)
-        )
+        format!("{}[{}]", self.initializers_name, self.ordinal(module))
+    }
+
+    pub(crate) fn exports_name(&self) -> &str {
+        &self.exports_name
+    }
+
+    pub(crate) fn initialized_name(&self) -> &str {
+        &self.initialized_name
+    }
+
+    pub(crate) fn initializers_name(&self) -> &str {
+        &self.initializers_name
     }
 }
 

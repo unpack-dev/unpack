@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(MODULE_BUILD_RECORD_TYPE_ID.as_bytes(), b"unpack.moduleb.1");
         assert_eq!(
             ModuleBuildRecordCodec::current().codec_id(),
-            StableCodecId::new(*b"unpack.modb.c003")
+            StableCodecId::new(*b"unpack.modb.c004")
         );
         let mut pack_file = PackFile::open(temp.path(), serializer);
         for (address, _, record) in records {
@@ -1825,6 +1825,7 @@ mod tests {
                     }],
                 }],
                 presentational_dependencies: dependencies,
+                identifiers: vec!["value".to_string()],
                 data: ParsedModuleDataDto::JavaScript,
                 build_side_effect_free: Some(true),
             },
@@ -1944,7 +1945,7 @@ const BROTLI_QUALITY: u32 = 5;
 const BROTLI_WINDOW_BITS: u32 = 22;
 const GZIP_LEVEL: u32 = 6;
 const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
-const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c003");
+const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c004");
 const CODE_GENERATION_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.cgen.c003");
 const ASSET_RENDER_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.astr.c001");
 pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.resolve.1");
@@ -2253,6 +2254,7 @@ pub(crate) struct ParsedModuleDto {
     pub(crate) dependencies: Vec<DependencyDto>,
     pub(crate) blocks: Vec<AsyncDependenciesBlockDto>,
     pub(crate) presentational_dependencies: Vec<DependencyDto>,
+    pub(crate) identifiers: Vec<String>,
     pub(crate) data: ParsedModuleDataDto,
     pub(crate) build_side_effect_free: Option<bool>,
 }
@@ -2932,6 +2934,7 @@ impl TryFrom<&ParsedModule> for ParsedModuleDto {
                 .iter()
                 .map(dependency_to_dto)
                 .collect::<io::Result<_>>()?,
+            identifiers: parsed.identifiers.clone(),
             data: match &parsed.data {
                 crate::parser::ParsedModuleData::JavaScript => ParsedModuleDataDto::JavaScript,
                 crate::parser::ParsedModuleData::Json(value) => ParsedModuleDataDto::Json(
@@ -2963,6 +2966,7 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
             dependencies,
             blocks,
             presentational_dependencies,
+            identifiers,
             data,
             build_side_effect_free,
         } = parsed;
@@ -2988,6 +2992,7 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
                 .into_iter()
                 .map(dependency_from_dto)
                 .collect::<io::Result<_>>()?,
+            identifiers,
             data: match data {
                 ParsedModuleDataDto::JavaScript => crate::parser::ParsedModuleData::JavaScript,
                 ParsedModuleDataDto::Json(value) => crate::parser::ParsedModuleData::Json(
@@ -3483,6 +3488,10 @@ fn encode_parsed_module(encoder: &mut Encoder, parsed: &ParsedModuleDto) -> io::
         encode_dependencies(encoder, &block.dependencies)?;
     }
     encode_dependencies(encoder, &parsed.presentational_dependencies)?;
+    encoder.write_count(parsed.identifiers.len())?;
+    for identifier in &parsed.identifiers {
+        encoder.write_record_string(identifier)?;
+    }
     match &parsed.data {
         ParsedModuleDataDto::JavaScript => encoder.write_u8(0),
         ParsedModuleDataDto::Json(value) => {
@@ -3514,6 +3523,11 @@ fn decode_parsed_module(decoder: &mut Decoder<'_>) -> Option<ParsedModuleDto> {
         });
     }
     let presentational_dependencies = decode_dependencies(decoder)?;
+    let identifier_count = decoder.read_count()?;
+    let mut identifiers = Vec::with_capacity(identifier_count);
+    for _ in 0..identifier_count {
+        identifiers.push(decoder.read_record_string()?);
+    }
     let data = match decoder.read_u8()? {
         0 => ParsedModuleDataDto::JavaScript,
         1 => ParsedModuleDataDto::Json(decoder.read_record_string()?),
@@ -3532,6 +3546,7 @@ fn decode_parsed_module(decoder: &mut Decoder<'_>) -> Option<ParsedModuleDto> {
         dependencies,
         blocks,
         presentational_dependencies,
+        identifiers,
         data,
         build_side_effect_free: None,
     })

@@ -57,8 +57,11 @@ Generated assets use the same ownership-handoff pattern at the
 `processAssets` boundary. Rust moves the asset vector into a phase-scoped Node
 lease after `seal`; JavaScript materializes webpack `Source` values only when a
 plugin actually taps the hook, runs taps serially, and returns the updated asset
-set before output is written. This keeps asset mutation lock-free and prevents
-Rust emission from racing asynchronous plugin work. The supported façade
+set before output is written. The Module Graph is leased across the same
+boundary so the Compilation façade can answer graph queries without cloning
+the graph, then returned before Rust finalizes the compilation. This keeps asset
+mutation lock-free and prevents Rust emission from racing asynchronous plugin
+work. The supported façade
 includes the assets argument, `Compilation.assets`, `emitAsset`, `updateAsset`,
 and `getAsset`. Mutations made through the façade before `processAssets` are
 staged and merged when generated assets cross the host boundary. Unlike

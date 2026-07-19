@@ -226,12 +226,13 @@ export class CompilerImpl implements Compiler {
       },
       async (nativeAssets) => {
         const compilation = this.#activeCompilation;
+        const nativeCompilation = nativeAssets.compilation();
         let assetPhaseStarted = false;
         try {
           if (!compilation) {
             throw new Error("processAssets ran without an active Compilation");
           }
-          compilation.update(nativeAssets.compilation());
+          compilation.update(nativeCompilation);
           const hook = compilation.hooks.processAssets as ProcessAssetsHookImpl;
           if (hook.isUsed() || compilation.hasPendingAssetMutations()) {
             compilation.beginProcessAssets(nativeAssets.takeAssetSources());
@@ -244,10 +245,14 @@ export class CompilerImpl implements Compiler {
           throw this.#nativeHookError;
         } finally {
           try {
-            nativeAssets.returnAssetsLease();
+            nativeCompilation.returnModuleGraphLease();
           } finally {
-            if (assetPhaseStarted) compilation?.endProcessAssets();
-            compilation?.releaseNativeCompilation();
+            try {
+              nativeAssets.returnAssetsLease();
+            } finally {
+              if (assetPhaseStarted) compilation?.endProcessAssets();
+              compilation?.releaseNativeCompilation();
+            }
           }
         }
       }

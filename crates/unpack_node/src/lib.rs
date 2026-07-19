@@ -541,7 +541,7 @@ impl NativeCompilation {
 #[napi]
 pub struct NativeAssets {
     state: NativeAssetsState,
-    module_graph: unpack_core::ModuleGraph,
+    module_graph: NativeModuleGraph,
     chunk_graph: unpack_core::ChunkGraph,
 }
 
@@ -590,18 +590,32 @@ impl Drop for NativeAssets {
         {
             let _ = return_sender.send(assets);
         }
+        let module_graph = std::mem::replace(&mut self.module_graph, NativeModuleGraph::Released);
+        if let NativeModuleGraph::Leased {
+            module_graph,
+            return_sender,
+        } = module_graph
+        {
+            let _ = return_sender.send(module_graph);
+        }
     }
 }
 
 #[napi]
 impl NativeAssets {
     #[napi]
-    pub fn compilation(&mut self) -> NativeCompilation {
-        NativeCompilation {
-            module_graph: NativeModuleGraph::Owned(self.module_graph.clone()),
+    pub fn compilation(&mut self) -> Result<NativeCompilation> {
+        let module_graph = std::mem::replace(&mut self.module_graph, NativeModuleGraph::Released);
+        if matches!(module_graph, NativeModuleGraph::Released) {
+            return Err(napi::Error::from_reason(
+                "native assets module graph lease has already been transferred",
+            ));
+        }
+        Ok(NativeCompilation {
+            module_graph,
             chunk_graph: self.chunk_graph.clone(),
             assets: Vec::new(),
-        }
+        })
     }
 
     #[napi(js_name = "takeAssetSources")]
@@ -789,13 +803,19 @@ fn call_process_assets_hook<'a>(
     compilation: &'a mut unpack_core::Compilation,
 ) -> HookFuture<'a> {
     let assets = compilation.take_assets();
-    let (return_sender, return_receiver) = tokio::sync::oneshot::channel();
+    let module_graph = compilation.take_module_graph();
+    let (assets_return_sender, assets_return_receiver) = tokio::sync::oneshot::channel();
+    let (module_graph_return_sender, module_graph_return_receiver) =
+        tokio::sync::oneshot::channel();
     let native_assets = NativeAssets {
         state: NativeAssetsState::Leased {
             assets,
-            return_sender,
+            return_sender: assets_return_sender,
         },
-        module_graph: compilation.module_graph().clone(),
+        module_graph: NativeModuleGraph::Leased {
+            module_graph,
+            return_sender: module_graph_return_sender,
+        },
         chunk_graph: compilation.chunk_graph().clone(),
     };
     Box::pin(async move {
@@ -808,10 +828,37 @@ fn call_process_assets_hook<'a>(
             }),
         };
 
-        let assets = return_receiver.await.map_err(|error| CoreError::Hook {
-            message: format!("processAssets did not return the assets lease: {error}"),
-        })?;
-        compilation.restore_assets(assets);
+        let assets_result = assets_return_receiver
+            .await
+            .map_err(|error| CoreError::Hook {
+                message: format!("processAssets did not return the assets lease: {error}"),
+            });
+        let module_graph_result =
+            module_graph_return_receiver
+                .await
+                .map_err(|error| CoreError::Hook {
+                    message: format!(
+                        "processAssets did not return the module graph lease: {error}"
+                    ),
+                });
+
+        let assets_error = match assets_result {
+            Ok(assets) => {
+                compilation.restore_assets(assets);
+                None
+            }
+            Err(error) => Some(error),
+        };
+        let module_graph_error = match module_graph_result {
+            Ok(module_graph) => {
+                compilation.restore_module_graph(module_graph);
+                None
+            }
+            Err(error) => Some(error),
+        };
+        if let Some(error) = assets_error.or(module_graph_error) {
+            return Err(error);
+        }
         callback_result
     })
 }

@@ -379,12 +379,9 @@ fn post_id_assignment_signature(
     chunk_graph: &ChunkGraph,
     handle: ModuleHandle,
 ) -> PostIdAssignmentSignature {
-    let module = module_graph
-        .module(handle)
-        .expect("a Module Graph handle should address a Module");
     PostIdAssignmentSignature {
         references: chunk_graph.module_references(module_graph, handle),
-        exports_info: module.exports_info().clone(),
+        exports_info: module_graph.exports_info(handle).clone(),
     }
 }
 

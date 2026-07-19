@@ -16,11 +16,12 @@ use tokio::sync::Mutex;
 
 use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, Dependency, DependencyIndex, EntryDependency,
-    Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleGraph, ModuleHandle,
+    Error, FactorizedModule, LoaderRequest, LoaderRunner, MatchedLoader, ModuleHandle,
     ModuleIdentity, NormalModuleFactory, Result, SnapshotStrategy, UnpackResolver,
     cache::{Cache, ModuleBuildRecord},
     cache_facade::{CacheETag, ModuleBuildCache},
     module::BuiltModuleContent,
+    module_graph::BuildingModuleGraph,
     normal_module_factory::{ModuleParserContext, ModuleSourceKind, ModuleTypeRegistry},
     parser::{JavascriptParserHookSet, ParsedModule},
     snapshot::{FileSystemInfo, SnapshotCache},
@@ -28,7 +29,7 @@ use crate::{
 
 #[derive(Debug, Default)]
 pub(crate) struct MakeState {
-    pub module_graph: ModuleGraph,
+    pub module_graph: BuildingModuleGraph,
     pub entries: BTreeMap<usize, ModuleHandle>,
     pub errors: Vec<Error>,
     pub file_dependencies: FxHashSet<PathBuf>,
@@ -862,10 +863,9 @@ impl MakeState {
             if let Some(module_handle) = self.modules_by_identity.get(&identity).copied() {
                 (module_handle, false)
             } else {
-                let module_handle = self.module_graph.add_module(identity.clone());
-                if let Some(module) = self.module_graph.module_mut(module_handle) {
-                    module.set_factory_side_effect_free(side_effect_free);
-                }
+                let module_handle = self
+                    .module_graph
+                    .add_module(identity.clone(), side_effect_free);
                 self.modules_by_identity.insert(identity, module_handle);
                 (module_handle, true)
             };
@@ -894,12 +894,8 @@ impl MakeState {
         module_handle: ModuleHandle,
         built_content: Arc<BuiltModuleContent>,
     ) -> Result<()> {
-        let module = self
-            .module_graph
-            .module_mut(module_handle)
-            .ok_or(Error::MissingModule(module_handle))?;
-        module.finish_build_content(built_content);
-        Ok(())
+        self.module_graph
+            .finish_module_build(module_handle, built_content)
     }
 
     fn fail_module(
@@ -908,11 +904,8 @@ impl MakeState {
         error: Error,
         source: String,
     ) -> Result<()> {
-        let module = self
-            .module_graph
-            .module_mut(module_handle)
-            .ok_or(Error::MissingModule(module_handle))?;
-        module.fail_build(error.clone(), source);
+        self.module_graph
+            .fail_module(module_handle, error.clone(), source)?;
         self.errors.push(error);
         Ok(())
     }
@@ -959,7 +952,7 @@ mod tests {
 
         let cache = cache.stats();
         let state = state.lock().await;
-        let graph = &state.module_graph;
+        let graph = state.module_graph.clone().finish();
         let dep = graph
             .modules()
             .iter()

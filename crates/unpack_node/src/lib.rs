@@ -20,8 +20,8 @@ use unpack_core::{
     Asset, BuildDependency, CacheCompression, CacheIdleReason, CacheOptions, CompilationHooks,
     Compiler, CompilerOptions, Dependency, Entry, Error as CoreError, HookFuture,
     InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions, LoaderFuture,
-    LoaderRequest, LoaderRunner, Module, ModuleRule, ModuleType, SnapshotOptions,
-    SnapshotPathPattern, SnapshotStrategy,
+    LoaderModuleRequest, LoaderRequest, LoaderRequestKind, LoaderResult, LoaderRunner, Module,
+    ModuleRule, ModuleType, SnapshotOptions, SnapshotPathPattern, SnapshotStrategy,
 };
 
 #[global_allocator]
@@ -631,7 +631,11 @@ pub struct NativeFlushResult {
 pub fn create_compiler(
     options: NativeCompilerOptions,
     loader_callback: Option<
-        Function<'_, FnArgs<(String, String, String, String)>, Promise<String>>,
+        Function<
+            '_,
+            FnArgs<(String, String, String, String, NativeLoaderContext)>,
+            Promise<NativeLoaderResult>,
+        >,
     >,
     compilation_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
     finish_modules_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
@@ -647,13 +651,77 @@ pub fn create_compiler(
     )
 }
 
+#[napi(object)]
+pub struct NativeLoaderResult {
+    pub source: String,
+    pub requests: Vec<NativeLoaderModuleRequest>,
+    pub file_dependencies: Vec<String>,
+}
+
+#[napi(object)]
+pub struct NativeLoaderModuleRequest {
+    pub kind: String,
+    pub request: String,
+}
+
 type NativeLoaderCallback = ThreadsafeFunction<
-    FnArgs<(String, String, String, String)>,
-    Promise<String>,
-    FnArgs<(String, String, String, String)>,
+    FnArgs<(String, String, String, String, NativeLoaderContext)>,
+    Promise<NativeLoaderResult>,
+    FnArgs<(String, String, String, String, NativeLoaderContext)>,
     Status,
     false,
 >;
+
+#[napi]
+pub struct NativeLoaderContext {
+    module_runner: Arc<dyn unpack_core::LoaderModuleRunner>,
+}
+
+#[napi(object)]
+pub struct NativeLoadedLoaderModule {
+    pub source: String,
+    pub resource: String,
+    pub identifier: String,
+    pub file_dependencies: Vec<String>,
+    pub dependency_requests: Vec<String>,
+}
+
+#[napi]
+impl NativeLoaderContext {
+    #[napi]
+    pub async fn load_module(
+        &self,
+        request: String,
+        kind: String,
+        context: Option<String>,
+    ) -> Result<NativeLoadedLoaderModule> {
+        let kind = match kind.as_str() {
+            "load" => LoaderRequestKind::Load,
+            "import" => LoaderRequestKind::Import,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "unknown loader module request kind",
+                ));
+            }
+        };
+        let loaded = self
+            .module_runner
+            .load(request, kind, context.map(PathBuf::from))
+            .await
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(NativeLoadedLoaderModule {
+            source: loaded.source,
+            resource: loaded.resource.to_string_lossy().into_owned(),
+            identifier: loaded.identifier,
+            file_dependencies: loaded
+                .file_dependencies
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            dependency_requests: loaded.dependency_requests,
+        })
+    }
+}
 
 struct NativeLoaderRunner {
     callback: Arc<NativeLoaderCallback>,
@@ -677,6 +745,9 @@ impl LoaderRunner for NativeLoaderRunner {
                     resource.clone(),
                     request.source,
                     request.options,
+                    NativeLoaderContext {
+                        module_runner: request.module_runner,
+                    },
                 )))
                 .await
                 .map_err(|error| CoreError::Loader {
@@ -684,10 +755,37 @@ impl LoaderRunner for NativeLoaderRunner {
                     path: PathBuf::from(&resource),
                     message: error.to_string(),
                 })?;
-            promise.await.map_err(|error| CoreError::Loader {
+            let result = promise.await.map_err(|error| CoreError::Loader {
                 loader: PathBuf::from(loader),
                 path: PathBuf::from(resource),
                 message: error.to_string(),
+            })?;
+            Ok(LoaderResult {
+                source: result.source,
+                requests: result
+                    .requests
+                    .into_iter()
+                    .map(|request| {
+                        let kind = match request.kind.as_str() {
+                            "load" => LoaderRequestKind::Load,
+                            "import" => LoaderRequestKind::Import,
+                            kind => {
+                                return Err(CoreError::MakeTask {
+                                    message: format!("unknown loader module request kind: {kind}"),
+                                });
+                            }
+                        };
+                        Ok(LoaderModuleRequest {
+                            kind,
+                            request: request.request,
+                        })
+                    })
+                    .collect::<std::result::Result<Vec<_>, CoreError>>()?,
+                file_dependencies: result
+                    .file_dependencies
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect(),
             })
         })
     }
@@ -953,7 +1051,11 @@ impl NativeCompiler {
     fn new(
         options: NativeCompilerOptions,
         loader_callback: Option<
-            Function<'_, FnArgs<(String, String, String, String)>, Promise<String>>,
+            Function<
+                '_,
+                FnArgs<(String, String, String, String, NativeLoaderContext)>,
+                Promise<NativeLoaderResult>,
+            >,
         >,
         compilation_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
         finish_modules_callback: Option<Function<'_, NativeCompilation, Promise<()>>>,
@@ -1364,6 +1466,8 @@ fn dependency_type(dependency: &Dependency) -> &'static str {
         Dependency::Null(_) => "null",
         Dependency::Const(_) => "const",
         Dependency::Import(_) => "import()",
+        Dependency::Loader(_) => "loader",
+        Dependency::LoaderImport(_) => "loader import",
     }
 }
 
@@ -1374,6 +1478,8 @@ fn dependency_is_weak(dependency: &Dependency) -> bool {
         Dependency::HarmonyImportSpecifier(dependency) => dependency.module.weak,
         Dependency::HarmonyExportImportedSpecifier(dependency) => dependency.module.weak,
         Dependency::Import(dependency) => dependency.module.weak,
+        Dependency::Loader(dependency) => dependency.module.weak,
+        Dependency::LoaderImport(dependency) => dependency.module.weak,
         Dependency::HarmonyExportHeader(_)
         | Dependency::HarmonyExportSpecifier(_)
         | Dependency::HarmonyExportExpression(_)

@@ -6,6 +6,8 @@ import test from "node:test";
 
 import unpack from "@unpack-js/core";
 import type { Compiler, Stats, UnpackOptions } from "@unpack-js/core";
+import webpack from "webpack";
+import type { Compiler as WebpackCompiler } from "webpack";
 
 test("a synchronous CommonJS loader transforms a module before parsing", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "unpack-loader-"));
@@ -86,6 +88,190 @@ test("an asynchronous loader callback transforms a module with rule options", as
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /42/);
   } finally {
     await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("loadModule builds a requested module and provides its transformed source", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-loader-load-module-"));
+  const outerLoader = join(fixture, "outer-loader.cjs");
+  const valueLoader = join(fixture, "value-loader.cjs");
+  const valueLoaderCalls = join(fixture, "value-loader-calls.txt");
+  await writeFixtureFile(
+    join(fixture, "src/index.js"),
+    'import value from "./entry.data";\nexport { value };\n'
+  );
+  await writeFixtureFile(join(fixture, "src/entry.data"), "ignored\n");
+  await writeFixtureFile(join(fixture, "src/value.txt"), "21\n");
+  await writeFixtureFile(
+    valueLoader,
+    [
+      'const { appendFileSync } = require("node:fs");',
+      "module.exports = source => {",
+      `  appendFileSync(${JSON.stringify(valueLoaderCalls)}, "call\\n");`,
+      "  return `export default ${Number(source.trim()) * 2};`;",
+      "};",
+      ""
+    ].join("\n")
+  );
+  await writeFixtureFile(
+    outerLoader,
+    [
+      "module.exports = function () {",
+      "  const done = this.async();",
+      '  this.loadModule("./value.txt?query#fragment", (error, source, map, module) => {',
+      "    if (error) return done(error);",
+      "    if (map !== null) return done(new Error('expected a null source map'));",
+      "    if (!module.resource.endsWith('value.txt')) return done(new Error('unexpected module'));",
+      "    done(null, source);",
+      "  });",
+      "};",
+      ""
+    ].join("\n")
+  );
+
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist") },
+    sourcemap: false,
+    module: {
+      rules: [
+        { test: /\.data$/, loader: outerLoader },
+        { test: /\.txt$/, loader: valueLoader }
+      ]
+    }
+  });
+
+  try {
+    const first = await runCompiler(compiler);
+    assert.equal(first.hasErrors(), false);
+    assert.equal(
+      first.toJson().watchDependencies.files.some((path) => path.endsWith(join("src", "value.txt"))),
+      true
+    );
+    assert.equal(first.toJson().watchDependencies.files.includes(valueLoader), true);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /42/);
+
+    await writeFixtureFile(join(fixture, "src/value.txt"), "22\n");
+    const second = await runCompiler(compiler);
+    assert.equal(second.hasErrors(), false);
+    const rebuiltBundle = await readFile(join(fixture, "dist/main.js"), "utf8");
+    assert.match(rebuiltBundle, /44/);
+    assert.doesNotMatch(rebuiltBundle, /42/);
+    assert.deepEqual((await readFile(valueLoaderCalls, "utf8")).trim().split("\n"), [
+      "call",
+      "call"
+    ]);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("importModule supports promise and callback forms", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-loader-import-module-"));
+  const loader = join(fixture, "loader.cjs");
+  await writeFixtureFile(
+    join(fixture, "src/index.js"),
+    'import value from "./entry.data";\nexport { value };\n'
+  );
+  await writeFixtureFile(join(fixture, "src/entry.data"), "ignored\n");
+  await writeFixtureFile(
+    join(fixture, "src/value.js"),
+    'import { delta } from "./delta.js";\nexport const value = 39 + delta;\n'
+  );
+  await writeFixtureFile(join(fixture, "src/delta.js"), "export const delta = 1;\n");
+  await writeFixtureFile(
+    loader,
+    [
+      "module.exports = async function () {",
+      '  const promiseExports = await this.importModule("./value.js");',
+      "  const callbackExports = await new Promise((resolve, reject) => {",
+      '    this.importModule("./value.js", {}, (error, exports) => error ? reject(error) : resolve(exports));',
+      "  });",
+      "  return `export default ${promiseExports.value + callbackExports.value - 38};`;",
+      "};",
+      ""
+    ].join("\n")
+  );
+
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist") },
+    sourcemap: false,
+    module: { rules: [{ test: /\.data$/, loader }] }
+  });
+
+  try {
+    const first = await runCompiler(compiler);
+    assert.equal(first.hasErrors(), false);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /42/);
+
+    await writeFixtureFile(join(fixture, "src/delta.js"), "export const delta = 2;\n");
+    const second = await runCompiler(compiler);
+    assert.equal(second.hasErrors(), false);
+    assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /44/);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("loadModule and importModule match webpack for loader-visible source and exports", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-loader-module-comparison-"));
+  const loader = join(fixture, "loader.cjs");
+  await writeFixtureFile(
+    join(fixture, "src/index.js"),
+    'import value from "./entry.data";\nexport { value };\n'
+  );
+  await writeFixtureFile(join(fixture, "src/entry.data"), "ignored\n");
+  await writeFixtureFile(join(fixture, "src/value.js"), "export const value = 21;\n");
+  await writeFixtureFile(
+    loader,
+    [
+      "module.exports = async function () {",
+      "  const source = await new Promise((resolve, reject) => {",
+      '    this.loadModule("./value.js", (error, loaded) => error ? reject(error) : resolve(loaded));',
+      "  });",
+      '  const exports = await this.importModule("./value.js", {});',
+      "  if (!source.includes('21')) throw new Error('unexpected loaded source');",
+      "  return `export default ${exports.value * 2};`;",
+      "};",
+      ""
+    ].join("\n")
+  );
+  const unpackOutput = join(fixture, "dist-unpack");
+  const webpackOutput = join(fixture, "dist-webpack");
+  const unpackCompiler = unpack({
+    context: fixture,
+    mode: "none",
+    entry: "./src/index.js",
+    output: { path: unpackOutput },
+    sourcemap: false,
+    module: { rules: [{ test: /\.data$/, loader }] }
+  });
+  const webpackCompiler = webpack({
+    context: fixture,
+    mode: "none",
+    entry: "./src/index.js",
+    output: { path: webpackOutput },
+    devtool: false,
+    module: { rules: [{ test: /\.data$/, loader }] }
+  });
+
+  try {
+    const [unpackStats] = await Promise.all([
+      runCompiler(unpackCompiler),
+      runWebpackCompiler(webpackCompiler)
+    ]);
+    assert.equal(unpackStats.hasErrors(), false);
+    for (const output of [unpackOutput, webpackOutput]) {
+      assert.match(await readFile(join(output, "main.js"), "utf8"), /42/);
+    }
+  } finally {
+    await Promise.all([closeCompiler(unpackCompiler), closeWebpackCompiler(webpackCompiler)]);
     await rm(fixture, { recursive: true, force: true });
   }
 });
@@ -321,6 +507,23 @@ function runCompiler(compiler: Compiler): Promise<Stats> {
 }
 
 function closeCompiler(compiler: Compiler): Promise<void> {
+  return new Promise((resolve, reject) => {
+    compiler.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function runWebpackCompiler(compiler: WebpackCompiler): Promise<void> {
+  return new Promise((resolve, reject) => {
+    compiler.run((error, stats) => {
+      if (error) reject(error);
+      else if (!stats) reject(new Error("webpack completed without Stats"));
+      else if (stats.hasErrors()) reject(new Error(stats.toString({ errors: true })));
+      else resolve();
+    });
+  });
+}
+
+function closeWebpackCompiler(compiler: WebpackCompiler): Promise<void> {
   return new Promise((resolve, reject) => {
     compiler.close((error) => (error ? reject(error) : resolve()));
   });

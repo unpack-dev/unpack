@@ -9,6 +9,8 @@ mod harmony_export_specifier_dependency;
 mod harmony_import_side_effect_dependency;
 mod harmony_import_specifier_dependency;
 mod import_dependency;
+mod loader_dependency;
+mod loader_import_dependency;
 mod module_dependency;
 mod null_dependency;
 
@@ -21,6 +23,8 @@ pub use harmony_export_specifier_dependency::HarmonyExportSpecifierDependency;
 pub use harmony_import_side_effect_dependency::HarmonyImportSideEffectDependency;
 pub use harmony_import_specifier_dependency::HarmonyImportSpecifierDependency;
 pub use import_dependency::ImportDependency;
+pub use loader_dependency::LoaderDependency;
+pub use loader_import_dependency::LoaderImportDependency;
 pub use module_dependency::ModuleDependency;
 pub use null_dependency::NullDependency;
 

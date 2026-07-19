@@ -2327,6 +2327,12 @@ pub(crate) enum DependencyDto {
     Import {
         module: ModuleDependencyDto,
     },
+    Loader {
+        module: ModuleDependencyDto,
+    },
+    LoaderImport {
+        module: ModuleDependencyDto,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3061,6 +3067,12 @@ fn dependency_to_dto(dependency: &Dependency) -> io::Result<DependencyDto> {
         Dependency::Import(dependency) => DependencyDto::Import {
             module: module_dependency_to_dto(&dependency.module)?,
         },
+        Dependency::Loader(dependency) => DependencyDto::Loader {
+            module: module_dependency_to_dto(&dependency.module)?,
+        },
+        Dependency::LoaderImport(dependency) => DependencyDto::LoaderImport {
+            module: module_dependency_to_dto(&dependency.module)?,
+        },
     })
 }
 
@@ -3126,6 +3138,14 @@ fn dependency_from_dto(dependency: DependencyDto) -> io::Result<Dependency> {
         DependencyDto::Import { module } => Dependency::Import(ImportDependency {
             module: module_dependency_from_dto(module)?,
         }),
+        DependencyDto::Loader { module } => Dependency::Loader(crate::LoaderDependency {
+            module: module_dependency_from_dto(module)?,
+        }),
+        DependencyDto::LoaderImport { module } => {
+            Dependency::LoaderImport(crate::LoaderImportDependency {
+                module: module_dependency_from_dto(module)?,
+            })
+        }
     })
 }
 
@@ -3631,6 +3651,14 @@ fn encode_dependency(encoder: &mut Encoder, dependency: &DependencyDto) -> io::R
             encoder.write_u8(9);
             encode_module_dependency(encoder, module)
         }
+        DependencyDto::Loader { module } => {
+            encoder.write_u8(10);
+            encode_module_dependency(encoder, module)
+        }
+        DependencyDto::LoaderImport { module } => {
+            encoder.write_u8(11);
+            encode_module_dependency(encoder, module)
+        }
     }
 }
 
@@ -3675,6 +3703,12 @@ fn decode_dependency(decoder: &mut Decoder<'_>) -> Option<DependencyDto> {
             range: decode_source_range(decoder)?,
         },
         9 => DependencyDto::Import {
+            module: decode_module_dependency(decoder)?,
+        },
+        10 => DependencyDto::Loader {
+            module: decode_module_dependency(decoder)?,
+        },
+        11 => DependencyDto::LoaderImport {
             module: decode_module_dependency(decoder)?,
         },
         _ => return None,
@@ -3758,6 +3792,8 @@ fn dependency_ranges_are_valid(dependency: &DependencyDto, source: &str) -> bool
     };
     match dependency {
         DependencyDto::Entry { module }
+        | DependencyDto::Loader { module }
+        | DependencyDto::LoaderImport { module }
         | DependencyDto::HarmonyImportSideEffect { module, .. }
         | DependencyDto::HarmonyExportImportedSpecifier { module, .. } => {
             module_range_is_valid(module)

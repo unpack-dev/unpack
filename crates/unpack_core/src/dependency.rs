@@ -11,7 +11,8 @@ use crate::dependencies::{
     HarmonyExportSpecifierDependencyTemplate, HarmonyImportSideEffectDependency,
     HarmonyImportSideEffectDependencyTemplate, HarmonyImportSpecifierDependency,
     HarmonyImportSpecifierDependencyTemplate, ImportDependency, ImportDependencyTemplate,
-    ModuleDependency, NullDependency, NullDependencyTemplate,
+    LoaderDependency, LoaderImportDependency, ModuleDependency, NullDependency,
+    NullDependencyTemplate,
 };
 use crate::dependency_template::{DependencyTemplateContext, apply_dependency_template};
 use crate::{ExportsInfo, cache_hash::StableHasher};
@@ -51,6 +52,8 @@ pub enum Dependency {
     Null(NullDependency),
     Const(ConstDependency),
     Import(ImportDependency),
+    Loader(LoaderDependency),
+    LoaderImport(LoaderImportDependency),
 }
 
 impl Dependency {
@@ -62,6 +65,8 @@ impl Dependency {
             }
             Self::HarmonyExportImportedSpecifier(_) => DependencyKind::StaticExport,
             Self::Import(_) => DependencyKind::DynamicImport,
+            Self::Loader(_) => DependencyKind::Loader,
+            Self::LoaderImport(_) => DependencyKind::LoaderImport,
             Self::HarmonyExportHeader(_)
             | Self::HarmonyExportSpecifier(_)
             | Self::HarmonyExportExpression(_)
@@ -92,6 +97,8 @@ impl Dependency {
             Self::HarmonyImportSpecifier(dep) => Some(&dep.module),
             Self::HarmonyExportImportedSpecifier(dep) => Some(&dep.module),
             Self::Import(dep) => Some(&dep.module),
+            Self::Loader(dep) => Some(&dep.module),
+            Self::LoaderImport(dep) => Some(&dep.module),
             Self::HarmonyExportHeader(_)
             | Self::HarmonyExportSpecifier(_)
             | Self::HarmonyExportExpression(_)
@@ -182,6 +189,7 @@ impl Dependency {
             Self::Import(dependency) => {
                 apply_dependency_template(&ImportDependencyTemplate, dependency, source, context)
             }
+            Self::Loader(_) | Self::LoaderImport(_) => Ok(()),
         }
     }
 
@@ -218,5 +226,7 @@ pub enum DependencyKind {
     StaticImport,
     StaticExport,
     DynamicImport,
+    Loader,
+    LoaderImport,
     Presentational,
 }

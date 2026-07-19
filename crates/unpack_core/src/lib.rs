@@ -60,14 +60,18 @@ pub use dependencies::{
     ConstDependency, EntryDependency, HarmonyExportExpressionDependency,
     HarmonyExportHeaderDependency, HarmonyExportImportedSpecifierDependency,
     HarmonyExportSpecifierDependency, HarmonyImportSideEffectDependency,
-    HarmonyImportSpecifierDependency, ImportDependency, ModuleDependency, NullDependency,
+    HarmonyImportSpecifierDependency, ImportDependency, LoaderDependency, LoaderImportDependency,
+    ModuleDependency, NullDependency,
 };
 pub use dependencies_block::DependenciesBlock;
 pub use dependency::{Dependency, DependencyKind, SourceRange};
 pub use error::{Error, Result};
 pub use exports_info::ExportsInfo;
 pub use hooks::{CompilationHooks, HookFuture};
-pub use loader::{LoaderFuture, LoaderRequest, LoaderRunner, MatchedLoader, ModuleRule};
+pub use loader::{
+    LoadedLoaderModule, LoaderFuture, LoaderModuleFuture, LoaderModuleRequest, LoaderModuleRunner,
+    LoaderRequest, LoaderRequestKind, LoaderResult, LoaderRunner, MatchedLoader, ModuleRule,
+};
 pub use logging::{InfrastructureLogEvent, InfrastructureLogLevel, InfrastructureLoggingOptions};
 pub use make::MakeOptions;
 pub use module::{Module, ModuleHandle, ModuleIdentity, ModuleType};

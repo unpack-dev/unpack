@@ -127,6 +127,20 @@ impl ChunkGraph {
         Some(new_chunk)
     }
 
+    pub(crate) fn add_split_chunk(
+        &mut self,
+        source_chunks: &[ChunkHandle],
+        name: Option<String>,
+        root_modules: Vec<ModuleHandle>,
+    ) -> ChunkHandle {
+        let new_chunk = self.add_chunk(name, root_modules);
+        for source_chunk in source_chunks {
+            let original = self.chunks[source_chunk.index()].clone();
+            original.split(&mut self.chunks[new_chunk.index()], &mut self.chunk_groups);
+        }
+        new_chunk
+    }
+
     pub(crate) fn connect_chunk_and_module(&mut self, chunk: ChunkHandle, module: ModuleHandle) {
         if self.module_chunks.len() <= module.index() {
             self.module_chunks.resize_with(module.index() + 1, Vec::new);
@@ -141,6 +155,13 @@ impl ChunkGraph {
         }
         if !self.module_chunks[module.index()].contains(&chunk) {
             self.module_chunks[module.index()].push(chunk);
+        }
+    }
+
+    pub(crate) fn disconnect_chunk_and_module(&mut self, chunk: ChunkHandle, module: ModuleHandle) {
+        self.chunk_modules[chunk.index()].retain(|connected| *connected != module);
+        if let Some(chunks) = self.module_chunks.get_mut(module.index()) {
+            chunks.retain(|connected| *connected != chunk);
         }
     }
 

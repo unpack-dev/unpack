@@ -75,12 +75,21 @@ pub struct NativeCompilerOptions {
     pub used_exports: bool,
     #[napi(js_name = "sideEffects")]
     pub side_effects: String,
+    #[napi(js_name = "splitChunks")]
+    pub split_chunks: Option<NativeSplitChunksOptions>,
     #[napi(js_name = "moduleRules")]
     pub module_rules: Vec<NativeModuleRule>,
     #[napi(js_name = "serialRebuildMake")]
     pub serial_rebuild_make: bool,
     #[napi(js_name = "unsafeWatchCacheInvalidation")]
     pub unsafe_watch_cache_invalidation: bool,
+}
+
+#[napi(object)]
+pub struct NativeSplitChunksOptions {
+    #[napi(js_name = "minChunks")]
+    pub min_chunks: u32,
+    pub name: Option<String>,
 }
 
 #[napi(object)]
@@ -978,6 +987,13 @@ impl NativeCompiler {
                 )));
             }
         };
+        compiler_options.split_chunks =
+            options
+                .split_chunks
+                .map(|split_chunks| unpack_core::SplitChunksOptions {
+                    min_chunks: split_chunks.min_chunks as usize,
+                    name: split_chunks.name,
+                });
         compiler_options.module_rules = options
             .module_rules
             .into_iter()

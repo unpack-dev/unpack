@@ -64,19 +64,34 @@ impl DependencyTemplate<ImportDependency> for ImportDependencyTemplate {
         let expression = if let Some(group_handle) = context.chunk_graph.block_chunk_group(origin) {
             context.add_runtime_requirement(RuntimeRequirement::EnsureChunk);
             let group = &context.chunk_graph.chunk_groups()[group_handle.index()];
-            let chunk_handle = group
+            let chunk_ids = group
                 .chunks()
-                .first()
-                .copied()
-                .expect("Async Chunk Group must contain a Chunk");
-            let chunk = context
-                .chunk_graph
-                .chunk(chunk_handle)
-                .expect("Async Chunk must exist before Dynamic Import generation");
-            let chunk_id = json_render_id(chunk.render_id());
-            format!(
-                "__webpack_require__.e({chunk_id}).then(__webpack_require__.bind(__webpack_require__, {target_id}))"
-            )
+                .iter()
+                .map(|chunk_handle| {
+                    let chunk = context
+                        .chunk_graph
+                        .chunk(*chunk_handle)
+                        .expect("Async Chunk must exist before Dynamic Import generation");
+                    json_render_id(chunk.render_id())
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                !chunk_ids.is_empty(),
+                "Async Chunk Group must contain a Chunk"
+            );
+            let load = if chunk_ids.len() == 1 {
+                format!("__webpack_require__.e({})", chunk_ids[0])
+            } else {
+                format!(
+                    "Promise.all([{}])",
+                    chunk_ids
+                        .iter()
+                        .map(|chunk_id| format!("__webpack_require__.e({chunk_id})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            format!("{load}.then(__webpack_require__.bind(__webpack_require__, {target_id}))")
         } else {
             format!(
                 "Promise.resolve().then(__webpack_require__.bind(__webpack_require__, {target_id}))"

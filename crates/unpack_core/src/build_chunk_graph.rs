@@ -4,6 +4,7 @@ use std::{cmp::Ordering, collections::VecDeque};
 
 use crate::{
     AsyncDependenciesBlockIndex, CompilerOptions, ModuleGraph, ModuleHandle,
+    chunk::ChunkHandle,
     chunk_graph::ChunkGraph,
     chunk_group::{AsyncBlockOrigin, ChunkGroupHandle, ChunkGroupKind},
     module_computation_cache::ModuleComputationCache,
@@ -311,7 +312,77 @@ pub(crate) fn build_chunk_graph_with_cache(
         }
     }
 
+    if let Some(split_chunks) = &options.split_chunks {
+        apply_split_chunks(
+            &mut chunk_graph,
+            split_chunks.min_chunks,
+            split_chunks.name.as_deref(),
+        );
+    }
+
     chunk_graph
+}
+
+// Webpack's SplitChunksPlugin is cache-group driven. This first model-backed
+// slice implements its default async boundary: modules shared by the same set
+// of async chunks are moved into one chunk inserted into every affected group.
+fn apply_split_chunks(chunk_graph: &mut ChunkGraph, min_chunks: usize, name: Option<&str>) {
+    let async_chunks = chunk_graph
+        .chunks()
+        .iter()
+        .filter(|chunk| {
+            !chunk.groups().is_empty()
+                && chunk.groups().iter().all(|group| {
+                    matches!(
+                        chunk_graph.chunk_groups()[group.index()].kind(),
+                        ChunkGroupKind::Async
+                    )
+                })
+        })
+        .map(|chunk| chunk.handle())
+        .collect::<Vec<_>>();
+
+    let mut modules_by_chunk_set = FxHashMap::<Vec<ChunkHandle>, Vec<ModuleHandle>>::default();
+    let mut chunks_by_module = FxHashMap::<ModuleHandle, Vec<ChunkHandle>>::default();
+    for chunk in async_chunks {
+        for module in chunk_graph.chunk_modules(chunk) {
+            chunks_by_module.entry(*module).or_default().push(chunk);
+        }
+    }
+    for (module, mut chunks) in chunks_by_module {
+        chunks.sort();
+        chunks.dedup();
+        if chunks.len() >= min_chunks {
+            modules_by_chunk_set.entry(chunks).or_default().push(module);
+        }
+    }
+
+    let mut split_candidates = modules_by_chunk_set.into_iter().collect::<Vec<_>>();
+    split_candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
+    if name.is_some() && split_candidates.len() > 1 {
+        let mut source_chunks = split_candidates
+            .iter()
+            .flat_map(|(chunks, _)| chunks.iter().copied())
+            .collect::<Vec<_>>();
+        source_chunks.sort();
+        source_chunks.dedup();
+        let modules = split_candidates
+            .into_iter()
+            .flat_map(|(_, modules)| modules)
+            .collect();
+        split_candidates = vec![(source_chunks, modules)];
+    }
+    for (source_chunks, mut modules) in split_candidates {
+        modules.sort();
+        let chunk_name = name.map(str::to_string);
+        let shared_chunk = chunk_graph.add_split_chunk(&source_chunks, chunk_name, modules.clone());
+        for module in modules {
+            for chunk in &source_chunks {
+                chunk_graph.disconnect_chunk_and_module(*chunk, module);
+            }
+            chunk_graph.connect_chunk_and_module(shared_chunk, module);
+        }
+    }
 }
 
 fn collect_static_reachable_cached(

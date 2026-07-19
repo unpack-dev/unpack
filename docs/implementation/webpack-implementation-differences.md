@@ -247,7 +247,10 @@ Necessity:
   async groups, per-block options, or full split-point identity can be claimed.
 - Intersecting parent available-module sets is necessary: excluding a module
   seen on only one path would make the shared payload unusable from another.
-- Split chunks, cache groups, min-size/min-chunks/max-request rules, runtime chunks, and named chunk options are not necessary for the first implementation.
+- Split Chunks now has a first async-only shared-module extraction slice with
+  `minChunks` and a string `name`. Cache groups, size thresholds, max-request
+  rules, initial/all-chunk extraction, runtime chunks, and broader named chunk
+  options remain staged scope.
 - Recursive nested-block processing and available-module back-edge collapse are
   required parts of Unpack's implemented dynamic-import semantics.
 
@@ -339,5 +342,6 @@ Feature work to defer until explicitly chosen:
 - CommonJS parsing and interop.
 - Broader loader rules, loader chains, loader options, async loaders, and plugin API parity.
 - Magic comments, dynamic import modes, import attributes, deferred/source import phases.
-- Split chunks, cache groups, runtime chunks, HMR, browser/ESM/webworker chunk loading.
+- Broader Split Chunks cache groups and sizing/request policies, runtime chunks,
+  HMR, and browser/ESM/webworker chunk loading.
 - Inner Graph, module concatenation, broader export-usage semantics, and deterministic id plugins.

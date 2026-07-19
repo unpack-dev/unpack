@@ -54,7 +54,7 @@ pub use code_generation::Asset;
 pub use compilation::{Compilation, WatchDependencies};
 pub use compiler::{
     CacheIdleReason, CacheLifecycleOutcome, Compiler, CompilerOptions, DEFAULT_EXTENSIONS, Entry,
-    PendingCompilation, SideEffectsOption,
+    PendingCompilation, SideEffectsOption, SplitChunksOptions,
 };
 pub use dependencies::{
     ConstDependency, EntryDependency, HarmonyExportExpressionDependency,

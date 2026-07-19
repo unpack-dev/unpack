@@ -61,6 +61,7 @@ pub struct CompilerOptions {
     pub provided_exports: bool,
     pub used_exports: bool,
     pub side_effects: SideEffectsOption,
+    pub split_chunks: Option<SplitChunksOptions>,
     pub serial_rebuild_make: bool,
     pub unsafe_watch_cache_invalidation: bool,
 }
@@ -82,10 +83,17 @@ impl CompilerOptions {
             provided_exports: true,
             used_exports: true,
             side_effects: SideEffectsOption::Flag,
+            split_chunks: None,
             serial_rebuild_make: true,
             unsafe_watch_cache_invalidation: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitChunksOptions {
+    pub min_chunks: usize,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone)]

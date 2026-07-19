@@ -136,6 +136,10 @@ _Avoid_: Module graph chunks, output graph
 A loading relationship that groups one or more chunks and connects parent and child loading paths.
 _Avoid_: Chunk collection, chunk set
 
+**Split Chunks**:
+The optimization that extracts modules shared by eligible Chunks into a separate Chunk and inserts it into each affected Chunk Group. The implemented first slice applies to Async Chunks and uses `optimization.splitChunks`.
+_Avoid_: Duplicate-module removal, shared bundle
+
 **Entrypoint**:
 An initial chunk group created from a configured entry.
 _Avoid_: Entry chunk, main chunk

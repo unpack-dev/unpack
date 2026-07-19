@@ -40,6 +40,13 @@ export interface OptimizationOptions {
   providedExports?: boolean;
   usedExports?: boolean | "global";
   sideEffects?: boolean | "flag";
+  splitChunks?: false | SplitChunksOptions;
+}
+
+export interface SplitChunksOptions {
+  chunks?: "async";
+  minChunks?: number;
+  name?: string;
 }
 
 export interface ModuleOptions {
@@ -143,9 +150,16 @@ export interface NormalizedOptions {
   providedExports: boolean;
   usedExports: boolean;
   sideEffects: "disabled" | "flag" | "analyze";
+  splitChunks?: NormalizedSplitChunksOptions;
   resolveCache: boolean;
   serialRebuildMake: boolean;
   unsafeWatchCacheInvalidation: boolean;
+}
+
+export interface NormalizedSplitChunksOptions {
+  chunks: "async";
+  minChunks: number;
+  name?: string;
 }
 
 export interface NormalizedModuleRule {
@@ -281,6 +295,7 @@ export function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     providedExports: optimization.providedExports,
     usedExports: optimization.usedExports,
     sideEffects: optimization.sideEffects,
+    splitChunks: optimization.splitChunks,
     resolveCache: normalizeResolveOptions(
       options.resolve,
       normalizedCache.type !== "disabled"
@@ -360,16 +375,17 @@ export function normalizeExperimentsOptions(
 export function normalizeOptimizationOptions(
   optimization: OptimizationOptions | undefined,
   mode: Mode
-): { providedExports: boolean; usedExports: boolean; sideEffects: "disabled" | "flag" | "analyze" } {
+): { providedExports: boolean; usedExports: boolean; sideEffects: "disabled" | "flag" | "analyze"; splitChunks?: NormalizedSplitChunksOptions } {
   if (optimization === undefined) {
     return {
       providedExports: true,
       usedExports: mode === "production",
-      sideEffects: mode === "production" ? "analyze" : "flag"
+      sideEffects: mode === "production" ? "analyze" : "flag",
+      splitChunks: undefined
     };
   }
   assertPlainObject(optimization, "options.optimization");
-  assertKnownKeys(optimization, ["providedExports", "usedExports", "sideEffects"], "options.optimization");
+  assertKnownKeys(optimization, ["providedExports", "usedExports", "sideEffects", "splitChunks"], "options.optimization");
   return {
     providedExports: optimization.providedExports === undefined
       ? true
@@ -385,7 +401,33 @@ export function normalizeOptimizationOptions(
         ? "flag"
         : assertBoolean(optimization.sideEffects, "options.optimization.sideEffects")
           ? "analyze"
-          : "disabled"
+          : "disabled",
+    splitChunks: normalizeSplitChunksOptions(optimization.splitChunks)
+  };
+}
+
+function normalizeSplitChunksOptions(
+  splitChunks: unknown
+): NormalizedSplitChunksOptions | undefined {
+  if (splitChunks === undefined || splitChunks === false) return undefined;
+  assertPlainObject(splitChunks, "options.optimization.splitChunks");
+  assertKnownKeys(splitChunks, ["chunks", "minChunks", "name"], "options.optimization.splitChunks");
+  const options = splitChunks as unknown as SplitChunksOptions;
+  if (options.chunks !== undefined && options.chunks !== "async") {
+    throw new TypeError("options.optimization.splitChunks.chunks currently only supports 'async'");
+  }
+  const minChunks = options.minChunks === undefined
+    ? 2
+    : assertNonNegativeInteger(options.minChunks, "options.optimization.splitChunks.minChunks");
+  if (minChunks < 1) {
+    throw new TypeError("options.optimization.splitChunks.minChunks must be at least 1");
+  }
+  return {
+    chunks: "async",
+    minChunks,
+    name: options.name === undefined
+      ? undefined
+      : assertNonEmptyString(options.name, "options.optimization.splitChunks.name")
   };
 }
 

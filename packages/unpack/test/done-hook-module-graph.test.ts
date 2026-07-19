@@ -236,6 +236,55 @@ test("module graph access after finishModules rejects an expired native lease", 
   }
 });
 
+test("plugin setTimeout rejects a graph lease released after finishModules", async () => {
+  const fixture = await createGraphFixture();
+  const stopBeforeRebind = new Error("stop before final module graph rebind");
+  let delayedAccess: Promise<Error | undefined> | undefined;
+  const compiler = unpack({
+    context: fixture,
+    entry: "./src/index.js",
+    output: { path: join(fixture, "dist") },
+    sourcemap: false,
+    plugins: [{
+      apply(compiler) {
+        compiler.hooks.compilation.tap("register delayed graph access", (compilation) => {
+          compilation.hooks.finishModules.tap("schedule detached graph access", (modules) => {
+            const entry = findModule(modules, "/src/index.js");
+            delayedAccess = new Promise((resolve) => {
+              setTimeout(() => {
+                try {
+                  compilation.moduleGraph.getOutgoingConnections(entry);
+                  resolve(undefined);
+                } catch (error) {
+                  resolve(error instanceof Error ? error : new Error(String(error)));
+                }
+              }, 0);
+            });
+          });
+          // Prevent the final Compilation from rebinding the graph before the
+          // timer runs, so this deterministically covers the released window.
+          compilation.hooks.finishModules.tap("stop before graph rebind", () => {
+            throw stopBeforeRebind;
+          });
+        });
+      }
+    }]
+  });
+  assert.ok(compiler);
+
+  try {
+    const observation = await observeCompilerRun(compiler);
+    assert.equal(observation.error, stopBeforeRebind);
+    assert.equal(observation.stats, undefined);
+    assert.ok(delayedAccess);
+    const error = await delayedAccess;
+    assert.match(error?.message ?? "", /module graph lease has been released/i);
+  } finally {
+    await closeCompiler(compiler);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("done refreshes connections materialized before seal", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "unpack-module-graph-rewrite-"));
   await writeFixtureFile(join(fixture, "package.json"), JSON.stringify({ sideEffects: false }));

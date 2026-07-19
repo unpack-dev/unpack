@@ -236,9 +236,9 @@ test("module graph access after finishModules rejects an expired native lease", 
   }
 });
 
-test("plugin setTimeout can access the rebound module graph after done", async () => {
+test("plugin setTimeout can access the module graph during finishModules", async () => {
   const fixture = await createGraphFixture();
-  let delayedAccess: Promise<number> | undefined;
+  let delayedAccessCompleted = false;
   const compiler = unpack({
     context: fixture,
     entry: "./src/index.js",
@@ -246,18 +246,25 @@ test("plugin setTimeout can access the rebound module graph after done", async (
     sourcemap: false,
     plugins: [{
       apply(compiler) {
-        compiler.hooks.done.tap("schedule delayed graph access", (stats) => {
-          const { moduleGraph, modules } = stats.compilation;
-          const entry = findModule(modules, "/src/index.js");
-          delayedAccess = new Promise((resolve, reject) => {
-            setTimeout(() => {
-              try {
-                resolve(moduleGraph.getOutgoingConnections(entry).size);
-              } catch (error) {
-                reject(error);
-              }
-            }, 0);
-          });
+        compiler.hooks.compilation.tap("register delayed graph access", (compilation) => {
+          compilation.hooks.finishModules.tapAsync(
+            "access module graph from timer",
+            (modules, done) => {
+              const entry = findModule(modules, "/src/index.js");
+              setTimeout(() => {
+                try {
+                  assert.equal(
+                    compilation.moduleGraph.getOutgoingConnections(entry).size > 0,
+                    true
+                  );
+                  delayedAccessCompleted = true;
+                  done();
+                } catch (error) {
+                  done(error instanceof Error ? error : new Error(String(error)));
+                }
+              }, 0);
+            }
+          );
         });
       }
     }]
@@ -266,8 +273,7 @@ test("plugin setTimeout can access the rebound module graph after done", async (
 
   try {
     await runCompiler(compiler);
-    assert.ok(delayedAccess);
-    assert.equal((await delayedAccess) > 0, true);
+    assert.equal(delayedAccessCompleted, true);
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });

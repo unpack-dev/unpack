@@ -57,15 +57,24 @@ impl DependencyTemplate<HarmonyImportSpecifierDependency>
         let dependency_index = context
             .dependency_index
             .expect("Harmony import specifier must have a Dependency Index");
-        context
+        let target = context
             .module_graph
             .module_for_dependency(context.module, None, dependency_index)
             .expect("Harmony import specifier must have a Module Graph connection");
-        let expression = import_expression(
-            &dependency.module.request,
-            dependency.module.source_order.unwrap_or(0),
-            &dependency.ids,
-        );
+        let expression = if let Some(scope) = context.concatenation_scope
+            && scope.contains(target)
+        {
+            crate::dependency_template::export_access_expression(
+                &scope.exports_expression(target),
+                &dependency.ids,
+            )
+        } else {
+            import_expression(
+                &dependency.module.request,
+                dependency.module.source_order.unwrap_or(0),
+                &dependency.ids,
+            )
+        };
         let expression = if dependency.shorthand {
             format!("{}: {expression}", dependency.name)
         } else {

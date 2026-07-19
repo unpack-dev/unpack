@@ -41,7 +41,8 @@ impl DependencyTemplate<HarmonyExportSpecifierDependency>
         context.add_init_fragment(
             InitFragmentStage::Export,
             format!(
-                "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({}) }});\n",
+                "__webpack_require__.d({}, {{ {}: () => ({}) }});\n",
+                context.exports_argument(),
                 property_name(used_name),
                 dependency.id
             ),

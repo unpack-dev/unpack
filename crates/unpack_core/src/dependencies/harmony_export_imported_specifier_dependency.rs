@@ -67,18 +67,30 @@ impl DependencyTemplate<HarmonyExportImportedSpecifierDependency>
             .module_graph
             .module_for_dependency(context.module, None, dependency_index)
             .expect("Harmony re-export must have a Module Graph connection");
-        if !context.module_render_ids.contains_key(&target) {
+        let internal_target = context
+            .concatenation_scope
+            .is_some_and(|scope| scope.contains(target));
+        if !internal_target && !context.module_render_ids.contains_key(&target) {
             return;
         }
-        let import_var = import_var(
-            &dependency.module.request,
-            dependency.module.source_order.unwrap_or(0),
-        );
+        let import_var = context
+            .concatenation_scope
+            .filter(|scope| scope.contains(target))
+            .map_or_else(
+                || {
+                    import_var(
+                        &dependency.module.request,
+                        dependency.module.source_order.unwrap_or(0),
+                    )
+                },
+                |scope| scope.exports_expression(target),
+            );
+        let exports_argument = context.exports_argument();
         if dependency.is_star {
             context.add_init_fragment(
                 InitFragmentStage::StarReexport,
                 format!(
-                    "/* harmony reexport (unknown) */ for(const __WEBPACK_IMPORT_KEY__ in {import_var}) if(__WEBPACK_IMPORT_KEY__ !== \"default\" && __WEBPACK_IMPORT_KEY__ !== \"__esModule\") __webpack_require__.d(__webpack_exports__, {{ [__WEBPACK_IMPORT_KEY__]: () => ({import_var}[__WEBPACK_IMPORT_KEY__]) }});\n"
+                    "/* harmony reexport (unknown) */ for(const __WEBPACK_IMPORT_KEY__ in {import_var}) if(__WEBPACK_IMPORT_KEY__ !== \"default\" && __WEBPACK_IMPORT_KEY__ !== \"__esModule\") __webpack_require__.d({exports_argument}, {{ [__WEBPACK_IMPORT_KEY__]: () => ({import_var}[__WEBPACK_IMPORT_KEY__]) }});\n"
                 ),
             );
         } else if let Some(name) = &dependency.name {
@@ -89,7 +101,7 @@ impl DependencyTemplate<HarmonyExportImportedSpecifierDependency>
             context.add_init_fragment(
                 InitFragmentStage::Export,
                 format!(
-                    "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({expression}) }});\n",
+                    "__webpack_require__.d({exports_argument}, {{ {}: () => ({expression}) }});\n",
                     property_name(used_name),
                 ),
             );

@@ -67,6 +67,7 @@ pub(crate) struct CompilationHookSet {
     pub javascript_parser: JavascriptParserHookSet,
     pub finish_modules: AsyncCompilationHook,
     pub optimize_dependencies: SyncCompilationHook,
+    pub optimize_chunk_modules: SyncCompilationHook,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -101,6 +102,10 @@ impl std::fmt::Debug for CompilationHookSet {
             .field(
                 "optimize_dependencies_taps",
                 &self.optimize_dependencies.taps.len(),
+            )
+            .field(
+                "optimize_chunk_modules_taps",
+                &self.optimize_chunk_modules.taps.len(),
             )
             .finish()
     }

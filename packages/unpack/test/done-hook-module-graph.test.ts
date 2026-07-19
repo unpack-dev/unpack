@@ -531,7 +531,7 @@ test("optimization providedExports and usedExports control ModuleGraph export me
 // used so both initial and async Chunk membership can be inspected.
 test("done exposes webpack-shaped ChunkGraph membership queries", async () => {
   const fixture = await createChunkGraphFixture();
-  const compiler = createCompiler(fixture);
+  const compiler = createCompiler(fixture, { concatenateModules: false });
   let inspected = false;
   let liveChunkGraph: ChunkGraph | undefined;
 
@@ -745,12 +745,16 @@ function compareStrings(left: string, right: string): -1 | 0 | 1 {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function createCompiler(context: string): Compiler {
+function createCompiler(
+  context: string,
+  optimization: { concatenateModules?: boolean } = {}
+): Compiler {
   return unpack({
     context,
     entry: "./src/index.js",
     output: { path: join(context, "dist") },
-    sourcemap: false
+    sourcemap: false,
+    optimization
   });
 }
 

@@ -7,13 +7,20 @@ use crate::{
     code_generation_record::{
         CodeGenerationRecord, CodeGenerationReplacement, CodeGenerationSource,
     },
-    dependency_template::DependencyTemplateContext,
+    dependency_template::{ConcatenationScope, DependencyTemplateContext},
     init_fragment::{InitFragment, InitFragmentStage},
     normal_module_factory::ModuleGeneratorContext,
     runtime::{RuntimeRequirement, RuntimeRequirements},
 };
 
 pub(crate) fn generate(context: ModuleGeneratorContext<'_>) -> Result<CodeGenerationRecord> {
+    generate_with_concatenation_scope(context, None)
+}
+
+pub(crate) fn generate_with_concatenation_scope(
+    context: ModuleGeneratorContext<'_>,
+    concatenation_scope: Option<&ConcatenationScope<'_>>,
+) -> Result<CodeGenerationRecord> {
     let ModuleGeneratorContext {
         module,
         module_graph,
@@ -21,8 +28,10 @@ pub(crate) fn generate(context: ModuleGeneratorContext<'_>) -> Result<CodeGenera
         module_render_ids,
     } = context;
     let module_handle = module.handle();
-    let module_render_id = &module_render_ids[&module_handle];
-    let module_render_name = module_render_id.to_string();
+    let module_render_name = module_render_ids
+        .get(&module_handle)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| module.identity().resource.to_string_lossy().into_owned());
     let mut source = ReplaceSource::new(OriginalSource::new(
         module.source(),
         module_render_name.as_str(),
@@ -51,6 +60,7 @@ pub(crate) fn generate(context: ModuleGeneratorContext<'_>) -> Result<CodeGenera
                     chunk_graph,
                     exports_info: module_graph.exports_info(module_handle),
                     module_render_ids,
+                    concatenation_scope,
                     runtime_requirements: &mut runtime_requirements,
                     init_fragments: &mut init_fragments,
                 };

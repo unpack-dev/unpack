@@ -9,12 +9,18 @@ use std::{
 use crate::{
     CacheOptions, Compilation, CompilationHooks, InfrastructureLoggingOptions, LoaderRunner,
     ModuleRule, ResolveOptions, Result, SnapshotOptions, UnpackResolver,
-    asset::asset_modules_plugin::AssetModulesPlugin, cache::Cache, compilation::CompilationHookSet,
+    asset::asset_modules_plugin::AssetModulesPlugin,
+    cache::Cache,
+    compilation::CompilationHookSet,
     flag_dependency_exports_plugin::FlagDependencyExportsPlugin,
     flag_dependency_usage_plugin::FlagDependencyUsagePlugin,
     javascript::javascript_modules_plugin::JavascriptModulesPlugin,
-    json::json_modules_plugin::JsonModulesPlugin, module_computation_cache::ModuleComputationCache,
-    optimize::side_effects_flag_plugin::SideEffectsFlagPlugin,
+    json::json_modules_plugin::JsonModulesPlugin,
+    module_computation_cache::ModuleComputationCache,
+    optimize::{
+        module_concatenation_plugin::ModuleConcatenationPlugin,
+        side_effects_flag_plugin::SideEffectsFlagPlugin,
+    },
 };
 use tracing::Instrument;
 
@@ -58,6 +64,7 @@ pub struct CompilerOptions {
     pub loader_runner: Option<Arc<dyn LoaderRunner>>,
     pub compilation_hooks: Option<Arc<dyn CompilationHooks>>,
     pub sourcemap: bool,
+    pub concatenate_modules: bool,
     pub provided_exports: bool,
     pub used_exports: bool,
     pub side_effects: SideEffectsOption,
@@ -80,6 +87,7 @@ impl CompilerOptions {
             loader_runner: None,
             compilation_hooks: None,
             sourcemap: true,
+            concatenate_modules: false,
             provided_exports: true,
             used_exports: true,
             side_effects: SideEffectsOption::Flag,
@@ -693,6 +701,9 @@ impl Compiler {
         }
         if options.used_exports {
             FlagDependencyUsagePlugin.apply(&mut hooks);
+        }
+        if options.concatenate_modules {
+            ModuleConcatenationPlugin.apply(&mut hooks);
         }
         match options.side_effects {
             SideEffectsOption::Disabled => {}

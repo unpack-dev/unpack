@@ -58,6 +58,16 @@ pub(crate) struct CodeGenerationResult {
 }
 
 impl CodeGenerationResult {
+    pub(crate) fn from_parts(
+        source: ConcatSource,
+        runtime_requirements: RuntimeRequirements,
+    ) -> Self {
+        Self {
+            source,
+            runtime_requirements,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn new(record_source: CodeGenerationSource) -> Self {
         CodeGenerationRecord::new(record_source)

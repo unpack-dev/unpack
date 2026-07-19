@@ -137,6 +137,15 @@ impl Dependency {
         )
     }
 
+    pub(crate) fn can_concatenate(&self) -> bool {
+        matches!(
+            self,
+            Self::HarmonyImportSideEffect(_)
+                | Self::HarmonyImportSpecifier(_)
+                | Self::HarmonyExportImportedSpecifier(_)
+        )
+    }
+
     pub(crate) fn apply_template(
         &self,
         source: &mut rspack_sources::ReplaceSource,

@@ -69,6 +69,8 @@ pub struct NativeCompilerOptions {
     #[napi(js_name = "infrastructureLogging")]
     pub infrastructure_logging: NativeInfrastructureLoggingOptions,
     pub sourcemap: bool,
+    #[napi(js_name = "concatenateModules")]
+    pub concatenate_modules: bool,
     #[napi(js_name = "providedExports")]
     pub provided_exports: bool,
     #[napi(js_name = "usedExports")]
@@ -1122,6 +1124,7 @@ impl NativeCompiler {
         compiler_options.infrastructure_logging =
             infrastructure_logging_options_from_native(options.infrastructure_logging);
         compiler_options.sourcemap = options.sourcemap;
+        compiler_options.concatenate_modules = options.concatenate_modules;
         compiler_options.provided_exports = options.provided_exports;
         compiler_options.used_exports = options.used_exports;
         compiler_options.serial_rebuild_make = options.serial_rebuild_make;

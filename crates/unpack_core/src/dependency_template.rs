@@ -33,6 +33,7 @@ pub(crate) struct DependencyTemplateContext<'a> {
     pub(crate) chunk_graph: &'a ChunkGraph,
     pub(crate) exports_info: &'a ExportsInfo,
     pub(crate) module_render_ids: &'a FxHashMap<ModuleHandle, RenderId>,
+    pub(crate) concatenation_scope: Option<&'a ConcatenationScope<'a>>,
     pub(crate) runtime_requirements: &'a mut RuntimeRequirements,
     pub(crate) init_fragments: &'a mut Vec<InitFragment>,
 }
@@ -45,6 +46,10 @@ impl DependencyTemplateContext<'_> {
     pub(crate) fn add_init_fragment(&mut self, stage: InitFragmentStage, content: String) {
         self.init_fragments
             .push(InitFragment::new(stage, self.init_fragments.len(), content));
+    }
+
+    pub(crate) fn exports_argument(&self) -> String {
+        "__webpack_exports__".to_string()
     }
 
     fn validate_source_ranges(
@@ -70,6 +75,73 @@ impl DependencyTemplateContext<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConcatenationScope<'a> {
+    modules: &'a [ModuleHandle],
+    exports_name: String,
+    initialized_name: String,
+    initializers_name: String,
+}
+
+impl<'a> ConcatenationScope<'a> {
+    pub(crate) fn new(
+        modules: &'a [ModuleHandle],
+        identifiers: &rustc_hash::FxHashSet<String>,
+    ) -> Self {
+        let mut suffix = 0_u32;
+        loop {
+            let exports_name = format!("__webpack_concatenation_exports__{suffix}");
+            let initialized_name = format!("__webpack_concatenation_initialized__{suffix}");
+            let initializers_name = format!("__webpack_concatenation_initializers__{suffix}");
+            if !identifiers.contains(&exports_name)
+                && !identifiers.contains(&initialized_name)
+                && !identifiers.contains(&initializers_name)
+            {
+                return Self {
+                    modules,
+                    exports_name,
+                    initialized_name,
+                    initializers_name,
+                };
+            }
+            suffix = suffix
+                .checked_add(1)
+                .expect("a Concatenation Scope must have an available generated name");
+        }
+    }
+
+    pub(crate) fn contains(&self, module: ModuleHandle) -> bool {
+        self.modules.contains(&module)
+    }
+
+    pub(crate) fn ordinal(&self, module: ModuleHandle) -> usize {
+        self.modules
+            .iter()
+            .position(|candidate| *candidate == module)
+            .expect("a Concatenation Scope must contain the requested Module")
+    }
+
+    pub(crate) fn exports_expression(&self, module: ModuleHandle) -> String {
+        format!("{}[{}]", self.exports_name, self.ordinal(module))
+    }
+
+    pub(crate) fn init_expression(&self, module: ModuleHandle) -> String {
+        format!("{}[{}]", self.initializers_name, self.ordinal(module))
+    }
+
+    pub(crate) fn exports_name(&self) -> &str {
+        &self.exports_name
+    }
+
+    pub(crate) fn initialized_name(&self) -> &str {
+        &self.initialized_name
+    }
+
+    pub(crate) fn initializers_name(&self) -> &str {
+        &self.initializers_name
     }
 }
 

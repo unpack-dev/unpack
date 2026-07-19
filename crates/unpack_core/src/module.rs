@@ -99,6 +99,7 @@ impl BuiltModuleContent {
             ParsedModule {
                 dependencies_block: crate::DependenciesBlock::new(dependencies, blocks),
                 presentational_dependencies,
+                identifiers: Vec::new(),
                 data: crate::parser::ParsedModuleData::JavaScript,
                 build_meta: Default::default(),
             },
@@ -275,6 +276,14 @@ impl Module {
 
     pub(crate) fn parsed_data(&self) -> &crate::parser::ParsedModuleData {
         &self.data.built_content.parsed().data
+    }
+
+    pub(crate) fn identifiers(&self) -> &[String] {
+        &self.data.built_content.parsed().identifiers
+    }
+
+    pub(crate) fn uses_direct_eval(&self) -> bool {
+        self.data.built_content.parsed().build_meta.uses_direct_eval
     }
 
     #[cfg(test)]

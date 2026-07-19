@@ -3,10 +3,11 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    ModuleGraph, ModuleHandle,
+    ModuleGraph, ModuleHandle, ModuleIdentity,
     chunk::{Chunk, ChunkHandle},
     chunk_group::{AsyncBlockOrigin, ChunkGroup, ChunkGroupHandle, ChunkGroupKind},
     id_assignment::RenderId,
+    optimize::concatenated_module::ConcatenatedModule,
     runtime::{
         RuntimeModule, RuntimeRequirements, entry_startup_runtime_requirements,
         resolve_runtime_modules,
@@ -28,6 +29,7 @@ pub(crate) struct ChunkGraphModuleReferences {
     pub(crate) chunk_render_ids: Vec<RenderId>,
     pub(crate) outgoing_module_render_ids: Vec<Option<RenderId>>,
     pub(crate) block_chunk_render_ids: Vec<Option<Vec<RenderId>>>,
+    pub(crate) concatenated_module_identities: Vec<ModuleIdentity>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -46,6 +48,9 @@ pub struct ChunkGraph {
     chunk_runtime_requirements: Vec<RuntimeRequirements>,
     runtime_tree_requirements: FxHashMap<ChunkGroupHandle, RuntimeRequirements>,
     chunk_runtime_modules: Vec<Vec<RuntimeModule>>,
+    // ADR 0148 keeps optimization-created Concatenated Modules under their
+    // existing dense Concatenation Root handles.
+    concatenated_modules: FxHashMap<ModuleHandle, ConcatenatedModule>,
 }
 
 impl ChunkGraph {
@@ -165,6 +170,26 @@ impl ChunkGraph {
         }
     }
 
+    pub(crate) fn add_concatenated_module(&mut self, module: ConcatenatedModule) {
+        let root_chunks = self.module_chunks(module.root_module()).to_vec();
+        for inner in module.inner_modules() {
+            for chunk in &root_chunks {
+                self.disconnect_chunk_and_module(*chunk, inner);
+            }
+        }
+        let previous = self
+            .concatenated_modules
+            .insert(module.root_module(), module);
+        assert!(
+            previous.is_none(),
+            "a root Module must only be concatenated once"
+        );
+    }
+
+    pub(crate) fn concatenated_module(&self, root: ModuleHandle) -> Option<&ConcatenatedModule> {
+        self.concatenated_modules.get(&root)
+    }
+
     pub fn chunks(&self) -> &[Chunk] {
         &self.chunks
     }
@@ -245,6 +270,18 @@ impl ChunkGraph {
             chunk_render_ids,
             outgoing_module_render_ids,
             block_chunk_render_ids,
+            concatenated_module_identities: self
+                .concatenated_module(handle)
+                .into_iter()
+                .flat_map(|concatenated| concatenated.modules())
+                .map(|module| {
+                    module_graph
+                        .module(*module)
+                        .expect("a Concatenated Module must exist in the Module Graph")
+                        .identity()
+                        .clone()
+                })
+                .collect(),
         }
     }
 

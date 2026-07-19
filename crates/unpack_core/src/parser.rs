@@ -33,6 +33,7 @@ const UNSUPPORTED_DYNAMIC_IMPORT_MESSAGE: &str =
 pub(crate) struct ParsedModule {
     pub dependencies_block: DependenciesBlock,
     pub presentational_dependencies: Vec<Dependency>,
+    pub identifiers: Vec<String>,
     pub data: ParsedModuleData,
     pub build_meta: JavascriptBuildMeta,
 }
@@ -40,6 +41,7 @@ pub(crate) struct ParsedModule {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct JavascriptBuildMeta {
     pub side_effect_free: Option<bool>,
+    pub uses_direct_eval: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1221,6 +1223,11 @@ fn parse_module_dependencies_sync(
     })?;
 
     let mut parsed = ParsedModule::default();
+    let mut identifier_collector = IdentifierCollector::default();
+    module.visit_with(&mut identifier_collector);
+    parsed.identifiers = identifier_collector.identifiers.into_iter().collect();
+    parsed.identifiers.sort();
+    parsed.build_meta.uses_direct_eval = identifier_collector.uses_direct_eval;
     let pure_analysis = hooks
         .requires_pure_analysis
         .then(|| PureAnalysis::new(&comments, &module));
@@ -1249,6 +1256,36 @@ fn parse_module_dependencies_sync(
     hooks.finish.call(&parser_context, &module, &mut parsed);
 
     Ok(parsed)
+}
+
+#[derive(Default)]
+struct IdentifierCollector {
+    identifiers: FxHashSet<String>,
+    uses_direct_eval: bool,
+}
+
+impl<'a> Visit<'a> for IdentifierCollector {
+    fn visit_call_expr(&mut self, node: &CallExpr<'a>) {
+        if matches!(
+            &node.callee,
+            Callee::Expr(expression) if expression_is_direct_eval(expression)
+        ) {
+            self.uses_direct_eval = true;
+        }
+        node.visit_children_with(self);
+    }
+
+    fn visit_ident(&mut self, node: &Ident<'a>) {
+        self.identifiers.insert(ident_to_string(node));
+    }
+}
+
+fn expression_is_direct_eval(expression: &Expr<'_>) -> bool {
+    match expression {
+        Expr::Ident(identifier) => identifier.sym.as_str() == "eval",
+        Expr::Paren(parenthesized) => expression_is_direct_eval(&parenthesized.expr),
+        _ => false,
+    }
 }
 
 fn collect_module_decl_dependencies(
@@ -2007,6 +2044,37 @@ mod tests {
             *events.lock().unwrap(),
             ["program", "statement", "statement", "finish"]
         );
+    }
+
+    #[test]
+    fn parsed_identifiers_include_normalized_bindings_and_free_references() {
+        let parsed = parse_module_dependencies_with_hooks(
+            Path::new("module.js"),
+            r"const \u0061lpha = 1; export const read = () => alpha + freeValue;",
+            &JavascriptParserHookSet::default(),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.identifiers, ["alpha", "freeValue", "read"]);
+    }
+
+    #[test]
+    fn parser_marks_direct_eval_but_not_indirect_eval() {
+        let direct = parse_module_dependencies_with_hooks(
+            Path::new("module.js"),
+            "export const value = (eval)('value');",
+            &JavascriptParserHookSet::default(),
+        )
+        .unwrap();
+        let indirect = parse_module_dependencies_with_hooks(
+            Path::new("module.js"),
+            "export const value = (0, eval)('value');",
+            &JavascriptParserHookSet::default(),
+        )
+        .unwrap();
+
+        assert!(direct.build_meta.uses_direct_eval);
+        assert!(!indirect.build_meta.uses_direct_eval);
     }
 
     #[test]

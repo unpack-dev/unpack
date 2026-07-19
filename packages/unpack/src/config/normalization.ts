@@ -37,6 +37,7 @@ export interface ExperimentsOptions {
 }
 
 export interface OptimizationOptions {
+  concatenateModules?: boolean;
   providedExports?: boolean;
   usedExports?: boolean | "global";
   sideEffects?: boolean | "flag";
@@ -147,6 +148,7 @@ export interface NormalizedOptions {
   snapshot: NormalizedSnapshotOptions;
   infrastructureLogging: NormalizedInfrastructureLoggingOptions;
   moduleRules: NormalizedModuleRule[];
+  concatenateModules: boolean;
   providedExports: boolean;
   usedExports: boolean;
   sideEffects: "disabled" | "flag" | "analyze";
@@ -292,6 +294,7 @@ export function normalizeOptions(options: UnpackOptions): NormalizedOptions {
     snapshot: normalizeSnapshotOptions(options.snapshot, mode),
     infrastructureLogging: normalizeInfrastructureLoggingOptions(options.infrastructureLogging),
     moduleRules,
+    concatenateModules: optimization.concatenateModules,
     providedExports: optimization.providedExports,
     usedExports: optimization.usedExports,
     sideEffects: optimization.sideEffects,
@@ -375,9 +378,10 @@ export function normalizeExperimentsOptions(
 export function normalizeOptimizationOptions(
   optimization: OptimizationOptions | undefined,
   mode: Mode
-): { providedExports: boolean; usedExports: boolean; sideEffects: "disabled" | "flag" | "analyze"; splitChunks?: NormalizedSplitChunksOptions } {
+): { concatenateModules: boolean; providedExports: boolean; usedExports: boolean; sideEffects: "disabled" | "flag" | "analyze"; splitChunks?: NormalizedSplitChunksOptions } {
   if (optimization === undefined) {
     return {
+      concatenateModules: mode === "production",
       providedExports: true,
       usedExports: mode === "production",
       sideEffects: mode === "production" ? "analyze" : "flag",
@@ -385,8 +389,11 @@ export function normalizeOptimizationOptions(
     };
   }
   assertPlainObject(optimization, "options.optimization");
-  assertKnownKeys(optimization, ["providedExports", "usedExports", "sideEffects", "splitChunks"], "options.optimization");
+  assertKnownKeys(optimization, ["concatenateModules", "providedExports", "usedExports", "sideEffects", "splitChunks"], "options.optimization");
   return {
+    concatenateModules: optimization.concatenateModules === undefined
+      ? mode === "production"
+      : assertBoolean(optimization.concatenateModules, "options.optimization.concatenateModules"),
     providedExports: optimization.providedExports === undefined
       ? true
       : assertBoolean(optimization.providedExports, "options.optimization.providedExports"),

@@ -69,7 +69,8 @@ impl DependencyTemplate<HarmonyExportExpressionDependency>
         context.add_init_fragment(
             InitFragmentStage::Export,
             format!(
-                "__webpack_require__.d(__webpack_exports__, {{ {}: () => ({binding}) }});\n",
+                "__webpack_require__.d({}, {{ {}: () => ({binding}) }});\n",
+                context.exports_argument(),
                 property_name(used_name)
             ),
         );

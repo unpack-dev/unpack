@@ -290,6 +290,25 @@ fn generate_code_with(
         .iter()
         .filter(|module| !chunk_graph.module_chunks(module.handle()).is_empty())
     {
+        if let Some(concatenated_module) = chunk_graph.concatenated_module(module.handle()) {
+            let result = concatenated_module
+                .code_generation(module_graph, chunk_graph, &module_render_ids)
+                .unwrap_or_else(|error| {
+                    errors.push(error.clone());
+                    CodeGenerationRecord::new(CodeGenerationSource::Raw {
+                        source: render_failed_module_content(&error),
+                    })
+                    .into_result(module.source())
+                    .expect("failed Code Generation source must be compatible")
+                });
+            let previous = results.insert(module.handle(), result);
+            assert!(
+                previous.is_none(),
+                "module {:?} must be generated exactly once per Compilation",
+                module.handle()
+            );
+            continue;
+        }
         let input = ModuleGeneratorContext {
             module,
             module_graph,

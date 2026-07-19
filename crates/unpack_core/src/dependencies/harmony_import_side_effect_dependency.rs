@@ -56,6 +56,15 @@ impl DependencyTemplate<HarmonyImportSideEffectDependency>
             .module_graph
             .module_for_dependency(context.module, None, dependency_index)
             .expect("Harmony import must have a Module Graph connection");
+        if let Some(scope) = context.concatenation_scope
+            && scope.contains(target)
+        {
+            context.add_init_fragment(
+                InitFragmentStage::Import,
+                format!("{}();\n", scope.init_name(target)),
+            );
+            return;
+        }
         let Some(target_render_id) = context.module_render_ids.get(&target) else {
             return;
         };

@@ -127,6 +127,28 @@ documented deviations or staged webpack scope.
   must remain configurable unless measurements and a later decision remove one
   of the scheduler paths.
 
+### DEV-006: Concatenated Modules retain Root handles and guarded scopes
+
+- **Status**: Confirmed deviation.
+- **Performance-driven**: No. The constraints are the frozen dense Module
+  Handle arena and missing resolved top-level binding metadata.
+- **Webpack shape**: `ModuleConcatenationPlugin` allocates a synthetic
+  `ConcatenatedModule`, replaces the root Module and its connections, and
+  directly flattens renamed module scopes.
+- **Current shape**: Unpack preserves the Concatenation Root's handle, records
+  the `ConcatenatedModule` plan on the Chunk Graph, disconnects Inner Modules
+  from affected Chunks, and emits guarded initializer scopes inside the Root's
+  single module-table factory.
+- **Confirmation**: ADR 0148 and
+  `docs/implementation/webpack-implementation-differences.md` document the
+  dense-handle and Code Generation boundaries. Public webpack comparison tests
+  cover Chunk membership, live bindings, cycles, import order, re-exports,
+  cross-Chunk bailouts, source maps, and rebuild invalidation.
+- **Refactor when**: optimization-created Modules can receive stable
+  compilation-local handles or the parser retains complete resolved top-level
+  symbol/reference metadata. Preserve the plugin phase, candidate selection,
+  Original Sources, Runtime Requirements, and cyclic live-binding behavior.
+
 ## Resolved violations and alignment gaps
 
 ### RES-001: Whole-Compilation warm cache shortcut

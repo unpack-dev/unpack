@@ -33,6 +33,7 @@ pub(crate) struct DependencyTemplateContext<'a> {
     pub(crate) chunk_graph: &'a ChunkGraph,
     pub(crate) exports_info: &'a ExportsInfo,
     pub(crate) module_render_ids: &'a FxHashMap<ModuleHandle, RenderId>,
+    pub(crate) concatenation_scope: Option<&'a ConcatenationScope<'a>>,
     pub(crate) runtime_requirements: &'a mut RuntimeRequirements,
     pub(crate) init_fragments: &'a mut Vec<InitFragment>,
 }
@@ -45,6 +46,13 @@ impl DependencyTemplateContext<'_> {
     pub(crate) fn add_init_fragment(&mut self, stage: InitFragmentStage, content: String) {
         self.init_fragments
             .push(InitFragment::new(stage, self.init_fragments.len(), content));
+    }
+
+    pub(crate) fn exports_argument(&self) -> String {
+        self.concatenation_scope.map_or_else(
+            || "__webpack_exports__".to_string(),
+            |scope| scope.exports_name(self.module),
+        )
     }
 
     fn validate_source_ranges(
@@ -70,6 +78,41 @@ impl DependencyTemplateContext<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ConcatenationScope<'a> {
+    root: ModuleHandle,
+    modules: &'a [ModuleHandle],
+}
+
+impl<'a> ConcatenationScope<'a> {
+    pub(crate) fn new(root: ModuleHandle, modules: &'a [ModuleHandle]) -> Self {
+        Self { root, modules }
+    }
+
+    pub(crate) fn contains(&self, module: ModuleHandle) -> bool {
+        self.modules.contains(&module)
+    }
+
+    pub(crate) fn ordinal(&self, module: ModuleHandle) -> usize {
+        self.modules
+            .iter()
+            .position(|candidate| *candidate == module)
+            .expect("a Concatenation Scope must contain the requested Module")
+    }
+
+    pub(crate) fn exports_name(&self, module: ModuleHandle) -> String {
+        if module == self.root {
+            "__webpack_exports__".to_string()
+        } else {
+            format!("__webpack_exports__{}", self.ordinal(module))
+        }
+    }
+
+    pub(crate) fn init_name(&self, module: ModuleHandle) -> String {
+        format!("__webpack_init__{}", self.ordinal(module))
     }
 }
 

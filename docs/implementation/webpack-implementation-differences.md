@@ -254,6 +254,31 @@ Necessity:
 - Recursive nested-block processing and available-module back-edge collapse are
   required parts of Unpack's implemented dynamic-import semantics.
 
+## Module concatenation
+
+Unpack implements the boolean `optimization.concatenateModules` surface with
+webpack's production/development/none defaults. A separately locatable
+`ModuleConcatenationPlugin` taps `optimizeChunkModules` after Chunk Graph
+construction. It selects Harmony-only configurations, requires Concatenation
+Inner Modules to be present in all Concatenation Root Chunks, recursively pulls
+in same-Chunk Harmony importers, and bails out when an active importer belongs
+to different Chunks or uses a non-concatenatable dependency. Inner Modules are
+disconnected from the Root's Chunks before ID Assignment, so the rendered
+Bundle contains one module-table factory for the configuration.
+
+Webpack allocates a synthetic `ConcatenatedModule`, replaces the root Module,
+moves connections, analyzes and renames top-level bindings, and directly
+flattens module scopes. Unpack's Finished Modules Boundary freezes a dense
+Module Handle arena, and its parser does not yet retain webpack's complete
+top-level symbol/reference metadata. The current Rust adaptation records the
+`ConcatenatedModule` plan on the Chunk Graph under the existing Root handle and
+generates guarded configuration-local initializers and namespace objects inside
+one factory. This preserves static evaluation order, cyclic live bindings,
+re-export chains, Runtime Requirements, and per-module Original Sources, but it
+does not yet expose webpack's synthetic Module identity or eliminate all
+function and namespace boundaries. ADR 0148 records this boundary and the
+direct-scope-flattening refactor trigger.
+
 ## Runtime and asset generation
 
 Unpack emits webpack-shaped Node/CommonJS output with a fixed module table,
@@ -284,10 +309,11 @@ tracks (#140, #145, and #147). The JavaScript package entry remains ESM-only,
 while emitted entry assets intentionally use CommonJS startup. Render IDs are
 readable and deterministic with controlled churn, but are not a byte-for-byte
 webpack ID contract. Context modules, general CommonJS parsing/interop, broader
-loader rules and loader chains, public JavaScript plugins, Inner Graph, module
-concatenation, browser loading targets, and other unimplemented options remain
+loader rules and loader chains, public JavaScript plugins, Inner Graph,
+browser loading targets, and other unimplemented options remain
 explicit unsupported surfaces. Provided-exports, used-exports, and Side Effects
-Flag Plugin responsibilities are implemented for the current ESM surface.
+Flag Plugin, and Module Concatenation responsibilities are implemented for the
+current ESM surface.
 
 ## ESM code generation
 
@@ -298,7 +324,7 @@ first, export getters are installed before ordinary imports execute, and star
 re-exports run after their import namespace is available. This keeps early
 namespace reads safe while preserving later live-binding updates.
 
-Webpack templates include additional behavior for used exports, inlined exports, export presence diagnostics, CommonJS/default interop, module concatenation, deferred imports, dead branch imports, async modules, namespace object variants, and precise star re-export conflict handling.
+Webpack templates include additional behavior for used exports, inlined exports, export presence diagnostics, CommonJS/default interop, direct concatenated-scope binding access, deferred imports, dead branch imports, async modules, namespace object variants, and precise star re-export conflict handling.
 
 Necessity:
 
@@ -307,8 +333,8 @@ Necessity:
   emission and side-effects connection optimization for the supported ESM
   surface.
 - Inner Graph, broader export-usage semantics, ambiguous star export conflict
-  handling, namespace/default interop, and module concatenation should be
-  deferred until their corresponding webpack surfaces are chosen.
+  handling, namespace/default interop, and direct concatenated-scope binding
+  flattening remain staged beyond the implemented Module Concatenation surface.
 
 ## Render IDs and filenames
 
@@ -344,4 +370,5 @@ Feature work to defer until explicitly chosen:
 - Magic comments, dynamic import modes, import attributes, deferred/source import phases.
 - Broader Split Chunks cache groups and sizing/request policies, runtime chunks,
   HMR, and browser/ESM/webworker chunk loading.
-- Inner Graph, module concatenation, broader export-usage semantics, and deterministic id plugins.
+- Inner Graph, direct concatenated-scope binding flattening, broader
+  export-usage semantics, and deterministic id plugins.

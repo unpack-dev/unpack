@@ -121,6 +121,10 @@ impl Compilation {
         &self.chunk_graph
     }
 
+    pub(crate) fn chunk_graph_mut(&mut self) -> &mut ChunkGraph {
+        &mut self.chunk_graph
+    }
+
     pub fn assets(&self) -> &[Asset] {
         &self.assets
     }
@@ -251,6 +255,7 @@ impl Compilation {
     pub fn seal(&mut self) {
         self.hooks.clone().optimize_dependencies.call(self);
         self.build_chunk_graph();
+        self.hooks.clone().optimize_chunk_modules.call(self);
         self.assign_render_ids();
         self.prepare_post_id_assignment_computation_cache();
         self.create_module_hashes();
@@ -413,17 +418,34 @@ fn compute_module_hash(
     chunk_graph: &ChunkGraph,
 ) -> ModuleHash {
     let mut hasher = StableHasher::default();
-    hasher.write(b"unpack/module/hash/1");
-    module.identity().module_type.hash(&mut hasher);
-    module.source_hash().hash(&mut hasher);
-    module
-        .build_error()
-        .map(ToString::to_string)
-        .hash(&mut hasher);
-    module.is_harmony().hash(&mut hasher);
-    module
-        .code_generation_local_input_digest()
-        .hash(&mut hasher);
+    hasher.write(b"unpack/module/hash/2");
+    if let Some(concatenated) = chunk_graph.concatenated_module(module.handle()) {
+        concatenated.modules().len().hash(&mut hasher);
+        for handle in concatenated.modules() {
+            let module = module_graph
+                .module(*handle)
+                .expect("a Module Hash input must exist in the Module Graph");
+            hash_module_inputs(module, module_graph, chunk_graph, &mut hasher);
+        }
+    } else {
+        1_usize.hash(&mut hasher);
+        hash_module_inputs(module, module_graph, chunk_graph, &mut hasher);
+    }
+    ModuleHash::new(hasher.finish())
+}
+
+fn hash_module_inputs(
+    module: &crate::Module,
+    module_graph: &ModuleGraph,
+    chunk_graph: &ChunkGraph,
+    hasher: &mut StableHasher,
+) {
+    module.identity().hash(hasher);
+    module.identity().module_type.hash(hasher);
+    module.source_hash().hash(hasher);
+    module.build_error().map(ToString::to_string).hash(hasher);
+    module.is_harmony().hash(hasher);
+    module.code_generation_local_input_digest().hash(hasher);
     for dependency in module
         .presentational_dependencies()
         .iter()
@@ -435,14 +457,13 @@ fn compute_module_hash(
                 .flat_map(|block| block.dependencies()),
         )
     {
-        dependency
-            .update_code_generation_hash(module_graph.exports_info(module.handle()), &mut hasher);
+        dependency.update_code_generation_hash(module_graph.exports_info(module.handle()), hasher);
     }
     let references = chunk_graph.module_references(module_graph, module.handle());
-    references.module_render_id.hash(&mut hasher);
-    references.outgoing_module_render_ids.hash(&mut hasher);
-    references.block_chunk_render_ids.hash(&mut hasher);
-    ModuleHash::new(hasher.finish())
+    references.module_render_id.hash(hasher);
+    references.outgoing_module_render_ids.hash(hasher);
+    references.block_chunk_render_ids.hash(hasher);
+    references.concatenated_module_identities.hash(hasher);
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -140,6 +140,22 @@ _Avoid_: Chunk collection, chunk set
 The optimization that extracts modules shared by eligible Chunks into a separate Chunk and inserts it into each affected Chunk Group. The implemented first slice applies to Async Chunks and uses `optimization.splitChunks`.
 _Avoid_: Duplicate-module removal, shared bundle
 
+**Module Concatenation**:
+The `optimization.concatenateModules` optimization that combines eligible Harmony Modules from the same Chunk behind one rendered module factory while preserving evaluation order and live Export Bindings.
+_Avoid_: Minification, module merging, dependency concatenation
+
+**Concatenated Module**:
+The Code Generation owner for one Module Concatenation configuration. It keeps a Concatenation Root in the Chunk and incorporates the configuration's Concatenation Inner Modules into that root's generated source.
+_Avoid_: Shared Chunk, merged Module Graph node
+
+**Concatenation Root**:
+The Module whose Chunk membership and Render ID represent a Concatenated Module.
+_Avoid_: Entry Module, parent Module
+
+**Concatenation Inner Module**:
+An eligible Harmony Module removed from a Concatenation Root's Chunks because its generated source is incorporated into the Concatenated Module.
+_Avoid_: Child Module, inlined dependency
+
 **Entrypoint**:
 An initial chunk group created from a configured entry.
 _Avoid_: Entry chunk, main chunk

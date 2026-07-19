@@ -146,6 +146,31 @@ test("concatenated modules preserve free-name lookup and the runtime require ide
   }
 });
 
+test("module concatenation bails out for direct eval", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "unpack-concatenate-eval-"));
+  try {
+    await writeFixture(fixture, {
+      "src/index.js": [
+        "import { value } from './value.js';",
+        "globalThis.CONCATENATE_MODULES_RESULT = value;",
+        "export { value };"
+      ].join("\n"),
+      "src/value.js": [
+        "const observed = eval(\"typeof __webpack_concatenation_exports__0\");",
+        "export const value = observed === 'undefined' ? 42 : 0;"
+      ].join("\n")
+    });
+
+    const unpackObservation = await runUnpack(fixture, join(fixture, "dist-unpack"), true);
+    const webpackObservation = await runWebpack(fixture, join(fixture, "dist-webpack"), true);
+    assert.deepEqual(unpackObservation, webpackObservation);
+    assert.deepEqual(unpackObservation, { chunkModuleCount: 2, runtimeValue: 42 });
+  } finally {
+    delete (globalThis as { CONCATENATE_MODULES_RESULT?: number }).CONCATENATE_MODULES_RESULT;
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("concatenated modules retain each original source in sourcemaps", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "unpack-concatenate-sourcemap-"));
   try {

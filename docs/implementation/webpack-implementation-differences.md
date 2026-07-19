@@ -264,7 +264,9 @@ Inner Modules to be present in all Concatenation Root Chunks, recursively pulls
 in same-Chunk Harmony importers, and bails out when an active importer belongs
 to different Chunks or uses a non-concatenatable dependency. Inner Modules are
 disconnected from the Root's Chunks before ID Assignment, so the rendered
-Bundle contains one module-table factory for the configuration.
+Bundle contains one module-table factory for the configuration. Direct
+`eval()` is retained as a parser/build bailout in line with webpack's scope
+visibility constraint.
 
 Webpack allocates a synthetic `ConcatenatedModule`, replaces the root Module,
 moves connections, analyzes and renames top-level bindings, and directly

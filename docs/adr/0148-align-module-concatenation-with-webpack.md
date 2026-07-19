@@ -12,7 +12,8 @@ production and disabled in development and none mode. A Concatenation Inner
 Module must be in every Chunk of the Concatenation Root, must not be an Entry
 Module, and must have only active concatenatable Harmony references within the
 configuration's Chunks. Modules referenced from different Chunks remain
-separate factories.
+separate factories. Modules using direct `eval()` also remain separate because
+their dynamically named scope references cannot be made collision-safe.
 
 ## Dense-handle adaptation
 

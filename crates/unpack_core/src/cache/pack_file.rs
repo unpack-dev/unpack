@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(MODULE_BUILD_RECORD_TYPE_ID.as_bytes(), b"unpack.moduleb.1");
         assert_eq!(
             ModuleBuildRecordCodec::current().codec_id(),
-            StableCodecId::new(*b"unpack.modb.c004")
+            StableCodecId::new(*b"unpack.modb.c005")
         );
         let mut pack_file = PackFile::open(temp.path(), serializer);
         for (address, _, record) in records {
@@ -1828,6 +1828,7 @@ mod tests {
                 identifiers: vec!["value".to_string()],
                 data: ParsedModuleDataDto::JavaScript,
                 build_side_effect_free: Some(true),
+                uses_direct_eval: false,
             },
             source_hash: stable_hash(&source),
             source,
@@ -1945,7 +1946,7 @@ const BROTLI_QUALITY: u32 = 5;
 const BROTLI_WINDOW_BITS: u32 = 22;
 const GZIP_LEVEL: u32 = 6;
 const RESOLVE_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.rslv.c001");
-const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c004");
+const MODULE_BUILD_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.modb.c005");
 const CODE_GENERATION_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.cgen.c003");
 const ASSET_RENDER_RECORD_CODEC_ID: StableCodecId = StableCodecId::new(*b"unpack.astr.c001");
 pub(crate) const RESOLVE_RECORD_TYPE_ID: StableTypeId = StableTypeId::new(*b"unpack.resolve.1");
@@ -2257,6 +2258,7 @@ pub(crate) struct ParsedModuleDto {
     pub(crate) identifiers: Vec<String>,
     pub(crate) data: ParsedModuleDataDto,
     pub(crate) build_side_effect_free: Option<bool>,
+    pub(crate) uses_direct_eval: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2954,6 +2956,7 @@ impl TryFrom<&ParsedModule> for ParsedModuleDto {
                 }
             },
             build_side_effect_free: parsed.build_meta.side_effect_free,
+            uses_direct_eval: parsed.build_meta.uses_direct_eval,
         })
     }
 }
@@ -2969,6 +2972,7 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
             identifiers,
             data,
             build_side_effect_free,
+            uses_direct_eval,
         } = parsed;
         let dependencies = dependencies
             .into_iter()
@@ -3016,6 +3020,7 @@ impl TryFrom<ParsedModuleDto> for ParsedModule {
             },
             build_meta: crate::parser::JavascriptBuildMeta {
                 side_effect_free: build_side_effect_free,
+                uses_direct_eval,
             },
         })
     }
@@ -3453,6 +3458,7 @@ fn encode_module_build_record(record: &ModuleBuildRecordDto) -> io::Result<Vec<u
         Some(false) => 1,
         Some(true) => 2,
     });
+    encoder.write_u8(u8::from(record.parsed.uses_direct_eval));
     Ok(encoder.finish())
 }
 
@@ -3467,6 +3473,11 @@ fn decode_module_build_record(bytes: &[u8]) -> Option<ModuleBuildRecordDto> {
         0 => None,
         1 => Some(false),
         2 => Some(true),
+        _ => return None,
+    };
+    parsed.uses_direct_eval = match decoder.read_u8()? {
+        0 => false,
+        1 => true,
         _ => return None,
     };
     decoder.finish()?;
@@ -3549,6 +3560,7 @@ fn decode_parsed_module(decoder: &mut Decoder<'_>) -> Option<ParsedModuleDto> {
         identifiers,
         data,
         build_side_effect_free: None,
+        uses_direct_eval: false,
     })
 }
 

@@ -217,6 +217,7 @@ fn module_can_concatenate(
     };
     module.identity().module_type == ModuleType::JavaScriptAuto
         && module.is_harmony()
+        && !module.uses_direct_eval()
         && module.build_error().is_none()
         && !chunk_graph.module_chunks(handle).is_empty()
 }

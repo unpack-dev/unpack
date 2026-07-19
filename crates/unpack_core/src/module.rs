@@ -258,6 +258,10 @@ impl Module {
         &self.data.built_content.parsed().identifiers
     }
 
+    pub(crate) fn uses_direct_eval(&self) -> bool {
+        self.data.built_content.parsed().build_meta.uses_direct_eval
+    }
+
     #[cfg(test)]
     pub(crate) fn built_content(&self) -> &Arc<BuiltModuleContent> {
         &self.data.built_content

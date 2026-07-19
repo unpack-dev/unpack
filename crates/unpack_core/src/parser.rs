@@ -41,6 +41,7 @@ pub(crate) struct ParsedModule {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct JavascriptBuildMeta {
     pub side_effect_free: Option<bool>,
+    pub uses_direct_eval: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1226,6 +1227,7 @@ fn parse_module_dependencies_sync(
     module.visit_with(&mut identifier_collector);
     parsed.identifiers = identifier_collector.identifiers.into_iter().collect();
     parsed.identifiers.sort();
+    parsed.build_meta.uses_direct_eval = identifier_collector.uses_direct_eval;
     let pure_analysis = hooks
         .requires_pure_analysis
         .then(|| PureAnalysis::new(&comments, &module));
@@ -1259,11 +1261,30 @@ fn parse_module_dependencies_sync(
 #[derive(Default)]
 struct IdentifierCollector {
     identifiers: FxHashSet<String>,
+    uses_direct_eval: bool,
 }
 
 impl<'a> Visit<'a> for IdentifierCollector {
+    fn visit_call_expr(&mut self, node: &CallExpr<'a>) {
+        if matches!(
+            &node.callee,
+            Callee::Expr(expression) if expression_is_direct_eval(expression)
+        ) {
+            self.uses_direct_eval = true;
+        }
+        node.visit_children_with(self);
+    }
+
     fn visit_ident(&mut self, node: &Ident<'a>) {
         self.identifiers.insert(ident_to_string(node));
+    }
+}
+
+fn expression_is_direct_eval(expression: &Expr<'_>) -> bool {
+    match expression {
+        Expr::Ident(identifier) => identifier.sym.as_str() == "eval",
+        Expr::Paren(parenthesized) => expression_is_direct_eval(&parenthesized.expr),
+        _ => false,
     }
 }
 
@@ -2035,6 +2056,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(parsed.identifiers, ["alpha", "freeValue", "read"]);
+    }
+
+    #[test]
+    fn parser_marks_direct_eval_but_not_indirect_eval() {
+        let direct = parse_module_dependencies_with_hooks(
+            Path::new("module.js"),
+            "export const value = (eval)('value');",
+            &JavascriptParserHookSet::default(),
+        )
+        .unwrap();
+        let indirect = parse_module_dependencies_with_hooks(
+            Path::new("module.js"),
+            "export const value = (0, eval)('value');",
+            &JavascriptParserHookSet::default(),
+        )
+        .unwrap();
+
+        assert!(direct.build_meta.uses_direct_eval);
+        assert!(!indirect.build_meta.uses_direct_eval);
     }
 
     #[test]

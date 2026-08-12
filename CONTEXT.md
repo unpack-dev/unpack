@@ -370,7 +370,7 @@ _Avoid_: Context module snapshot, directory cache, folder watch event
 
 **Snapshot Merge**:
 The File System Info operation that combines two file snapshots into one validation record while preserving each snapshot content category.
-_Avoid_: Manifest merge, cache pack merge, dependency concatenation
+_Avoid_: Manifest merge, persistent cache merge, dependency concatenation
 
 **Missing Existence Snapshot**:
 A recorded absence check for a filesystem input where cache validation only needs to know whether that path has appeared.
@@ -417,16 +417,12 @@ A file snapshot of the resolution work needed to find configured build dependenc
 _Avoid_: Build dependency snapshot, resolver cache entry
 
 **Persistent Cache**:
-A build cache stored outside the process so later compiler instances can reuse validated build information.
+A Build Cache layer retained outside a Compiler process so later Compiler instances can reuse validated Cache Items.
 _Avoid_: Disk cache, offline cache
 
 **Persistent Cache Container**:
-The restorable unit of Persistent Cache data governed by one cache location, version, and Build Dependency validation boundary.
+The atomically published and restorable unit of Persistent Cache data governed by one cache location, version, and Build Dependency validation boundary.
 _Avoid_: Cache Pack, cache directory
-
-**Cache Pack**:
-A grouped persistent cache storage unit that holds multiple cache items plus metadata needed to find and validate them.
-_Avoid_: Module cache file, cache blob
 
 **Memory Cache Generation**:
 One completed Compilation step used to age unused Memory Cache entries.

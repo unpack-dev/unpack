@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
@@ -28,13 +28,13 @@ test("cache booleans override mode-dependent defaults", async () => {
   await assertCacheOverrideBehavior("development", false, "after");
 });
 
-test("Linux process termination during PackFile publication never exposes a partial revision", async (t) => {
+test("Linux process termination before a turbo-persistence commit never exposes a partial revision", async (t) => {
   if (process.platform !== "linux") {
     t.skip("Persistent Cache crash recovery is a Linux-only contract");
     return;
   }
 
-  for (const point of ["after-content-commit", "before-index-replace"] as const) {
+  for (const point of ["before-transaction-commit"] as const) {
     const fixture = await createFixture({
       "src/index.js": "import { value } from './dep.js'; export { value };",
       "src/dep.js": "export const value = 'before';"
@@ -52,11 +52,17 @@ test("Linux process termination during PackFile publication never exposes a part
     try {
       const initial = await runCacheProcess(request);
       assert.equal(initial.error, null);
+      const currentPath = join(cacheLocation, "turbo-persistence/CURRENT");
+      const committedSequence = await readTurboPersistenceSequence(currentPath);
       await writeFile(join(fixture, "src/dep.js"), "export const value = 'after';", "utf8");
       const termination = await runCacheProcessExpectTermination(request, {
         env: { UNPACK_TEST_PERSISTENT_CACHE_CRASH_AT: point }
       });
       assert.ok(termination.signal === "SIGABRT" || termination.code !== 0);
+      assert.equal(
+        await readTurboPersistenceSequence(currentPath),
+        committedSequence
+      );
       const recovered = await runCacheProcess(request);
       assert.equal(recovered.error, null);
       assert.deepEqual(recovered.assets, ["main.js"]);
@@ -393,25 +399,27 @@ test("validates inert fields and active persistent cache controls", async () => 
       ["brotli", "brotli"]
     ] as const) {
       const compressedLocation = join(cacheLocation, label);
-      const accepted = createCompiler({
-        type: "filesystem",
-        cacheLocation: compressedLocation,
-        compression,
-        allowCollectingMemory: false
-      })();
-      assert.equal((await runCompiler(accepted)).err, null);
-      await closeCompiler(accepted);
-      const suffix =
-        compression === "gzip"
-          ? ".bin.gz"
-          : compression === "brotli"
-            ? ".bin.br"
-            : ".bin";
+      const { cold, warm } = await runColdWarmBuilds({
+        bundler: "unpack",
+        options: {
+          context: fixture,
+          entry: "./src/index.js",
+          mode: "none",
+          outputPath: join(fixture, `dist-${label}`),
+          cache: {
+            type: "filesystem",
+            cacheLocation: compressedLocation,
+            compression,
+            allowCollectingMemory: false
+          }
+        }
+      });
+      assert.equal(cold.error, null);
+      assert.equal(warm.error, null);
       assert.ok(
-        (await readdir(join(compressedLocation, "content"))).every((file) =>
-          file.endsWith(suffix)
-        )
+        await stat(join(compressedLocation, "turbo-persistence/CURRENT"))
       );
+      assert.ok((warm.cacheWork?.moduleBuild.restores ?? 0) >= 1);
     }
 
     const compiler = unpack({
@@ -434,11 +442,7 @@ test("validates inert fields and active persistent cache controls", async () => 
 
     assert.equal(result.err, null);
     assert.match(await readFile(join(fixture, "dist/main.js"), "utf8"), /inert-options/);
-    assert.ok(
-      (await readdir(join(cacheLocation, "content"))).every((file) =>
-        file.endsWith(".bin.gz")
-      )
-    );
+    assert.ok(await stat(join(cacheLocation, "turbo-persistence/CURRENT")));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -747,7 +751,7 @@ test("Asset Render records restore source while each process finalizes and emits
   }
 });
 
-test("resolved Build Dependency requests guard PackFile entries across processes", async () => {
+test("resolved Build Dependency requests guard Persistent Cache entries across processes", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const result = 'ok';",
     "config/tool.js": "export default 'before';"
@@ -801,7 +805,7 @@ test("resolved Build Dependency requests guard PackFile entries across processes
   }
 });
 
-test("Build Dependency re-resolution preserves PackFile when package metadata selects the same input", async () => {
+test("Build Dependency re-resolution preserves the Persistent Cache when package metadata selects the same input", async () => {
   const fixture = await createFixture({
     "src/index.js": "export const result = 'ok';",
     "node_modules/config-pkg/package.json": JSON.stringify({
@@ -1001,7 +1005,7 @@ test("cache version is an exact container guard at the same location", async () 
   }
 });
 
-test("legacy JSON and CBOR cache files remain untouched and are treated as cold", async () => {
+test("legacy JSON, CBOR, and PackFile cache files remain untouched and are treated as cold", async () => {
   const fixture = await createFixture({
     "src/index.js": "import './dep.js'; export const result = 'legacy-cold';",
     "src/dep.js": "export const value = 1;"
@@ -1009,6 +1013,7 @@ test("legacy JSON and CBOR cache files remain untouched and are treated as cold"
   const cacheLocation = join(fixture, ".cache/unpack/legacy");
   const manifestPath = join(cacheLocation, "container.json");
   const packPath = join(cacheLocation, "packs/modules.cbor");
+  const indexPath = join(cacheLocation, "index.pack");
   const manifest = Buffer.from(
     JSON.stringify({
       magic: "UNPACK_PERSISTENT_CACHE",
@@ -1037,6 +1042,8 @@ test("legacy JSON and CBOR cache files remain untouched and are treated as cold"
   await mkdir(dirname(packPath), { recursive: true });
   await writeFile(manifestPath, manifest);
   await writeFile(packPath, pack);
+  const index = Buffer.from("UNPACK-PACKFILE-INDEX\0legacy");
+  await writeFile(indexPath, index);
 
   try {
     const observation = await runCacheProcess({
@@ -1058,6 +1065,39 @@ test("legacy JSON and CBOR cache files remain untouched and are treated as cold"
     });
     assert.deepEqual(await readFile(manifestPath), manifest);
     assert.deepEqual(await readFile(packPath), pack);
+    assert.deepEqual(await readFile(indexPath), index);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("corrupt turbo-persistence state is treated as cold and rebuilt on publication", async () => {
+  const fixture = await createFixture({
+    "src/index.js": "import './dep.js'; export const result = 'recovered';",
+    "src/dep.js": "export const value = 1;"
+  });
+  const cacheLocation = join(fixture, ".cache/unpack/corrupt-turbo-persistence");
+  const currentPath = join(cacheLocation, "turbo-persistence/CURRENT");
+  await mkdir(dirname(currentPath), { recursive: true });
+  await writeFile(currentPath, "not a turbo-persistence CURRENT file\n", "utf8");
+
+  try {
+    const { cold, warm } = await runColdWarmBuilds({
+      bundler: "unpack",
+      options: {
+        context: fixture,
+        mode: "none",
+        outputPath: join(fixture, "dist"),
+        cache: { type: "filesystem", cacheLocation }
+      }
+    });
+
+    assert.equal(cold.error, null);
+    assert.equal(warm.error, null);
+    assert.ok((cold.cacheWork?.moduleBuild.misses ?? 0) >= 1);
+    assert.ok((warm.cacheWork?.moduleBuild.restores ?? 0) >= 1);
+    const current = await readFile(currentPath, "utf8");
+    assert.doesNotThrow(() => JSON.parse(current));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -1309,6 +1349,18 @@ async function closeCompiler(compiler: Compiler) {
   await new Promise<void>((resolve, reject) => {
     compiler.close((err) => (err ? reject(err) : resolve()));
   });
+}
+
+async function readTurboPersistenceSequence(
+  currentPath: string
+): Promise<number> {
+  const current = JSON.parse(await readFile(currentPath, "utf8")) as {
+    max_sequence_number?: unknown;
+  };
+  if (typeof current.max_sequence_number !== "number") {
+    throw new TypeError("invalid turbo-persistence CURRENT sequence");
+  }
+  return current.max_sequence_number;
 }
 
 async function createFixture(files: Record<string, string>) {

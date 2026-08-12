@@ -1076,7 +1076,11 @@ test("accepts filesystem cache option shape", async () => {
 
     assert.equal(first.err, null);
     assert.equal(first.stats?.hasErrors(), false);
-    assert.ok(await stat(join(fixture, ".cache/unpack/test-cache/index.pack")));
+    assert.ok(
+      await stat(
+        join(fixture, ".cache/unpack/test-cache/turbo-persistence/CURRENT")
+      )
+    );
     await assert.rejects(
       stat(join(fixture, ".cache/unpack/test-cache/container.json"))
     );
@@ -1118,12 +1122,14 @@ test("filesystem cache flushes after the initial-store timeout", async () => {
   try {
     const result = await runExistingCompiler(compiler);
     assert.equal(result.err, null);
-    await assert.rejects(stat(join(cacheLocation, "index.pack")));
+    await assert.rejects(
+      stat(join(cacheLocation, "turbo-persistence/CURRENT"))
+    );
 
     await waitForObservation(
-      () => stat(join(cacheLocation, "index.pack")),
+      () => stat(join(cacheLocation, "turbo-persistence/CURRENT")),
       () => true,
-      "initial PackFile publication"
+      "initial persistent cache publication"
     );
   } finally {
     await closeCompiler(compiler);
@@ -1137,7 +1143,7 @@ test("repeated run uses the ordinary idle cache timeout", async () => {
   });
   const entry = join(fixture, "src/index.js");
   const cacheLocation = join(fixture, ".cache/unpack/ordinary-idle");
-  const indexPath = join(cacheLocation, "index.pack");
+  const currentPath = join(cacheLocation, "turbo-persistence/CURRENT");
   const compiler = unpack({
     context: fixture,
     entry: "./src/index.js",
@@ -1153,9 +1159,9 @@ test("repeated run uses the ordinary idle cache timeout", async () => {
   try {
     assert.equal((await runExistingCompiler(compiler)).err, null);
     const firstRevision = await waitForObservation(
-      () => readFile(indexPath),
-      () => true,
-      "initial PackFile revision"
+      () => readTurboPersistenceSequence(currentPath),
+      (revision) => revision > 0,
+      "initial turbo-persistence revision"
     );
 
     await writeFile(entry, "export const value = 'after';", "utf8");
@@ -1164,13 +1170,13 @@ test("repeated run uses the ordinary idle cache timeout", async () => {
     assert.equal((await runExistingCompiler(compiler)).err, null);
 
     await delay(60);
-    assert.deepEqual(await readFile(indexPath), firstRevision);
+    assert.equal(await readTurboPersistenceSequence(currentPath), firstRevision);
     const nextRevision = await waitForObservation(
-      () => readFile(indexPath),
-      (revision) => !revision.equals(firstRevision),
-      "ordinary-idle PackFile revision"
+      () => readTurboPersistenceSequence(currentPath),
+      (revision) => revision > firstRevision,
+      "ordinary-idle turbo-persistence revision"
     );
-    assert.notDeepEqual(nextRevision, firstRevision);
+    assert.ok(nextRevision > firstRevision);
   } finally {
     await closeCompiler(compiler);
     await rm(fixture, { recursive: true, force: true });
@@ -1197,7 +1203,7 @@ test("compiler close waits for pending filesystem cache flush", async () => {
     assert.equal(result.err, null);
 
     await closeCompiler(compiler);
-    assert.ok(await stat(join(cacheLocation, "index.pack")));
+    assert.ok(await stat(join(cacheLocation, "turbo-persistence/CURRENT")));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -1405,10 +1411,12 @@ test("watch close settles pending filesystem cache work and keeps compiler reusa
     const first = results.next();
     const watching = compiler.watch({}, results.handler);
     assert.equal((await first).err, null);
-    await assert.rejects(stat(join(cacheLocation, "index.pack")));
+    await assert.rejects(
+      stat(join(cacheLocation, "turbo-persistence/CURRENT"))
+    );
 
     await closeWatching(watching);
-    assert.ok(await stat(join(cacheLocation, "index.pack")));
+    assert.ok(await stat(join(cacheLocation, "turbo-persistence/CURRENT")));
     assert.equal((await runExistingCompiler(compiler)).err, null);
     await closeCompiler(compiler);
   } finally {
@@ -1454,7 +1462,7 @@ test("watch invalidation uses the post-large-change cache timeout", async () => 
   });
   const entry = join(fixture, "src/index.js");
   const cacheLocation = join(fixture, ".cache/unpack/watch-large-change");
-  const indexPath = join(cacheLocation, "index.pack");
+  const currentPath = join(cacheLocation, "turbo-persistence/CURRENT");
   const compiler = unpack({
     context: fixture,
     entry: "./src/index.js",
@@ -1472,8 +1480,11 @@ test("watch invalidation uses the post-large-change cache timeout", async () => 
     const first = results.next();
     const watching = compiler.watch({}, results.handler);
     assert.equal((await first).err, null);
-    await delay(120);
-    const firstRevision = await readFile(indexPath);
+    const firstRevision = await waitForObservation(
+      () => readTurboPersistenceSequence(currentPath),
+      (revision) => revision > 0,
+      "initial watch turbo-persistence revision"
+    );
 
     const second = results.next();
     await writeFile(entry, "export const value = 'after';", "utf8");
@@ -1483,9 +1494,11 @@ test("watch invalidation uses the post-large-change cache timeout", async () => 
     assert.equal((await second).err, null);
 
     await delay(60);
-    assert.deepEqual(await readFile(indexPath), firstRevision);
+    assert.equal(await readTurboPersistenceSequence(currentPath), firstRevision);
     await delay(180);
-    assert.notDeepEqual(await readFile(indexPath), firstRevision);
+    assert.ok(
+      (await readTurboPersistenceSequence(currentPath)) > firstRevision
+    );
     await closeWatching(watching);
     await closeCompiler(compiler);
   } finally {
@@ -1874,8 +1887,7 @@ test("cache profile reports persistent activity through infrastructure logging o
       "serialization",
       "deserialization",
       "garbage collection",
-      "merge",
-      "split",
+      "turbo-persistence transaction",
       "compaction"
     ]) {
       assert.ok(profile.some((message) => message.includes(activity)), activity);
@@ -2465,6 +2477,18 @@ function delay(ms: number) {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+async function readTurboPersistenceSequence(
+  currentPath: string
+): Promise<number> {
+  const current = JSON.parse(await readFile(currentPath, "utf8")) as {
+    max_sequence_number?: unknown;
+  };
+  if (typeof current.max_sequence_number !== "number") {
+    throw new TypeError("invalid turbo-persistence CURRENT sequence");
+  }
+  return current.max_sequence_number;
 }
 
 async function waitForObservation<T>(

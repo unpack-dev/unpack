@@ -3,7 +3,7 @@
 Unpack will model webpack's `cacheUnaffected` and
 `memoryCacheUnaffected` options with a Compiler-owned Module Computation Cache,
 separate from the record-oriented Build Cache layers used for Module Build,
-Code Generation, Asset Render, and PackFile storage. Both caches may share the
+Code Generation, Asset Render, and Persistent Cache storage. Both caches may share the
 Compiler as their composition root, configuration, and diagnostics, but Module
 Computation entries must not flow through ordinary cache facade `store`, layer
 promotion, generation retention, or persistent publication.
@@ -35,7 +35,7 @@ identities must include the Runtime Spec as webpack's do.
 
 Filesystem `memoryCacheUnaffected` remains active even when ordinary
 `maxMemoryGenerations` is zero, and Module Computation entries from either
-stage are never written to PackFile.
+stage are never written to Persistent Cache.
 
 This supersedes ADR 0130's exclusion of cache-unaffected behavior and rejects
 the earlier design that represented unaffected computations as an unbounded

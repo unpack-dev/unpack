@@ -38,15 +38,17 @@ Add file snapshot validation before persistent cache.
 - Default build-dependency snapshots to timestamp plus content-hash validation.
 - Surface normalized cache and snapshot options through the native boundary.
 
-## Slice 4: Persistent Cache Packs
+## Slice 4: Persistent Cache Storage
 
 Add filesystem cache as an opt-in cache layer.
 
-- Store persistent cache items in cache packs under a cache location.
-- Store container metadata for cache version, build-dependency snapshot, and cache item metadata.
-- Store container guards and Cache Item metadata in an Unpack-private binary index, with explicit codecs and lazily referenced content packs.
+- Store Persistent Cache data through the vendored `turbo-persistence` database at `cacheLocation/turbo-persistence`.
+- Keep the container guard, four Cache Item DTO and codec families, and an Unpack-owned manifest for ETag, type and codec identity, access aging, and `maxAge` retention.
+- Publish the guard, manifest, record changes, and deletions in one transaction; turbo-persistence's `CURRENT` update makes the new container state visible atomically.
+- Apply configured gzip or Brotli compression to each Unpack record envelope before storing it through turbo-persistence.
+- Treat the former `index.pack` and content-pack format as cold without migration, legacy reads, dual reads, or dual writes.
 - Queue persistent writes and flush them during compiler idle.
-- Close waits for pending cache flushes or reports infrastructure errors.
+- Preserve best-effort single-writer behavior: failures log and fall back to misses, while close waits for pending cache work.
 
 ## Slice 5: Watch Dependency Sets and Watch Session
 

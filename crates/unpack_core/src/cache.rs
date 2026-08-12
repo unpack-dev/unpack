@@ -10,6 +10,7 @@ mod memory_with_gc_cache_plugin;
 mod options;
 pub(crate) mod pack_file;
 mod pack_file_cache_strategy;
+pub(crate) mod turbo_persistence_storage;
 
 pub use options::{BuildDependency, CacheCompression, CacheKind, CacheOptions};
 

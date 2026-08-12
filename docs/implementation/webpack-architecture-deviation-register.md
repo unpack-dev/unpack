@@ -68,7 +68,7 @@ documented deviations or staged webpack scope.
   parser-hook surface is introduced. Move registration to the webpack-equivalent
   boundary without moving analysis policy into Make.
 
-### DEV-003: Cache lifecycle and serialization use typed Rust seams
+### DEV-003: Cache lifecycle and persistence use typed Rust seams
 
 - **Status**: Confirmed deviation.
 - **Performance-driven**: No. The constraints are Rust typing, ownership, and
@@ -77,9 +77,11 @@ documented deviations or staged webpack scope.
   PackFile serialization is divided into reusable serializer and middleware
   responsibilities.
 - **Current shape**: Compiler-owned `Cache` uses explicit lifecycle methods and
-  typed Cache Layers. The reusable Serializer is separate, while binary framing
-  and file/index persistence remain private Pack File responsibilities.
-- **Confirmation**: ADR 0131 and
+  typed Cache Layers. The reusable Serializer and four Cache Item DTO and codec
+  families remain Unpack-owned, while durable key-value, index, transaction, and
+  compaction work is delegated to a directly vendored, pinned
+  `turbo-persistence` behind the private Persistent Cache adapter.
+- **Confirmation**: ADR 0131, ADR 0148, and
   `docs/implementation/webpack-implementation-differences.md` document these
   boundaries.
 - **Refactor when**: public cache plugin hooks, Binary Middleware, or File

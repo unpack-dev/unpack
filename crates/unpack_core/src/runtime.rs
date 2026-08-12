@@ -47,7 +47,7 @@ const RUNTIME_REQUIREMENTS_MASK: u16 = {
 
 impl RuntimeRequirement {
     const fn bit(self) -> u16 {
-        // These bit positions are persisted in PackFile records. Keep existing
+        // These bit positions are persisted in Persistent Cache records. Keep existing
         // positions stable when adding or reordering the enum variants.
         match self {
             Self::ModuleFactories => 0,
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_requirement_masks_keep_pack_file_bit_positions_stable() {
+    fn runtime_requirement_masks_keep_persistent_cache_bit_positions_stable() {
         let persisted_bits = [
             (RuntimeRequirement::ModuleFactories, 0),
             (RuntimeRequirement::ModuleCache, 1),

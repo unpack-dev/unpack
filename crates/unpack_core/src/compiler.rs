@@ -881,12 +881,8 @@ mod tests {
     use super::*;
     use crate::{
         BuildDependency,
-        cache::pack_file::{
-            ModuleBuildRecordCodec, ModuleBuildRecordDto, PackFile, ResolveRecordCodec,
-            ResolveRecordDto,
-        },
+        cache::turbo_persistence_storage::TurboPersistenceStorage,
         cache::{CacheItemFamily, CacheItemWork},
-        serialization::Serializer,
     };
 
     #[test]
@@ -1502,7 +1498,7 @@ mod tests {
                 module_hash_misses: 2,
                 post_id_assignment_invalidated_modules: 0,
             },
-            "Module Computation memos must not be restored from PackFile"
+            "Module Computation memos must not be restored from Persistent Cache storage"
         );
 
         Ok(())
@@ -1531,7 +1527,7 @@ mod tests {
         let first = first_compiler.run().await?;
         first_compiler.flush_cache()?;
         assert_eq!(first.errors(), []);
-        assert!(PackFile::index_path(&cache_location).exists());
+        assert!(TurboPersistenceStorage::current_path(&cache_location).exists());
         assert!(!cache_location.join("container.json").exists());
         assert!(!cache_location.join("packs/modules.cbor").exists());
 
@@ -1658,13 +1654,13 @@ mod tests {
 
         let compiler = Compiler::new(options);
         compiler.run().await?;
-        assert!(!PackFile::index_path(&cache_location).exists());
+        assert!(!TurboPersistenceStorage::current_path(&cache_location).exists());
 
         tokio::time::advance(std::time::Duration::from_millis(19)).await;
-        assert!(!PackFile::index_path(&cache_location).exists());
+        assert!(!TurboPersistenceStorage::current_path(&cache_location).exists());
         tokio::time::advance(std::time::Duration::from_millis(1)).await;
         compiler.wait_for_idle_cache_publication().await;
-        assert!(PackFile::index_path(&cache_location).exists());
+        assert!(TurboPersistenceStorage::current_path(&cache_location).exists());
         Ok(())
     }
 
@@ -1685,12 +1681,12 @@ mod tests {
             .run_until_finalize(CacheIdleReason::Ordinary, false, None)
             .await?;
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        assert!(!PackFile::index_path(&cache_location).exists());
+        assert!(!TurboPersistenceStorage::current_path(&cache_location).exists());
 
         let compilation = pending.finish();
         assert_eq!(compilation.errors(), []);
         compiler.wait_for_idle_cache_publication().await;
-        assert!(PackFile::index_path(&cache_location).exists());
+        assert!(TurboPersistenceStorage::current_path(&cache_location).exists());
         Ok(())
     }
 
@@ -1708,11 +1704,11 @@ mod tests {
 
         let compiler = Compiler::new(options);
         compiler.run().await?;
-        assert!(!PackFile::index_path(&cache_location).exists());
+        assert!(!TurboPersistenceStorage::current_path(&cache_location).exists());
 
         let outcome = compiler.settle_cache().await;
         assert_eq!(outcome.diagnostic(), None);
-        assert!(PackFile::index_path(&cache_location).exists());
+        assert!(TurboPersistenceStorage::current_path(&cache_location).exists());
         assert_eq!(compiler.run().await?.errors(), []);
         Ok(())
     }
@@ -1731,10 +1727,10 @@ mod tests {
 
         let compiler = Compiler::new(options);
         compiler.run().await?;
-        assert!(!PackFile::index_path(&cache_location).exists());
+        assert!(!TurboPersistenceStorage::current_path(&cache_location).exists());
 
         assert_eq!(compiler.shutdown().await.diagnostic(), None);
-        assert!(PackFile::index_path(&cache_location).exists());
+        assert!(TurboPersistenceStorage::current_path(&cache_location).exists());
         assert_eq!(compiler.shutdown().await.diagnostic(), None);
         assert!(matches!(
             compiler.run().await,
@@ -1764,10 +1760,10 @@ mod tests {
         compiler.run().await?;
 
         tokio::time::advance(std::time::Duration::from_millis(49)).await;
-        assert!(!PackFile::index_path(&cache_location).exists());
+        assert!(!TurboPersistenceStorage::current_path(&cache_location).exists());
         tokio::time::advance(std::time::Duration::from_millis(1)).await;
         compiler.wait_for_idle_cache_publication().await;
-        assert!(PackFile::index_path(&cache_location).exists());
+        assert!(TurboPersistenceStorage::current_path(&cache_location).exists());
         Ok(())
     }
 
@@ -1806,10 +1802,7 @@ mod tests {
         assert_eq!(settling.await?.diagnostic(), None);
         assert_eq!(running.await??.errors(), []);
         assert_eq!(compiler.settle_cache().await.diagnostic(), None);
-        let serializer = Serializer::new()
-            .with_codec::<ResolveRecordDto, _>(ResolveRecordCodec::current())
-            .with_codec::<ModuleBuildRecordDto, _>(ModuleBuildRecordCodec::current());
-        assert_eq!(PackFile::open(&cache_location, serializer).revision(), 2);
+        assert_eq!(TurboPersistenceStorage::revision_at(&cache_location)?, 2);
         Ok(())
     }
 
@@ -1858,7 +1851,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aged_filesystem_entries_restore_from_pack_without_reusing_a_compilation_graph()
+    async fn aged_filesystem_entries_restore_from_persistent_storage_without_reusing_a_compilation_graph()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let entry = temp.path().join("index.js");
@@ -1939,7 +1932,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_filesystem_memory_generations_read_directly_from_pack()
+    async fn zero_filesystem_memory_generations_read_directly_from_persistent_storage()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         write(

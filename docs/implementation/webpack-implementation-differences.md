@@ -78,13 +78,13 @@ Compilation module.
 
 Unpack's top-level `cache` and `cache_facade` modules map to webpack's root
 `Cache.js` and `CacheFacade.js` responsibilities. Memory Cache Plugin, Memory
-With GC Cache Plugin, and Pack File Cache Strategy implementations live in
+With GC Cache Plugin, and Persistent Cache Strategy implementations live in
 separate modules below the `cache` category. The private `Cache`
 module is the Compiler-owned deep module for lifecycle and facade composition;
 its private `CacheLayers` helper coordinates ordered storage adapters. Cache
-Items, options, and Pack File storage remain Rust-only helpers colocated with
-the webpack responsibility that owns them. There is no separate `BuildCache`
-type, file, or source hierarchy.
+Items, options, DTO codecs, and the Persistent Cache storage adapter remain
+Rust-only helpers colocated with the webpack responsibility that owns them.
+There is no separate `BuildCache` type, file, or source hierarchy.
 
 Webpack's `moduleMemCaches` and `moduleMemCaches2` use per-Module
 `WeakTupleMap` values. Unpack represents their implemented computations as
@@ -128,11 +128,23 @@ parallelism is unbounded, as recorded in ADR 0144.
 This layout change covers the cache-category alignment tracked by issue #217.
 The first serialization-layout slice moves generic Serializer identity,
 registration, type erasure, bounded encoding, and typed decoding into
-`serialization/serializer.rs`. Pack File record codecs remain beside their
-format-specific DTOs, and binary framing plus index persistence remain in the
-private Pack File storage module until later slices establish the corresponding
-Binary Middleware and File Middleware boundaries. The private format and codec
-behavior do not change during these physical moves.
+`serialization/serializer.rs`. The four Persistent Cache record codecs remain
+beside their Unpack-owned DTOs. A private adapter manifest retains Cache ETags,
+stable type and codec identities, and access-aging state used for `maxAge`;
+configured gzip or Brotli compression is applied in the record envelope.
+
+The lower durable key-value, index, transaction, and compaction implementation
+is directly vendored from `vercel/next.js`'s `turbo-persistence` at commit
+`cb36e1d5946eb3bf6473b535e9537a54f257ba27`, with narrow documented changes for
+stable Rust compatibility. Its database lives at
+`cacheLocation/turbo-persistence`. One transaction publishes the container
+guard, manifest, item changes, and deletions through `CURRENT`, preserving an
+atomic Persistent Cache Container boundary. Publication remains queued until
+Cache Idle Flush and follows the best-effort single-writer contract. The former
+Unpack-private `index.pack` and content-pack data is treated as cold without
+migration, legacy reads, dual reads, or dual writes. Invalid turbo-persistence
+state is also cold: writable caches rebuild the dedicated database on their
+next publication, while read-only caches leave it untouched.
 
 ## Normal module factory
 

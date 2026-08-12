@@ -6,10 +6,9 @@ use filetime::{FileTime, set_file_mtime};
 use tempfile::tempdir;
 
 use super::*;
-use crate::cache::pack_file_cache_strategy::persistent_serializer;
 use crate::{
     ModuleIdentity,
-    cache::pack_file::PackFile,
+    cache::turbo_persistence_storage::TurboPersistenceStorage,
     cache::{ResolveRecord, ResolveRequest},
     cache_facade::{CacheETag, CacheIdentifier, CacheKey},
     snapshot::FileSystemInfo,
@@ -300,7 +299,7 @@ async fn slow_persistent_decode_does_not_block_memory_or_other_persistent_hits()
     assert_eq!(
         other_completed_before_restore_release,
         Some(true),
-        "record decoding must not hold the PackFile reader lock"
+        "record decoding must not hold the Persistent Cache storage lock"
     );
     assert_eq!(
         clock.calls(),
@@ -603,14 +602,13 @@ async fn memory_hits_refresh_persistent_access_before_max_age_gc()
 }
 
 fn pack_revision(options: &CacheOptions) -> u64 {
-    PackFile::open(
+    TurboPersistenceStorage::revision_at(
         options
             .cache_location
             .as_ref()
             .expect("filesystem cache should have a location"),
-        persistent_serializer(),
     )
-    .revision()
+    .expect("turbo-persistence storage should open")
 }
 
 fn write(path: impl AsRef<Path>, source: &str) -> io::Result<()> {

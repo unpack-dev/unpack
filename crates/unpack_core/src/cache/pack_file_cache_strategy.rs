@@ -17,10 +17,9 @@ use crate::{
     SnapshotStrategy,
     cache::pack_file::{
         AccessStamp, AssetRenderRecordCodec, AssetRenderRecordDto, CodeGenerationRecordCodec,
-        CodeGenerationRecordDto, ModuleBuildRecordCodec, ModuleBuildRecordDto, PackFile,
-        PackFileAddress, PackFileCompression, PackFileETag, PackFileGuardDto, PackFileOpenOptions,
-        PackFilePublicationOptions, PackFileRestore as PackFileRecordRestore, PackFileRetention,
-        PackFileWriteBatch, PublicationBase, ResolveRecordCodec, ResolveRecordDto,
+        CodeGenerationRecordDto, ModuleBuildRecordCodec, ModuleBuildRecordDto, PackFileAddress,
+        PackFileCompression, PackFileETag, PackFileGuardDto, PackFilePublicationOptions,
+        PackFileRetention, PublicationBase, ResolveRecordCodec, ResolveRecordDto,
     },
     code_generation_record::CodeGenerationRecord,
     rendered_source::RenderedSource,
@@ -28,6 +27,10 @@ use crate::{
     snapshot::{FileSystemInfo, Snapshot},
 };
 use rustc_hash::FxHashMap;
+
+use super::turbo_persistence_storage::{
+    TurboPersistenceRestore, TurboPersistenceStorage, TurboPersistenceWriteBatch,
+};
 
 #[cfg(test)]
 use super::RestoreBarrier;
@@ -43,10 +46,10 @@ use crate::cache_facade::{
 };
 
 enum PreparedPersistentRecord {
-    Resolve(PackFileRecordRestore<ResolveRecordDto>),
-    ModuleBuild(PackFileRecordRestore<ModuleBuildRecordDto>),
-    CodeGeneration(PackFileRecordRestore<CodeGenerationRecordDto>),
-    AssetRender(PackFileRecordRestore<AssetRenderRecordDto>),
+    Resolve(TurboPersistenceRestore<ResolveRecordDto>),
+    ModuleBuild(TurboPersistenceRestore<ModuleBuildRecordDto>),
+    CodeGeneration(TurboPersistenceRestore<CodeGenerationRecordDto>),
+    AssetRender(TurboPersistenceRestore<AssetRenderRecordDto>),
 }
 
 pub(crate) struct PersistentCachePreparation<'a> {
@@ -61,7 +64,7 @@ pub(crate) struct PersistentCachePreparation<'a> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PersistentRestore {
-    pack_file: Arc<Mutex<PackFile>>,
+    storage: Arc<Mutex<TurboPersistenceStorage>>,
     reader_generation: u64,
     address: PackFileAddress,
     etag: Option<PackFileETag>,
@@ -76,22 +79,22 @@ impl PersistentRestore {
     pub(super) fn restore(&self) -> Option<CacheEntry> {
         let started = self.diagnostics.profile_enabled().then(Instant::now);
         let prepared = {
-            let mut pack_file = self
-                .pack_file
+            let storage = self
+                .storage
                 .lock()
-                .expect("PackFile mutex should not be poisoned");
+                .expect("Persistent Cache storage mutex should not be poisoned");
             match self.namespace {
                 RESOLVE_CACHE_NAMESPACE => PreparedPersistentRecord::Resolve(
-                    pack_file.prepare_restore(&self.address, self.etag.as_ref())?,
+                    storage.prepare_restore(&self.address, self.etag.as_ref())?,
                 ),
                 MODULE_BUILD_CACHE_NAMESPACE => PreparedPersistentRecord::ModuleBuild(
-                    pack_file.prepare_restore(&self.address, self.etag.as_ref())?,
+                    storage.prepare_restore(&self.address, self.etag.as_ref())?,
                 ),
                 CODE_GENERATION_CACHE_NAMESPACE => PreparedPersistentRecord::CodeGeneration(
-                    pack_file.prepare_restore(&self.address, self.etag.as_ref())?,
+                    storage.prepare_restore(&self.address, self.etag.as_ref())?,
                 ),
                 ASSET_RENDER_CACHE_NAMESPACE => PreparedPersistentRecord::AssetRender(
-                    pack_file.prepare_restore(&self.address, self.etag.as_ref())?,
+                    storage.prepare_restore(&self.address, self.etag.as_ref())?,
                 ),
                 _ => return None,
             }
@@ -143,13 +146,13 @@ impl PersistentRestore {
 
     pub(super) fn reads_from(&self, other: &Self) -> bool {
         self.reader_generation == other.reader_generation
-            && Arc::ptr_eq(&self.pack_file, &other.pack_file)
+            && Arc::ptr_eq(&self.storage, &other.storage)
     }
 }
 
 #[derive(Debug)]
 pub(super) struct PersistentTouch {
-    pack_file: Arc<Mutex<PackFile>>,
+    storage: Arc<Mutex<TurboPersistenceStorage>>,
     address: PackFileAddress,
     etag: Option<PackFileETag>,
     stamp: AccessStamp,
@@ -157,9 +160,9 @@ pub(super) struct PersistentTouch {
 
 impl PersistentTouch {
     pub(super) fn apply(&self) -> bool {
-        self.pack_file
+        self.storage
             .lock()
-            .expect("PackFile mutex should not be poisoned")
+            .expect("Persistent Cache storage mutex should not be poisoned")
             .touch(&self.address, self.etag.as_ref(), self.stamp)
     }
 }
@@ -168,10 +171,11 @@ impl PersistentTouch {
 pub(super) struct PackFileCacheLayer {
     root: Option<PathBuf>,
     serializer: Serializer,
-    pack_file: Option<Arc<Mutex<PackFile>>>,
+    storage: Option<Arc<Mutex<TurboPersistenceStorage>>>,
     reader_generation: u64,
     compression: PackFileCompression,
-    open_options: PackFileOpenOptions,
+    read_only: bool,
+    allow_collecting_memory: bool,
     publication_base: PublicationBase,
     active: bool,
     pending: FxHashMap<CacheAddress, CacheEntry>,
@@ -292,18 +296,35 @@ impl PackFileCacheLayer {
         let serializer = persistent_serializer();
         let root = options.cache_location.clone();
         let compression = options.compression.into();
-        let open_options = PackFileOpenOptions::new(options.allow_collecting_memory);
-        let pack_file = root.as_ref().map(|root| {
-            Arc::new(Mutex::new(PackFile::open_with_options(
+        let storage = root.as_ref().and_then(|root| {
+            match TurboPersistenceStorage::open(
                 root,
                 serializer.clone(),
-                open_options,
-            )))
+                options.readonly,
+                options.allow_collecting_memory,
+            ) {
+                Ok(storage) => {
+                    if let Some(reason) = storage.recovery_warning() {
+                        diagnostics.warn(format!(
+                            "could not restore turbo-persistence at {}: {reason}; treating Persistent Cache as cold and rebuilding it on the next publication",
+                            root.display()
+                        ));
+                    }
+                    Some(Arc::new(Mutex::new(storage)))
+                }
+                Err(error) => {
+                    diagnostics.warn(format!(
+                        "could not open turbo-persistence at {}: {error}; treating Persistent Cache as cold",
+                        root.display()
+                    ));
+                    None
+                }
+            }
         });
-        let has_standalone_guard = pack_file.as_ref().is_some_and(|pack_file| {
-            pack_file
+        let has_standalone_guard = storage.as_ref().is_some_and(|storage| {
+            storage
                 .lock()
-                .expect("PackFile mutex should not be poisoned")
+                .expect("Persistent Cache storage mutex should not be poisoned")
                 .guard()
                 .is_some_and(|guard| {
                     guard.build_dependencies.entries.is_empty()
@@ -312,11 +333,11 @@ impl PackFileCacheLayer {
         });
         let publication_base = if has_standalone_guard {
             PublicationBase::PreserveEntries {
-                expected_revision: pack_file
+                expected_revision: storage
                     .as_ref()
-                    .expect("standalone PackFile should be open")
+                    .expect("standalone Persistent Cache storage should be open")
                     .lock()
-                    .expect("PackFile mutex should not be poisoned")
+                    .expect("Persistent Cache storage mutex should not be poisoned")
                     .revision(),
             }
         } else {
@@ -331,14 +352,15 @@ impl PackFileCacheLayer {
         Self {
             root,
             serializer,
-            pack_file,
+            storage,
             reader_generation: 0,
             compression,
-            open_options,
+            read_only: options.readonly,
+            allow_collecting_memory: options.allow_collecting_memory,
             publication_base,
             // Compiler preparation validates non-empty Build Dependency guards before
             // work starts.  Standalone cache users have no such guard, and may safely
-            // restore the legacy empty-guard PackFile directly.
+            // restore an empty-guard Persistent Cache container directly.
             active: true,
             pending: FxHashMap::default(),
             diagnostics,
@@ -354,25 +376,33 @@ impl PackFileCacheLayer {
         stamp: AccessStamp,
         max_age: Duration,
     ) -> io::Result<()> {
-        let Some(root) = self.root.as_ref() else {
+        let Some(root) = self.root.clone() else {
             self.pending.clear();
             return Ok(());
         };
-        let before_entries = self.pack_file.as_ref().map_or(0, |pack_file| {
-            pack_file
-                .lock()
-                .expect("PackFile mutex should not be poisoned")
-                .entry_count()
-        });
+        if self.storage.is_none() {
+            self.storage = Some(Arc::new(Mutex::new(TurboPersistenceStorage::open(
+                &root,
+                self.serializer.clone(),
+                self.read_only,
+                self.allow_collecting_memory,
+            )?)));
+        }
+        let storage = self
+            .storage
+            .as_ref()
+            .expect("Persistent Cache storage should be available for publication");
+        let before_entries = storage
+            .lock()
+            .expect("Persistent Cache storage mutex should not be poisoned")
+            .entry_count();
         let queued_items = self.pending.len();
         let serialization_started = Instant::now();
-        let mut batch = PackFileWriteBatch::new();
-        if let Some(pack_file) = &self.pack_file {
-            pack_file
-                .lock()
-                .expect("PackFile mutex should not be poisoned")
-                .copy_access_updates_to(&mut batch);
-        }
+        let mut batch = TurboPersistenceWriteBatch::new();
+        storage
+            .lock()
+            .expect("Persistent Cache storage mutex should not be poisoned")
+            .copy_access_updates_to(&mut batch);
         for (address, entry) in &self.pending {
             let pack_address = address.to_pack_file_address();
             let pack_etag = entry.etag.as_ref().map(CacheETag::to_pack_file_etag);
@@ -424,9 +454,11 @@ impl PackFileCacheLayer {
             serialization_started.elapsed().as_micros()
         ));
         let store_started = Instant::now();
-        PackFile::publish_batch_with_options(
-            root,
-            Some(guard),
+        let mut storage = storage
+            .lock()
+            .expect("Persistent Cache storage mutex should not be poisoned");
+        let publication = storage.publish(
+            guard,
             self.publication_base,
             batch,
             PackFilePublicationOptions::new(
@@ -435,18 +467,23 @@ impl PackFileCacheLayer {
             ),
         )?;
         self.pending.clear();
-        let pack_file =
-            PackFile::open_with_options(root, self.serializer.clone(), self.open_options);
-        let after_entries = pack_file.entry_count();
+        let after_entries = storage.entry_count();
         self.diagnostics.profile(format!(
-            "store items={queued_items} duration_us={}; garbage collection removed_items={}; merge packs=0; split packs=0; compaction packs=0",
+            "store items={queued_items} duration_us={}; garbage collection removed_items={}; turbo-persistence transactions={} compaction={}",
             store_started.elapsed().as_micros(),
-            before_entries.saturating_sub(after_entries)
+            before_entries.saturating_sub(after_entries),
+            publication.transaction_count,
+            publication.compaction
         ));
+        if let Some(error) = publication.compaction_error {
+            self.diagnostics.warn(format!(
+                "turbo-persistence compaction failed after the cache publication committed: {error}"
+            ));
+        }
         self.publication_base = PublicationBase::PreserveEntries {
-            expected_revision: pack_file.revision(),
+            expected_revision: storage.revision(),
         };
-        self.pack_file = Some(Arc::new(Mutex::new(pack_file)));
+        drop(storage);
         self.reader_generation = self.reader_generation.wrapping_add(1);
         self.active = true;
         Ok(())
@@ -474,10 +511,10 @@ impl PackFileCacheLayer {
         } else {
             build_dependency_snapshot_strategy
         };
-        let active = self.pack_file.as_ref().is_some_and(|pack_file| {
-            pack_file
+        let active = self.storage.as_ref().is_some_and(|storage| {
+            storage
                 .lock()
-                .expect("PackFile mutex should not be poisoned")
+                .expect("Persistent Cache storage mutex should not be poisoned")
                 .guard()
                 .is_some_and(|candidate| {
                     let build_dependencies =
@@ -507,22 +544,22 @@ impl PackFileCacheLayer {
         self.publication_base = if active {
             PublicationBase::PreserveEntries {
                 expected_revision: self
-                    .pack_file
+                    .storage
                     .as_ref()
-                    .expect("active PackFile should be open")
+                    .expect("active Persistent Cache storage should be open")
                     .lock()
-                    .expect("PackFile mutex should not be poisoned")
+                    .expect("Persistent Cache storage mutex should not be poisoned")
                     .revision(),
             }
         } else {
             PublicationBase::ReplaceAll
         };
-        self.pack_file
+        self.storage
             .as_ref()
-            .and_then(|pack_file| {
-                pack_file
+            .and_then(|storage| {
+                storage
                     .lock()
-                    .expect("PackFile mutex should not be poisoned")
+                    .expect("Persistent Cache storage mutex should not be poisoned")
                     .guard()
                     .cloned()
             })
@@ -539,8 +576,8 @@ impl PackFileCacheLayer {
         if !self.active {
             return None;
         }
-        self.pack_file.as_ref().map(|pack_file| PersistentTouch {
-            pack_file: Arc::clone(pack_file),
+        self.storage.as_ref().map(|storage| PersistentTouch {
+            storage: Arc::clone(storage),
             address: address.to_pack_file_address(),
             etag: etag.map(CacheETag::to_pack_file_etag),
             stamp,
@@ -569,11 +606,11 @@ impl CacheLayer for PackFileCacheLayer {
         if !self.active {
             return CacheLayerLookup::Miss;
         }
-        let Some(pack_file) = self.pack_file.as_ref() else {
+        let Some(storage) = self.storage.as_ref() else {
             return CacheLayerLookup::Miss;
         };
         CacheLayerLookup::Deferred(PersistentRestore {
-            pack_file: Arc::clone(pack_file),
+            storage: Arc::clone(storage),
             reader_generation: self.reader_generation,
             address: address.to_pack_file_address(),
             etag: etag.map(CacheETag::to_pack_file_etag),

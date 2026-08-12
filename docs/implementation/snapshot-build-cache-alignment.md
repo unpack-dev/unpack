@@ -10,7 +10,7 @@ Snapshot validation should have one shared model across memory cache, persistent
 2. `snapshot.*Paths` are the canonical path classification entrypoint.
 3. Each compilation creates its own File System Info, seeded from watch timestamp inputs when available.
 4. Persistent cache validation may use a separate longer-lived File System Info.
-5. Cache items and cache manifests store aggregate snapshots instead of ad hoc file snapshots.
+5. Cache Items and the Persistent Cache adapter manifest store aggregate snapshots instead of ad hoc file snapshots.
 6. Snapshot semantics align with webpack, while the serialized cache schema remains Unpack-private.
 
 ## Key Decisions
@@ -87,7 +87,7 @@ Replace file-only snapshots with aggregate snapshot records.
 - Add context snapshots with directory modified time plus stable directory-entry digest in timestamp mode.
 - Add missing existence snapshots that only validate absence/presence.
 - Add snapshot merge with webpack-like map override and set union behavior.
-- Keep the serialized snapshot schema Unpack-private and encode it through bounded explicit PackFile DTO codecs; cache magic, user cache version, type identifiers, and decode rejection guard incompatible data.
+- Keep the serialized snapshot schema Unpack-private and encode it through bounded explicit Cache Item DTO codecs; the adapter manifest's user cache version, type identifiers, codec identifiers, and decode rejection guard incompatible data before restoration from turbo-persistence.
 
 Done when module, resolve, build-dependency, and resolve-build-dependency validation can all store the same aggregate snapshot type.
 
@@ -110,12 +110,12 @@ Move cache records and manifests onto aggregate snapshots.
 
 - Change `ModuleBuildRecord` to store an aggregate snapshot for module resources.
 - Change `ResolveRecord` to store an aggregate snapshot for file, context, and missing resolver inputs.
-- Store build-dependency snapshots in the persistent cache manifest as aggregate snapshots.
+- Store build-dependency snapshots in the Persistent Cache adapter manifest as aggregate snapshots.
 - Add resolve-build-dependency snapshots at the persistent cache container level.
 - Use snapshot merge when accumulating build-dependency and resolve-build-dependency snapshots.
 - Preserve cache disabled and memory cache behavior.
 
-Done when filesystem cache restore validates through aggregate snapshots and stale packs are ignored rather than partially restored.
+Done when filesystem cache restore validates through aggregate snapshots and stale containers are ignored rather than partially restored.
 
 ## Slice 7: Tests
 
